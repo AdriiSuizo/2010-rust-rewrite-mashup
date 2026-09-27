@@ -723,6 +723,7 @@ fn reliable_seq_after(a: u16, b: u16) -> bool {
 }
 
 pub fn sample_client_input(
+    skate: Option<Res<frame::SkateMode>>,
     time: Res<Time>,
     mut actions: ResMut<ClientActionInput>,
     mut look: ResMut<LookState>,
@@ -909,6 +910,9 @@ pub fn sample_client_input(
         } else if actions.client.kb.smoke.active || actions.client.kb.smoke.was_pressed {
             cmd.off_hand_index = loadout.tactical as u16;
         }
+    }
+    if skate.as_ref().is_some_and(|s| s.active) {
+        cmd.forwardmove = 0; cmd.rightmove = 0; cmd.buttons = 0;
     }
     template.cmd = cmd;
     template.ready = true;

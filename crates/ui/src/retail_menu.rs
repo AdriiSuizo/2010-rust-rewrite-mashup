@@ -762,6 +762,7 @@ pub(crate) struct MenuOccupancy<'w> {
 }
 
 pub(crate) fn handle_menu_back(
+    mut skate: Option<ResMut<frame::SkateMode>>,
     mut occupancy: MenuOccupancy,
     catalog: Option<Res<MenuCatalog>>,
     maps: Option<Res<MenuMapList>>,
@@ -780,7 +781,8 @@ pub(crate) fn handle_menu_back(
         return;
     };
     let maps = maps.as_ref().map(|m| m.0.as_slice()).unwrap_or(&[]);
-    let mut back = keys.just_pressed(KeyCode::Escape);
+    let mut back = keys.just_pressed(KeyCode::Escape)
+        || skate.as_mut().is_some_and(|s| std::mem::take(&mut s.pause_requested));
     let mut left = keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA);
     for cmd in cmds.read() {
         if matches!(cmd, crate::nav::MenuShellCmd::Back) {

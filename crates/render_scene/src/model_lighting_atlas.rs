@@ -60,15 +60,59 @@ pub fn model_lighting_atlas_write_tile(
     let Some(data) = atlas.data.as_mut() else {
         return false;
     };
+    model_lighting_write_tile_to_atlas(
+        data,
+        dims.image_height,
+        entry,
+        &model_lighting_tile_texels(tile),
+    )
+}
 
-    if let Some(flat) = ml_tile_debug_colour() {
-        let mut painted = [0u8; MODEL_LIGHTING_TILE_BYTES];
-        for texel in painted.chunks_exact_mut(4) {
-            texel.copy_from_slice(&flat);
-        }
-        return model_lighting_write_tile_to_atlas(data, dims.image_height, entry, &painted);
+/// The texels a tile write puts in the atlas: `tile` itself, or the flat
+/// `IW4L_ML_TILE_DEBUG` colour when that A/B switch is set.
+pub fn model_lighting_tile_texels(
+    tile: &[u8; MODEL_LIGHTING_TILE_BYTES],
+) -> [u8; MODEL_LIGHTING_TILE_BYTES] {
+    let Some(flat) = ml_tile_debug_colour() else {
+        return *tile;
+    };
+    let mut painted = [0u8; MODEL_LIGHTING_TILE_BYTES];
+    for texel in painted.chunks_exact_mut(4) {
+        texel.copy_from_slice(&flat);
     }
-    model_lighting_write_tile_to_atlas(data, dims.image_height, entry, tile)
+    painted
+}
+
+/// Tiles written into a model lighting atlas since the render world last took
+/// them. The per-frame cache writes the atlas image untracked and lists the
+/// tiles here, so the render world uploads a few 4x4x4 regions instead of
+/// re-extracting and re-creating the whole texture for every moving model.
+#[derive(Resource, Default)]
+pub struct ModelLightingAtlasTileWrites {
+    pub tiles: Vec<ModelLightingAtlasTileWrite>,
+}
+
+pub struct ModelLightingAtlasTileWrite {
+    pub image: AssetId<Image>,
+    /// Texel origin of the tile in every depth slice.
+    pub origin: (u32, u32),
+    /// Slice-major, row-major texels: 4 slices of 4 rows of 4 RGBA texels.
+    pub texels: [u8; MODEL_LIGHTING_TILE_BYTES],
+}
+
+impl ModelLightingAtlasTileWrites {
+    pub fn push(
+        &mut self,
+        image: AssetId<Image>,
+        entry: ModelLightingTileIndex,
+        tile: &[u8; MODEL_LIGHTING_TILE_BYTES],
+    ) {
+        self.tiles.push(ModelLightingAtlasTileWrite {
+            image,
+            origin: entry.texel_origin(),
+            texels: model_lighting_tile_texels(tile),
+        });
+    }
 }
 
 fn ml_tile_debug_colour() -> Option<[u8; 4]> {

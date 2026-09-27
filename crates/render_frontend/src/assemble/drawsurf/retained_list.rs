@@ -191,6 +191,10 @@ impl RetainedRebuildCensus {
 pub struct StaticDrawLane {
     pub generation_id: super::MaterialGenerationId,
 
+    /// The bucket counts last written to the log, so a rebuild that lands on
+    /// the same counts does not write the same line again.
+    logged_buckets: Option<[u32; 5]>,
+
     pub world_generation: WorldGeneration,
     pub colour: Vec<RetainedDrawItem>,
     pub emissive: Vec<RetainedDrawItem>,
@@ -2348,15 +2352,21 @@ fn emit_smodel_static_lane(
         .census
         .smodel_bucket_context_refused_n
         .saturating_add(consumed.context_refused);
-    diag::info!(
-        World,
-        "smodel buckets: rigid={} skinned={} cached={} unread={} consume={}",
+    let buckets = [
         list.census.smodel_bucket_rigid_n,
         list.census.smodel_bucket_skinned_n,
         list.census.smodel_bucket_cached_n,
         list.census.smodel_bucket_unread_n,
         list.census.smodel_bucket_consume_n,
-    );
+    ];
+    if list.logged_buckets != Some(buckets) {
+        list.logged_buckets = Some(buckets);
+        let [rigid, skinned, cached, unread, consume] = buckets;
+        diag::info!(
+            World,
+            "smodel buckets: rigid={rigid} skinned={skinned} cached={cached} unread={unread} consume={consume}",
+        );
+    }
     if list.smodel_pretess_indices.as_slice() != pretess.indices.as_slice() {
         list.smodel_index_layout_revision = list.smodel_index_layout_revision.wrapping_add(1);
         list.smodel_pretess_indices = Arc::new(pretess.indices);

@@ -130,6 +130,9 @@ pub struct HudImages {
     games_root: PathBuf,
 
     trees: NamespaceTrees,
+    /// The zone `trees` last adopted. Adopting stats the zone's folders on
+    /// disk, and the map zone is offered every frame.
+    adopted_zone: Option<PathBuf>,
 
     map_namespace: AssetNamespace,
     by_name: HashMap<IwdKey, Option<Handle<Image>>>,
@@ -152,6 +155,7 @@ impl HudImages {
         }
         self.games_root = root.to_path_buf();
         self.trees = NamespaceTrees::discover(&assets::GamesRoot(self.games_root.clone()));
+        self.adopted_zone = None;
         self.by_name.clear();
         self.rgba_by_name.clear();
         self.zone_uploaded = false;
@@ -160,6 +164,10 @@ impl HudImages {
     }
 
     pub fn adopt_map_zone(&mut self, zone_ff: &Path) {
+        if self.adopted_zone.as_deref() == Some(zone_ff) {
+            return;
+        }
+        self.adopted_zone = Some(zone_ff.to_path_buf());
         let namespace = assets::zone_game_for_path(zone_ff)
             .map_or(AssetNamespace::Iw4, AssetNamespace::from_zone_game);
         let mut trees = self.trees.clone();

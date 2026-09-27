@@ -1,3 +1,4 @@
+pub mod bot_model;
 mod animtree {
     pub use asset_anim::*;
 }
@@ -31,6 +32,7 @@ mod createfx {
     pub use asset_audio::*;
 }
 mod discover;
+pub mod skate_board;
 mod ent_channel {
     pub use asset_audio::*;
 }

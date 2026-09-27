@@ -279,13 +279,33 @@ pub fn tessellate(list: &Draw2dList) -> (Vec<Draw2dQuad>, Draw2dCmdCensus) {
     tessellate_fonts(list, &HashMap::new())
 }
 
+thread_local! {
+    /// The render command buffer every HUD element tessellates through. It is
+    /// 96 KiB and a dozen systems use it each frame, so it is kept rather than
+    /// allocated and zeroed per call; it goes back zeroed as far as it was used.
+    static CMD_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub fn tessellate_fonts(
     list: &Draw2dList,
     fonts: &HashMap<String, &FontDef>,
 ) -> (Vec<Draw2dQuad>, Draw2dCmdCensus) {
+    let mut raw = CMD_BUF.with(|buf| std::mem::take(&mut *buf.borrow_mut()));
+    raw.resize(hud_iw4::GFX_RENDER_CMD_BUF_SIZE as usize, 0);
+    let out = tessellate_fonts_in(list, fonts, &mut raw);
+    let used = (out.1.used as usize).min(raw.len());
+    raw[..used].fill(0);
+    CMD_BUF.with(|buf| *buf.borrow_mut() = raw);
+    out
+}
+
+fn tessellate_fonts_in(
+    list: &Draw2dList,
+    fonts: &HashMap<String, &FontDef>,
+    raw: &mut [u8],
+) -> (Vec<Draw2dQuad>, Draw2dCmdCensus) {
     let mut clip: Option<[f32; 4]> = None;
-    let mut raw = vec![0u8; hud_iw4::GFX_RENDER_CMD_BUF_SIZE as usize];
-    let mut rc = hud_iw4::GfxRenderCommandBuf::new(&mut raw);
+    let mut rc = hud_iw4::GfxRenderCommandBuf::new(raw);
     let mut mats: Vec<String> = Vec::new();
     let mut hosts: Vec<CmdHost> = Vec::new();
     let mut slots: Vec<CmdSlot> = Vec::new();

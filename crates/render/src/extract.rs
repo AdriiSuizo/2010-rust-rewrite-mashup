@@ -623,6 +623,10 @@ pub fn seal_render_frame(
         glass_mesh_surface_ranges,
         glass_mesh_revision,
         glass_mesh_vertex_refusal,
+        glass_mesh_bounds: glass_mesh
+            .as_ref()
+            .and_then(|plan| plan.bounds_share.clone())
+            .unwrap_or_default(),
     };
     if let Some(existing) = existing_world.as_ref() {
         reuse_installed_rows(
@@ -892,4 +896,29 @@ pub fn extract_geometry(
     if let Some(slot) = slot {
         slot.stamp_extract_diag(started.elapsed().as_secs_f32() * 1000.0);
     }
+}
+
+/// Moves the model lighting tiles the main world wrote since the last extract
+/// into the render world, which copies each one into the atlas texture.
+pub fn extract_model_lighting_tiles(
+    mut main_world: ResMut<bevy::render::MainWorld>,
+    mut uploads: ResMut<render_gpu::ModelLightingTileUploads>,
+) {
+    let pending = main_world
+        .get_resource::<render_scene::ModelLightingAtlasTileWrites>()
+        .is_some_and(|writes| !writes.tiles.is_empty());
+    if !pending {
+        return;
+    }
+    let mut writes = main_world.resource_mut::<render_scene::ModelLightingAtlasTileWrites>();
+    uploads.tiles.extend(
+        writes
+            .tiles
+            .drain(..)
+            .map(|tile| render_gpu::ModelLightingTileUpload {
+                image: tile.image,
+                origin: tile.origin,
+                texels: tile.texels,
+            }),
+    );
 }

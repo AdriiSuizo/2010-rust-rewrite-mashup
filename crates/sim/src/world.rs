@@ -506,6 +506,7 @@ pub struct SimState {
 
     pending_final_kill: Option<(ClientId, ClientId)>,
 
+    pub(crate) external_motion: std::collections::HashSet<ClientId>,
     last_pmove_walking: HashMap<ClientId, i32>,
 
     stuck_holdrand: u32,
@@ -642,6 +643,7 @@ impl Default for SimState {
             uavs: Vec::new(),
             pending_player_cards: Vec::new(),
             pending_final_kill: None,
+            external_motion: Default::default(),
             last_pmove_walking: HashMap::new(),
             stuck_holdrand: 0,
             last_stuck_ejects: Vec::new(),
@@ -1493,6 +1495,7 @@ impl SimState {
         self.player_dobjs.remove(&id.0);
         self.lagcomp_sample.remove(&id);
         self.lagcomp_commands.retain(|(client, _), _| *client != id);
+        self.external_motion.remove(&id);
         self.last_pmove_walking.remove(&id);
         self.last_anim_movetype.remove(&id);
     }
@@ -2799,7 +2802,18 @@ impl SimState {
         query: crate::bullet_collision::BulletTraceQuery,
         poses: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::TraceOutcome {
-        let geoms = self.current_entity_trace_geoms();
+        // Only the entities the ray can reach are copied out: every trace
+        // skips the rest on the same bounds test, and copying all of them
+        // cost more than the trace itself.
+        let geoms: Vec<EntityCollisionTraceGeom> = self
+            .entity_collision_capabilities
+            .iter()
+            .filter(|capabilities| {
+                capabilities.ray_may_hit(&self.content.data.clip_cmodels, query.start, query.end)
+                    && self.objectives.collision_active(capabilities.owner)
+            })
+            .map(EntityCollisionCapabilities::trace_geom)
+            .collect();
         let default = [];
         let players = poses.unwrap_or_else(|| {
             self.collision_history
@@ -2826,14 +2840,6 @@ impl SimState {
         query: crate::bullet_collision::BulletTraceQuery,
     ) -> crate::bullet_collision::TraceOutcome {
         self.bullet_trace(query, None)
-    }
-
-    fn current_entity_trace_geoms(&self) -> Vec<EntityCollisionTraceGeom> {
-        self.entity_collision_capabilities
-            .iter()
-            .filter(|capabilities| self.objectives.collision_active(capabilities.owner))
-            .map(EntityCollisionCapabilities::trace_geom)
-            .collect()
     }
 
     pub fn clip_brush_count(&self) -> usize {

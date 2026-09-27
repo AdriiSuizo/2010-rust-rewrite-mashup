@@ -30,3 +30,6 @@ pub use session::{
 };
 pub use settings::{DisplayResolution, GameSettings};
 pub use ui_sound::{UiPlayMusic, UiPlaySound, UiStopMusic, register_ui_sound};
+
+pub mod skate;
+pub use skate::SkateMode;

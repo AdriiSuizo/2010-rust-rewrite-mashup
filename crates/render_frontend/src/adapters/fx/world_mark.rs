@@ -596,10 +596,11 @@ fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
         xyz: [0.0; 3],
         weights: [0.0; 3],
     }; marks_iw4::R_MARK_CHOP_MAX_POINTS];
-    let mut tris =
-        vec![marks_iw4::FxMarkStagingTri::ZERO; marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS as usize];
-    let mut points =
-        vec![marks_iw4::FxMarkStagingPoint::ZERO; marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS as usize];
+    let mut tris = Vec::new();
+    let mut points = Vec::new();
+    // Whether a glass def's material takes this mark, resolved once per call:
+    // the name lookup is a scan of the whole runtime catalog.
+    let mut def_allows: Vec<Option<bool>> = vec![None; glass.defs.len()];
     for piece in 0..host.glass.init_piece_count as usize {
         if !host.glass.is_in_use(piece as u32) {
             continue;
@@ -612,34 +613,60 @@ fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
         if fx_glass_state_flags(state) & FX_GLASS_STATE_FLAG_SIMPLE != 0 {
             continue;
         }
-        let def_index = fx_glass_state_def_index(state) as usize;
-        let Some(def) = glass.defs.get(def_index) else {
-            continue;
-        };
-        let Some((name, _)) = glass.def_materials.get(def_index) else {
-            continue;
-        };
-        let Some(receiver) = runtime_material_by_name(scene, name) else {
-            continue;
-        };
-        if !marks_iw4::fx_mark_include_in_world_clip(marks_iw4::fx_mark_allow(
-            Some(receiver.info_game_flags),
-            receiver.surface_type_bits,
-            mark_bits,
-        )) {
-            continue;
-        }
         let place = &host.glass.piece_places[piece];
-        let Some(n) =
-            fx_iw4::fx_glass_intact_verts(place, state, &host.glass.geo_data, def, &mut vertices)
-        else {
-            continue;
-        };
         let pane_axis = fx_iw4::fx_unit_quat_to_axis(fx_iw4::fx_glass_place_quat(place));
         let pane_origin = fx_iw4::fx_glass_place_origin(place);
         let plane_distance: f32 = (0..3)
             .map(|k| (origin[k] - pane_origin[k]) * pane_axis[2][k])
             .sum();
+        let thickness = host.glass.half_thickness.get(piece).copied().unwrap_or(0.0);
+        // The clip volume is the box `origin ± radius` along the mark axes; its
+        // reach along the pane normal is the box's support in that direction.
+        // A pane plane (shifted by its thickness) beyond that reach cannot
+        // yield a fragment, so skip it before any lookup or vertex work.
+        let reach = radius
+            * axis
+                .iter()
+                .map(|a| (0..3).map(|k| a[k] * pane_axis[2][k]).sum::<f32>().abs())
+                .sum::<f32>();
+        if plane_distance.abs() - thickness.abs() > reach + 0.01 {
+            continue;
+        }
+        let def_index = fx_glass_state_def_index(state) as usize;
+        let Some(def) = glass.defs.get(def_index) else {
+            continue;
+        };
+        let allows = *def_allows[def_index].get_or_insert_with(|| {
+            glass
+                .def_materials
+                .get(def_index)
+                .and_then(|(name, _)| runtime_material_by_name(scene, name))
+                .is_some_and(|receiver| {
+                    marks_iw4::fx_mark_include_in_world_clip(marks_iw4::fx_mark_allow(
+                        Some(receiver.info_game_flags),
+                        receiver.surface_type_bits,
+                        mark_bits,
+                    ))
+                })
+        });
+        if !allows {
+            continue;
+        }
+        let Some(n) =
+            fx_iw4::fx_glass_intact_verts(place, state, &host.glass.geo_data, def, &mut vertices)
+        else {
+            continue;
+        };
+        if tris.is_empty() {
+            tris = vec![
+                marks_iw4::FxMarkStagingTri::ZERO;
+                marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS as usize
+            ];
+            points = vec![
+                marks_iw4::FxMarkStagingPoint::ZERO;
+                marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS as usize
+            ];
+        }
         let facing = pane_axis[2]
             .iter()
             .zip(axis[0])
@@ -651,7 +678,6 @@ fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
             facing
         };
         let normal = pane_axis[2].map(|v| if side < 0.0 { -v } else { v });
-        let thickness = host.glass.half_thickness.get(piece).copied().unwrap_or(0.0);
         for vertex in &mut vertices[..n] {
             for k in 0..3 {
                 vertex.xyz[k] += normal[k] * thickness;

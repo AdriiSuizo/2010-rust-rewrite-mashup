@@ -51,7 +51,7 @@ use super::gpu_prepare::{
 };
 use super::gpu_resources::{
     RetailSamplerTable, RuntimeProgramPortGpuExt, RuntimeUploadedImageRegistry, TextureBindRefusal,
-    UploadedTextureBind, padded_upload_len, write_buffer_padded, write_buffer_range,
+    UploadedTextureBind, padded_upload_len, write_buffer_padded,
 };
 use super::shadowmap_spot_gpu::{
     SHADOWMAP_SPOT_COLOR_FORMAT, SHADOWMAP_SPOT_DEPTH_FORMAT, ShadowmapSpotGpu,
@@ -222,6 +222,8 @@ pub struct RenderFrameData {
     pub glass_mesh_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub glass_mesh_revision: u64,
     pub glass_mesh_vertex_refusal: Option<render_frame::RetailPackedVertexRefusal>,
+    /// Per glass draw, the `[x, y, z, radius]` sphere the camera view culls by.
+    pub glass_mesh_bounds: Arc<Vec<[f32; 4]>>,
     pub exec_frame: MaterialExecFrame,
 }
 
@@ -426,7 +428,9 @@ struct GpuConstantArena {
     capacity: u64,
     bind_group: Option<BindGroup>,
 
-    uploaded: Vec<u8>,
+    /// Arena bytes the GPU buffer holds, as of the last upload. Only the length
+    /// is kept: every upload is written straight from the pack into staging.
+    uploaded_len: usize,
 
     dirty_scratch: Vec<(usize, usize)>,
 }
@@ -434,7 +438,26 @@ struct GpuConstantArena {
 #[derive(Resource, Default)]
 struct ExactConstantArena {
     generation: MaterialGenerationId,
-    gpu: GpuConstantArena,
+    /// One arena per camera prepare lane: each lane packs its own rows.
+    gpu: [GpuConstantArena; COLOUR_PREPARE_LANES],
+}
+
+/// How many workers prepare the camera's colour rows. Each lane takes a
+/// contiguous share of the ordered rows and keeps its own executor, pack cache
+/// and constant arena from frame to frame.
+const COLOUR_PREPARE_LANES: usize = 4;
+
+/// The per-lane state the camera prepare keeps between frames.
+#[derive(Default)]
+struct ColourPrepareLane {
+    run_pack: RunPackCache,
+    arena_pack: ArenaPack,
+    executor: MaterialRunExecutor,
+    prepared: Vec<PreparedExactDraw>,
+    submitted_keys: Vec<u64>,
+    pending_viewmodel_prepared: Vec<PreparedExactDraw>,
+    pending_viewmodel_keys: Vec<u64>,
+    world_exec_ready_keys: Vec<u64>,
 }
 
 #[derive(Resource, Default)]
@@ -1214,11 +1237,7 @@ struct ShadowExecScratch {
 
 #[derive(Resource, Default)]
 struct ColourSubmitScratch {
-    run_pack: RunPackCache,
-
-    arena_pack: ArenaPack,
-
-    executor: MaterialRunExecutor,
+    lanes: [ColourPrepareLane; COLOUR_PREPARE_LANES],
 
     world_exec_ready_keys: Vec<u64>,
     prepared: Vec<PreparedExactDraw>,
@@ -1232,6 +1251,10 @@ struct ColourSubmitScratch {
     skinned_tess: smodel_skinned::SmodelSkinnedTess,
 
     prepared_scene_epoch: TableEpoch,
+
+    /// The skinned pack counts last logged; a rebuilt plan with the same
+    /// counts writes nothing.
+    logged_skinned: Option<(usize, usize)>,
 }
 
 #[derive(Resource, Default)]
@@ -1410,16 +1433,6 @@ struct CameraPrepareState {
     colour_run_census: render_backend::MaterialRunCensus,
     focused_object_id: Option<u16>,
     viewmodel_held: usize,
-}
-
-impl ColourSubmitScratch {
-    fn clear(&mut self) {
-        self.world_exec_ready_keys.clear();
-        self.prepared.clear();
-        self.submitted_keys.clear();
-        self.pending_viewmodel_prepared.clear();
-        self.pending_viewmodel_keys.clear();
-    }
 }
 
 pub fn bind_group_layout_from_entries(
@@ -1837,6 +1850,16 @@ struct UnsupportedStateCensus {
 }
 
 impl UnsupportedStateCensus {
+    fn absorb(&mut self, other: Self) {
+        self.unknown_blend_factor = self
+            .unknown_blend_factor
+            .saturating_add(other.unknown_blend_factor);
+        self.unknown_blend_operation = self
+            .unknown_blend_operation
+            .saturating_add(other.unknown_blend_operation);
+        self.stencil = self.stencil.saturating_add(other.stencil);
+    }
+
     fn note(&mut self, fields: super::state::UnsupportedStateFields) {
         self.unknown_blend_factor = self
             .unknown_blend_factor
@@ -1983,6 +2006,9 @@ struct PreparedExactDraw {
     binds_spot_shadow: bool,
 
     indirect_arg: Option<u32>,
+
+    /// Which constant arena `constant_base` indexes.
+    arena_lane: u8,
 }
 
 fn bsp_draw_source(kind: &RetainedDrawKind) -> (Option<BspCameraLane>, u16, u16, u16) {
@@ -2417,13 +2443,38 @@ impl ExactPrepare<'_> {
             },
             spot_shadow_select: self.spot_shadow_select,
         };
+        let scene_index = texture_table::scene_table_index(
+            after_scene_resolve,
+            GfxPassState::from_bits(executable.state).srgb_write_enable(),
+        );
+        let extracted = self.extracted;
+        let uploaded = self.uploaded;
+        let sampler_table = self.sampler_table;
+        let spot_shadow_select = self.spot_shadow_select;
+        let device = self.device;
+        let resolve = |table: &mut ExactTextureTable| -> Result<Arc<[u32]>, GpuSubmitRefusal> {
+            let textures = port_gpu
+                .port
+                .resolve_uploaded_texture_binds(
+                    executable,
+                    surface,
+                    &extracted.world.image_handles,
+                    extracted.world.generation,
+                    uploaded,
+                    sampler_table,
+                    spot_shadow_select,
+                )
+                .map_err(GpuSubmitRefusal::TextureBind)?;
+            texture_slot_words(device, table, &textures)
+        };
+        let mut shared_guard;
         let (texture_slots, table) = match &mut self.textures {
-            PrepareTextureTables::Scene { slots, tables } => {
-                let index = texture_table::scene_table_index(
-                    after_scene_resolve,
-                    GfxPassState::from_bits(executable.state).srgb_write_enable(),
-                );
-                (&mut slots[index], &mut tables[index])
+            PrepareTextureTables::SceneShared(shared) => {
+                shared_guard = shared
+                    .lock()
+                    .expect("scene texture tables are never poisoned");
+                let refs = &mut *shared_guard;
+                (&mut refs.slots[scene_index], &mut refs.tables[scene_index])
             }
             PrepareTextureTables::Shadow { slots, table } => (&mut **slots, &mut **table),
         };
@@ -2432,19 +2483,7 @@ impl ExactPrepare<'_> {
             return Ok(Arc::clone(slots));
         }
         self.cost.tex_bind_miss_n = self.cost.tex_bind_miss_n.saturating_add(1);
-        let textures = port_gpu
-            .port
-            .resolve_uploaded_texture_binds(
-                executable,
-                surface,
-                &self.extracted.world.image_handles,
-                self.extracted.world.generation,
-                self.uploaded,
-                self.sampler_table,
-                self.spot_shadow_select,
-            )
-            .map_err(GpuSubmitRefusal::TextureBind)?;
-        let slots = texture_slot_words(self.device, table, &textures)?;
+        let slots = resolve(table)?;
         texture_slots.insert(key, Arc::clone(&slots));
         Ok(slots)
     }
@@ -2476,11 +2515,16 @@ struct PrepareCost {
     intern_miss_n: u32,
 }
 
+/// The scene texture tables, moved out of their resources while the camera
+/// prepare lanes share them.
+#[derive(Default)]
+struct SceneTextureState {
+    slots: [HashMap<BoundTextureKey, Arc<[u32]>>; 4],
+    tables: [ExactTextureTable; 4],
+}
+
 enum PrepareTextureTables<'a> {
-    Scene {
-        slots: &'a mut [HashMap<BoundTextureKey, Arc<[u32]>>; 4],
-        tables: &'a mut [ExactTextureTable; 4],
-    },
+    SceneShared(&'a std::sync::Mutex<SceneTextureState>),
     Shadow {
         slots: &'a mut HashMap<BoundTextureKey, Arc<[u32]>>,
         table: &'a mut ExactTextureTable,
@@ -2506,6 +2550,8 @@ struct ExactPrepare<'a> {
     run_pack: RunPackCache,
     cost: PrepareCost,
     skinned_tess: Option<&'a mut smodel_skinned::SmodelSkinnedTess>,
+    /// The same, shared between the camera prepare lanes.
+    skinned_shared: Option<&'a std::sync::Mutex<smodel_skinned::SmodelSkinnedTess>>,
 }
 
 #[derive(Clone, Copy)]
@@ -2533,6 +2579,15 @@ impl PrepareCost {
             self.pack_walk_n = self.pack_walk_n.saturating_add(1);
         }
     }
+    fn absorb(&mut self, other: Self) {
+        self.pack_seed_n = self.pack_seed_n.saturating_add(other.pack_seed_n);
+        self.pack_walk_n = self.pack_walk_n.saturating_add(other.pack_walk_n);
+        self.tex_bind_hit_n = self.tex_bind_hit_n.saturating_add(other.tex_bind_hit_n);
+        self.tex_bind_miss_n = self.tex_bind_miss_n.saturating_add(other.tex_bind_miss_n);
+        self.intern_hit_n = self.intern_hit_n.saturating_add(other.intern_hit_n);
+        self.intern_miss_n = self.intern_miss_n.saturating_add(other.intern_miss_n);
+    }
+
     fn note_intern_hit(&mut self) {
         self.intern_hit_n = self.intern_hit_n.saturating_add(1);
     }
@@ -3058,7 +3113,11 @@ fn same_texture_slots(prev: &PreparedExactDraw, next: &PreparedExactDraw) -> boo
 fn same_packed_constants(prev: &PreparedExactDraw, next: &PreparedExactDraw) -> bool {
     match (&prev.constants, &next.constants) {
         (Some(left), Some(right)) => Arc::ptr_eq(left, right) || left == right,
-        (None, None) => prev.constant_base.is_some() && prev.constant_base == next.constant_base,
+        (None, None) => {
+            prev.constant_base.is_some()
+                && prev.constant_base == next.constant_base
+                && prev.arena_lane == next.arena_lane
+        }
         _ => false,
     }
 }
@@ -3346,7 +3405,8 @@ fn submit_exact_draw_run<'a>(
     let mut bound_tess = None;
     let mut bound_smc_off = None;
     let mut bound_depth = None;
-    let mut constants_bound = false;
+    let mut bound_arena = None;
+    let mut textures_bound = false;
 
     let indirect_args = indirect.buffer();
     let mut batch = indirect::IndirectBatch::default();
@@ -3386,9 +3446,13 @@ fn submit_exact_draw_run<'a>(
         if draw.count == 0 {
             continue;
         }
-        let (Some(constant_base), Some(constants_bind)) =
-            (draw.constant_base, constant_arena.gpu.bind_group.as_ref())
-        else {
+        let (Some(constant_base), Some(constants_bind)) = (
+            draw.constant_base,
+            constant_arena
+                .gpu
+                .get(usize::from(draw.arena_lane))
+                .and_then(|arena| arena.bind_group.as_ref()),
+        ) else {
             *refused_draws = refused_draws.saturating_add(1);
             *last_refusal = Some(GpuSubmitRefusal::ConstantArenaMissing);
             continue;
@@ -3478,11 +3542,15 @@ fn submit_exact_draw_run<'a>(
             bound_depth = Some((draw.depth_min, draw.depth_max));
         }
 
-        if !constants_bound {
+        if bound_arena != Some(draw.arena_lane) {
+            issue_indirect_batch!();
             pass.set_bind_group(0, constants_bind, &[]);
-            pass.set_bind_group(1, textures_bind, &[]);
-            constants_bound = true;
+            bound_arena = Some(draw.arena_lane);
             record_n.group0 = record_n.group0.saturating_add(1);
+        }
+        if !textures_bound {
+            pass.set_bind_group(1, textures_bind, &[]);
+            textures_bound = true;
             record_n.group1 = record_n.group1.saturating_add(1);
         }
         if draw.tess == ExactTessBind::World {
@@ -4636,6 +4704,7 @@ fn prepare_shadowmap_spot(
         run_pack: RunPackCache::default(),
         cost: PrepareCost::default(),
         skinned_tess: Some(skinned_tess),
+        skinned_shared: None,
     };
     let target = ExactPrepareTarget {
         color: SHADOWMAP_SPOT_COLOR_FORMAT,
@@ -5100,6 +5169,7 @@ fn prepare_shadowmap_sun(
         run_pack: RunPackCache::default(),
         cost: PrepareCost::default(),
         skinned_tess: Some(skinned_tess),
+        skinned_shared: None,
     };
     let mut miss = 0u32;
     let mut miss_rows = BTreeMap::<String, u32>::new();
@@ -5672,7 +5742,7 @@ impl ExactPrepare<'_> {
         binds_spot_shadow: bool,
         out: &mut Vec<PreparedExactDraw>,
     ) -> Result<usize, GpuSubmitRefusal> {
-        let after_scene_resolve = matches!(self.textures, PrepareTextureTables::Scene { .. })
+        let after_scene_resolve = matches!(self.textures, PrepareTextureTables::SceneShared(_))
             && (item.camera_region == Some(asset_iw4::CAMERA_REGION_EMISSIVE)
                 || matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
                 || matches!(item.kind, RetainedDrawKind::Glass { .. })
@@ -5765,12 +5835,18 @@ impl ExactPrepare<'_> {
                     )
                 }
                 Some(lighting_iw4::SmodelSurfPath::Skinned) => {
-                    let tess = self
-                        .skinned_tess
-                        .as_mut()
-                        .ok_or(GpuSubmitRefusal::SmodelSkinnedDestMissing { placement })?;
-                    let (start, count) =
-                        tess.append_draw(self.extracted, placement, surface, world_from_local)?;
+                    let (start, count) = match (self.skinned_tess.as_mut(), self.skinned_shared) {
+                        (Some(tess), _) => {
+                            tess.append_draw(self.extracted, placement, surface, world_from_local)?
+                        }
+                        (None, Some(shared)) => shared
+                            .lock()
+                            .expect("skinned static model cache is never poisoned")
+                            .append_draw(self.extracted, placement, surface, world_from_local)?,
+                        (None, None) => {
+                            return Err(GpuSubmitRefusal::SmodelSkinnedDestMissing { placement });
+                        }
+                    };
                     if count == 0 {
                         return Err(GpuSubmitRefusal::EmptySmodelIndexRange { surface });
                     }
@@ -6060,6 +6136,7 @@ impl ExactPrepare<'_> {
                     binds_spot_shadow,
 
                     indirect_arg: None,
+                    arena_lane: 0,
                 });
             }
             Ok(())
@@ -6081,38 +6158,44 @@ fn resolve_arena_base(base: u32, identity_rows: u32) -> u32 {
     }
 }
 
-fn refill_arena_uploaded(uploaded: &mut Vec<u8>, identity: &[u8], placed: &[u8], reserved: usize) {
-    let reserved = reserved.max(identity.len());
-    uploaded.clear();
-    uploaded.extend_from_slice(identity);
-    uploaded.resize(reserved, 0);
-    uploaded.extend_from_slice(placed);
-}
-
-/// Refill `[start, end)` of the staging copy from the three regions behind it:
-/// the identity span, the zero padding up to `reserved`, then the placed span.
-/// Same result as writing the range one byte at a time, in whole-slice copies.
-fn refill_uploaded_span(
-    uploaded: &mut [u8],
+/// Write `[start, end)` of the arena into `buffer`, taken straight from the
+/// three regions behind it: the identity span, the zero padding up to
+/// `reserved`, then the placed span. Bytes past the placed span are zero, so
+/// the padded tail of a whole-arena upload needs no separate write.
+fn write_arena_span(
+    queue: &RenderQueue,
+    buffer: &Buffer,
     identity: &[u8],
     placed: &[u8],
     reserved: usize,
     start: usize,
     end: usize,
 ) {
+    let Some(size) = NonZeroU64::new(end.saturating_sub(start) as u64) else {
+        return;
+    };
+    let mut view = queue
+        .write_buffer_with(buffer, start as u64, size)
+        .expect("constant arena upload fits its buffer");
     let identity_end = end.min(identity.len());
     if start < identity_end {
-        uploaded[start..identity_end].copy_from_slice(&identity[start..identity_end]);
+        view.slice(0..identity_end - start)
+            .copy_from_slice(&identity[start..identity_end]);
     }
     let pad_start = start.max(identity.len());
     let pad_end = end.min(reserved);
     if pad_start < pad_end {
-        uploaded[pad_start..pad_end].fill(0);
+        view.slice(pad_start - start..pad_end - start).fill(0);
     }
     let placed_start = start.max(reserved);
-    if placed_start < end {
-        uploaded[placed_start..end]
-            .copy_from_slice(&placed[placed_start - reserved..end - reserved]);
+    let placed_end = end.min(reserved.saturating_add(placed.len()));
+    if placed_start < placed_end {
+        view.slice(placed_start - start..placed_end - start)
+            .copy_from_slice(&placed[placed_start - reserved..placed_end - reserved]);
+    }
+    let tail_start = start.max(placed_end).max(pad_end);
+    if tail_start < end {
+        view.slice(tail_start - start..end - start).fill(0);
     }
 }
 fn grow_identity_reserved(current: usize, needed: usize) -> usize {
@@ -6726,13 +6809,13 @@ fn upload_packed_arena<'a>(
             mapped_at_creation: false,
         }));
         arena.bind_group = None;
-        arena.uploaded.clear();
+        arena.uploaded_len = 0;
         perf::Counter::CounterArenaReallocN.emit(1.0);
     }
 
     // Taken where the upload is chosen, before any branch below: sizes the pack
     // selected against what the queue was handed.
-    let old_len = arena.uploaded.len();
+    let old_len = arena.uploaded_len;
     let plan = plan_arena_upload(old_len, total_len, resize, full_upload, dirty.is_empty());
     perf::Counter::CounterArenaUsedBytes.emit(total_len as f64);
     perf::Counter::CounterArenaCapacityBytes.emit(arena.capacity as f64);
@@ -6752,13 +6835,17 @@ fn upload_packed_arena<'a>(
         ArenaUploadPlan::Idle => {}
         ArenaUploadPlan::Full => {
             if total_len > 0 {
-                refill_arena_uploaded(&mut arena.uploaded, identity, placed, reserved);
-                write_buffer_padded(
+                write_arena_span(
                     queue,
                     arena.buffer.as_ref().expect("constant arena exists"),
-                    &arena.uploaded,
+                    identity,
+                    placed,
+                    reserved,
+                    0,
+                    padded_upload_len(total_len),
                 );
-                uploaded_bytes = arena.uploaded.len();
+                arena.uploaded_len = total_len;
+                uploaded_bytes = total_len;
                 upload_calls = 1;
                 if resize {
                     perf::Counter::CounterArenaFullResize.emit(1.0);
@@ -6774,11 +6861,7 @@ fn upload_packed_arena<'a>(
             // list; shrinkage truncates it, and the dropped tail is dead bytes
             // no draw addresses.
             let grew = total_len > old_len;
-            if grew {
-                arena.uploaded.resize(total_len, 0);
-            } else {
-                arena.uploaded.truncate(total_len);
-            }
+            arena.uploaded_len = total_len;
             let mut gpu_ranges = std::mem::take(&mut arena.dirty_scratch);
             gpu_ranges.clear();
             gpu_ranges.extend(
@@ -6792,18 +6875,19 @@ fn upload_packed_arena<'a>(
             }
             coalesce_gpu_dirty(&mut gpu_ranges);
             for &(start, end) in gpu_ranges.iter() {
-                let Some((start, end)) = aligned_backing_span(start, end, arena.uploaded.len())
-                else {
+                let Some((start, end)) = aligned_backing_span(start, end, total_len) else {
                     continue;
                 };
-                refill_uploaded_span(&mut arena.uploaded, identity, placed, reserved, start, end);
                 upload_calls = upload_calls.saturating_add(1);
                 uploaded_bytes = uploaded_bytes.saturating_add(end.saturating_sub(start));
-                write_buffer_range(
+                write_arena_span(
                     queue,
                     arena.buffer.as_ref().expect("constant arena exists"),
-                    start as u64,
-                    &arena.uploaded[start..end],
+                    identity,
+                    placed,
+                    reserved,
+                    start,
+                    end,
                 );
             }
             gpu_ranges.clear();

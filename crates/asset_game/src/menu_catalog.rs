@@ -112,19 +112,43 @@ pub struct MenuDef {
     pub float_exp: Vec<(u32, String)>,
 
     pub on_open_local_vars: Vec<MenuSetLocalVar>,
+
+    /// `expr_dvars` read into `(row, name)` byte ranges on first use: menu
+    /// expressions look their dvars up every frame, and re-tokenising the
+    /// whole list for each lookup was most of the HUD's expression time.
+    expr_dvar_rows: std::sync::OnceLock<Vec<(i32, std::ops::Range<usize>)>>,
 }
 
 impl MenuDef {
     pub fn static_dvar_name(&self, index: i32) -> Option<&str> {
-        let mut tokens = self.expr_dvars.split_whitespace();
-        while let (Some("d"), Some(row), Some(name)) = (tokens.next(), tokens.next(), tokens.next())
-        {
-            if row.parse::<i32>().ok() == Some(index) {
-                return Some(name);
-            }
-        }
-        None
+        self.expr_dvar_rows
+            .get_or_init(|| expr_dvar_rows(&self.expr_dvars))
+            .iter()
+            .find(|(row, _)| *row == index)
+            .map(|(_, name)| &self.expr_dvars[name.clone()])
     }
+
+    pub fn set_expr_dvars(&mut self, expr_dvars: String) {
+        self.expr_dvars = expr_dvars;
+        self.expr_dvar_rows = std::sync::OnceLock::new();
+    }
+}
+
+/// Every `d <row> <name>` triple of an `expr_dvars` list, in order, as the row
+/// and the byte range of its name. A triple whose row does not parse still
+/// takes its place, so the first match for a row is the one a linear read of
+/// the list would find.
+fn expr_dvar_rows(list: &str) -> Vec<(i32, std::ops::Range<usize>)> {
+    let base = list.as_ptr() as usize;
+    let mut tokens = list.split_whitespace();
+    let mut rows = Vec::new();
+    while let (Some("d"), Some(row), Some(name)) = (tokens.next(), tokens.next(), tokens.next()) {
+        let start = name.as_ptr() as usize - base;
+        if let Ok(row) = row.parse::<i32>() {
+            rows.push((row, start..start + name.len()));
+        }
+    }
+    rows
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1032,7 +1056,7 @@ impl AssetLinkSink for MenuSink {
             });
         def.sound_name = rec.sound_name.to_owned();
         def.window_background = rec.window_background.to_owned();
-        def.expr_dvars = rec.expr_dvars.to_owned();
+        def.set_expr_dvars(rec.expr_dvars.to_owned());
         def.fullscreen = rec.fullscreen;
         def.rect = MenuRect::from(rec.rect);
         Ok(())

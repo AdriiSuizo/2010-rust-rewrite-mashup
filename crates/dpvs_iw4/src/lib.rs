@@ -91,7 +91,7 @@ pub use scene_ent::{
     filter_dyn_pos_into_cells, filter_scene_ent_into_all_cells, filter_scene_ent_into_cells,
     scene_ent_box_reaches_cell, scene_ent_cell_bits_len, scene_ent_cell_row,
     scene_ent_cell_row_second_pass, scene_ent_cell_walk_bits, scene_ent_cell_walk_words,
-    scene_ent_in_cell, unfilter_scene_ent_from_cells_view0,
+    scene_ent_cells, scene_ent_in_cell, unfilter_scene_ent_from_cells_view0,
 };
 pub use scene_ent_bounds::{
     DObjAnimMat, GFX_CFG_ENT_COUNT, SCENE_DOBJ_GATE_BOUNDED, SCENE_DOBJ_GATE_FAILED,

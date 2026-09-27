@@ -286,6 +286,7 @@ pub struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(Update, crate::debug_move::update_skate_overlay.in_set(ClientSet::Ui));
         app.init_resource::<ConsoleSettings>()
             .init_resource::<ConsoleState>()
             .init_resource::<frame::HudInputView>()
@@ -415,6 +416,7 @@ fn isolate_gameplay_input(
 }
 
 fn publish_client_action_input(
+    mut skate: ResMut<frame::SkateMode>,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
@@ -427,6 +429,8 @@ fn publish_client_action_input(
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
 ) {
+    skate.input_blocked = console.open || menu.0;
+    if !skate.input_blocked && keys.just_pressed(KeyCode::KeyJ) { skate.toggle_requested = true; }
     hud_input.menu_open = menu.0;
     if binds.is_changed() || hud_input.use_key.is_none() {
         hud_input.use_key = binds

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use bevy::platform::collections::{HashMap, HashSet};
 
 use anim_iw4::{
     DOBJ_COMPUTE_BOUNDS_MODEL_LIMIT, DOBJ_RADIUS_PARENT_ROOT, dobj_compute_bounds_radius,
@@ -18,8 +18,8 @@ use crate::prepare::scene::world::WorldScene;
 use render_anim::SessionViewmodel;
 
 pub use render_scene::{
-    ModelLightingOwner, ModelLightingRequest, ModelLightingRequests, ResolvedModelLighting,
-    ResolvedModelLightingTable,
+    ModelLightingAtlasTileWrites, ModelLightingOwner, ModelLightingRequest, ModelLightingRequests,
+    ResolvedModelLighting, ResolvedModelLightingTable,
 };
 
 #[derive(Resource)]
@@ -116,7 +116,7 @@ impl WorldModelLightingCache {
         origin: [f32; 3],
         atlas: &WorldModelLightingAtlas,
         scene: Option<&WorldScene>,
-        images: &mut Assets<Image>,
+        (images, tile_writes): (&mut Assets<Image>, &mut ModelLightingAtlasTileWrites),
         lookup_fallback: u8,
         allow_moved_reuse: bool,
     ) -> u32 {
@@ -223,12 +223,30 @@ impl WorldModelLightingCache {
                             );
                         }
                     }
-                    if let (Some(entry), Some(mut img)) = (
+                    // Untracked: a tracked write re-extracts and re-creates the
+                    // whole atlas texture. The tile goes to the GPU on its own
+                    // through `tile_writes`.
+                    if let (Some(entry), Some(img)) = (
                         ModelLightingTileIndex::from_handle(handle),
-                        images.get_mut(&atlas.image),
+                        images.get_mut_untracked(&atlas.image),
                     ) {
-                        let _ =
-                            model_lighting_atlas_write_tile(&mut *img, dims, entry, &sampled.tile);
+                        let mut tile = sampled.tile;
+                        // The local character import can tune its own ambient response.
+                        // Its allocation is separate from Eye, map objects and stock players.
+                        if matches!(key, ModelLightingOwner::LocalBotOverride(_)) {
+                            let gain = assets::bot_model::local_bot_model()
+                                .map_or(1.0, |model| model.lighting_gain);
+                            for texel in tile.chunks_exact_mut(4) {
+                                for channel in &mut texel[..3] {
+                                    *channel =
+                                        (f32::from(*channel) * gain).round().clamp(0.0, 255.0)
+                                            as u8;
+                                }
+                            }
+                        }
+                        if model_lighting_atlas_write_tile(img, dims, entry, &tile) {
+                            tile_writes.push(atlas.image.id(), entry, &tile);
+                        }
                     }
                     self.lighting_info[slot as usize] = lighting_iw4::lighting_info_from_bytes(
                         sampled.picked_primary,
@@ -382,10 +400,19 @@ pub(crate) fn update_dirty_model_lighting(
     atlas: Option<Res<WorldModelLightingAtlas>>,
     scene: Option<Res<WorldScene>>,
     images: ResMut<Assets<Image>>,
+    tile_writes: ResMut<ModelLightingAtlasTileWrites>,
     requests: ResMut<ModelLightingRequests>,
     resolved: ResMut<ResolvedModelLightingTable>,
 ) {
-    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved, false);
+    drain_model_lighting_requests(
+        cache,
+        atlas,
+        scene,
+        (images, tile_writes),
+        requests,
+        resolved,
+        false,
+    );
 }
 
 pub(crate) fn update_glass_dyn_lighting(
@@ -393,10 +420,19 @@ pub(crate) fn update_glass_dyn_lighting(
     atlas: Option<Res<WorldModelLightingAtlas>>,
     scene: Option<Res<WorldScene>>,
     images: ResMut<Assets<Image>>,
+    tile_writes: ResMut<ModelLightingAtlasTileWrites>,
     requests: ResMut<ModelLightingRequests>,
     resolved: ResMut<ResolvedModelLightingTable>,
 ) {
-    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved, true);
+    drain_model_lighting_requests(
+        cache,
+        atlas,
+        scene,
+        (images, tile_writes),
+        requests,
+        resolved,
+        true,
+    );
 }
 
 pub(crate) fn update_fx_dyn_lighting(
@@ -404,17 +440,26 @@ pub(crate) fn update_fx_dyn_lighting(
     atlas: Option<Res<WorldModelLightingAtlas>>,
     scene: Option<Res<WorldScene>>,
     images: ResMut<Assets<Image>>,
+    tile_writes: ResMut<ModelLightingAtlasTileWrites>,
     requests: ResMut<ModelLightingRequests>,
     resolved: ResMut<ResolvedModelLightingTable>,
 ) {
-    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved, false);
+    drain_model_lighting_requests(
+        cache,
+        atlas,
+        scene,
+        (images, tile_writes),
+        requests,
+        resolved,
+        false,
+    );
 }
 
 fn drain_model_lighting_requests(
     cache: Option<ResMut<WorldModelLightingCache>>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
     scene: Option<Res<WorldScene>>,
-    mut images: ResMut<Assets<Image>>,
+    (mut images, mut tile_writes): (ResMut<Assets<Image>>, ResMut<ModelLightingAtlasTileWrites>),
     mut requests: ResMut<ModelLightingRequests>,
     mut resolved: ResMut<ResolvedModelLightingTable>,
     prune_glass: bool,
@@ -453,7 +498,7 @@ fn drain_model_lighting_requests(
                 request.origin,
                 atlas,
                 scene,
-                &mut images,
+                (&mut images, &mut tile_writes),
                 request.lookup_fallback,
                 moving_glass,
             );

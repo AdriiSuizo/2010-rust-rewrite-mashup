@@ -9,5 +9,10 @@ description = "Process diagnostics: Channel/Level sinks, JSONL traces, counting 
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# The Windows process heap serialises every allocation behind one lock; the
+# frame allocates enough that the heap alone was a quarter of the main thread.
+[target.'cfg(windows)'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [lints]
 workspace = true
