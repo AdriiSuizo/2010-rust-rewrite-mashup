@@ -4440,7 +4440,8 @@ fn record_shadowmap_draws<'a>(
     let mut bound_depth = None;
     let mut constants_bound = false;
     let mut indexed = 0u32;
-    for draw in draws {
+    // A map standing in for a Minecraft world casts no shadows.
+    for draw in draws.into_iter().filter(|draw| !draw.minecraft_hidden) {
         let Some(gpu_pipeline) = registry.ready(draw.pipeline) else {
             *miss = miss.saturating_add(1);
             *miss_rows.entry("PipelineNotReady".into()).or_default() += 1;

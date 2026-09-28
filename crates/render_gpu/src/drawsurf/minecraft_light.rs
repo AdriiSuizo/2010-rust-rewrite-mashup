@@ -309,8 +309,9 @@ fn mc_exit(p: vec3<f32>, colour: vec4<f32>) -> vec4<f32> {
     if mode == 0.0 {
         return colour;
     }
-    // Map units to blocks: X east, Z up to Y up, Y north to -Z.
-    let block = mc_light.block_origin.xyz + vec3<f32>(p.x, p.z, -p.y) / 40.0;
+    // Map units to blocks (36 a block, as `sim::voxel::BLOCK`): X east, Z up
+    // to Y up, Y north to -Z.
+    let block = mc_light.block_origin.xyz + vec3<f32>(p.x, p.z, -p.y) / 36.0;
     var level = vec2<f32>(mc_light.environment[3].w, mc_light.block_origin.w);
     if mode == 1.0 {
         let rel = (block - mc_light.volume.xyz) / mc_light.volume.w;

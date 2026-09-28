@@ -195,11 +195,14 @@ impl WorldModelLightingCache {
                 self.body_handles.remove(&key);
                 return 0;
             };
-            match assets::sample_light_grid_with_lookup_fallback(
-                &grid.view(),
-                origin,
-                lookup_fallback,
-            ) {
+            // The Minecraft world is lit by its own lightmap, applied on top;
+            // the grid of the map it stands in for says nothing about it.
+            let sampled = if sim::voxel::active() {
+                assets::neutral_light_grid_sample(&grid.view())
+            } else {
+                assets::sample_light_grid_with_lookup_fallback(&grid.view(), origin, lookup_fallback)
+            };
+            match sampled {
                 Ok(sampled) => {
                     if key == ModelLightingOwner::Eye {
                         self.eye_atpoint_path = Some(format!("{:?}", sampled.path));

@@ -361,7 +361,8 @@ pub use model_lighting::{
     collect_smodel_lighting_origins, collect_t5_smodel_lighting_origins, grid_view_from_geometry,
     lit_fragment_mid_grey_from_tile, lit_fragment_white_from_tile,
     lit_fragment_white_from_tile_normal, lit_fragment_white_from_tile_texel,
-    lit_fragment_white_sun_add, mean_tile_rgba01, packed_lighting_for_origins, sample_light_grid,
+    lit_fragment_white_sun_add, mean_tile_rgba01, neutral_light_grid_sample,
+    packed_lighting_for_origins, sample_light_grid,
     sample_light_grid_with_lookup_fallback, sample_light_grid_with_sight, tile_chroma_span,
     tile_corners_match_compress,
 };

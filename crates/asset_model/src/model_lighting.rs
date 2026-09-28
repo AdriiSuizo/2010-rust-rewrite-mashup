@@ -450,6 +450,55 @@ pub fn sample_light_grid_with_lookup_fallback(
     sample_light_grid_at(grid, pos, None, lookup_fallback)
 }
 
+/// A sample for a world the grid does not describe: the grid's default
+/// colours averaged to one grey in every direction, lit by the sun. It is the
+/// same wherever it is taken.
+pub fn neutral_light_grid_sample(grid: &GridView<'_>) -> Result<SampledLighting, BlockedReason> {
+    if grid.color_encoding != LightGridColorEncoding::Rgb8 {
+        return Err(BlockedReason::TruncatedZoneData);
+    }
+    let row = light_grid_default_colors_index(grid.color_count)
+        .and_then(|index| grid.colors_row(index))
+        .ok_or(BlockedReason::TruncatedZoneData)?;
+    let mut colors = [0u8; LIGHT_GRID_COLORS_BYTE_COUNT];
+    colors.copy_from_slice(row);
+    let (sum, count) = colors
+        .chunks_exact(3)
+        .fold((0u32, 0u32), |(sum, count), rgb| {
+            (sum + u32::from(rgb[0]) + u32::from(rgb[1]) + u32::from(rgb[2]), count + 3)
+        });
+    let grey = (sum / count.max(1)) as u8;
+    for rgb in colors.chunks_exact_mut(3) {
+        rgb.fill(grey);
+    }
+    let compressed =
+        light_grid_compress_colors(&colors, 0xff).ok_or(BlockedReason::TruncatedZoneData)?;
+    let mut tile = [0u8; MODEL_LIGHTING_TILE_BYTES];
+    if !light_grid_expand_shell_to_tile_rgba(&colors, compressed.weight, &mut tile) {
+        return Err(BlockedReason::TruncatedZoneData);
+    }
+    let sun = u8::try_from(grid.sun_primary_light_index.max(1)).unwrap_or(1);
+    Ok(SampledLighting {
+        live_corners: 0,
+        weights: [0.0; 8],
+        path: LightGridAtPointPath::SetDefault,
+        sample_count: 0,
+        matching_primary: 0.0,
+        traced_influence: 0.0,
+        total: 0.0,
+        picked_primary: sun,
+        picked_before_remap: sun,
+        corner_primaries: [None; 8],
+        needs_trace_flag: false,
+        corners_needing_sight: 0,
+        corners_sight_cleared: 0,
+        corners_sight_suppressed: 0,
+        colors,
+        compressed: [compressed.r, compressed.g, compressed.b],
+        tile,
+    })
+}
+
 fn sample_light_grid_at(
     grid: &GridView<'_>,
     pos: [f32; 3],

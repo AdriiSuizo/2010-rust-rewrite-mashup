@@ -461,7 +461,8 @@ struct TerrainView {
 @group(0) @binding(2) var atlas_sampler: sampler;
 @group(0) @binding(3) var celestials: texture_2d<f32>;
 
-const BLOCK: f32 = 40.0;
+// Map units per block, as `sim::voxel::BLOCK`.
+const BLOCK: f32 = 36.0;
 
 // Block space to map space relative to the view.
 fn rel_from_block(position: vec3<f32>) -> vec3<f32> {

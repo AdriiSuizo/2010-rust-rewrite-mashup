@@ -10,6 +10,12 @@ pub fn is_minecraft(zone: &str) -> bool {
     zone.eq_ignore_ascii_case(ZONE)
 }
 
+/// Whether a load's zone, with or without its content namespace, is the
+/// Minecraft map.
+pub fn is_minecraft_load(zone: &str) -> bool {
+    is_minecraft(zone) || zone.split_once(':').is_some_and(|(_, rest)| is_minecraft(rest))
+}
+
 /// The MinecraftOSS checkout the world is generated from, when configured.
 pub fn root() -> Option<std::path::PathBuf> {
     let root = std::path::PathBuf::from(std::env::var_os("MINECRAFTOSS_ROOT")?);

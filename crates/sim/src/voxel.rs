@@ -10,8 +10,9 @@ use std::sync::RwLock;
 
 use crate::world::SimBrush;
 
-/// Map units per block: the 70-unit soldier stands about two blocks tall.
-pub const BLOCK: f32 = 40.0;
+/// Map units per block: the 70-unit soldier stands about two blocks tall,
+/// and a block is below the 39-unit jump, so one block can be jumped onto.
+pub const BLOCK: f32 = 36.0;
 /// Pulled back from every hit, as IW4 traces keep off surfaces.
 const SURFACE_CLIP_EPSILON: f32 = 0.125;
 const SOLID: u32 = 1;
