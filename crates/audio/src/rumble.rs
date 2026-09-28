@@ -152,6 +152,7 @@ fn update(
     mut state: Local<RumblePlayback>,
     mut output: MessageWriter<GamepadRumbleRequest>,
     settings: Res<frame::GameSettings>,
+    active: Option<Res<frame::ActivePad>>,
 ) {
     let now = clock.time();
     // Vibration off in the controller options: nothing plays.
@@ -208,7 +209,11 @@ fn update(
         intensity.strong_motor = intensity.strong_motor.max(current.strong_motor);
         intensity.weak_motor = intensity.weak_motor.max(current.weak_motor);
     }
-    let selected = gamepads.iter().min_by_key(|entity| entity.to_bits());
+    // The controller in use, else the first one connected.
+    let selected = active
+        .and_then(|active| active.0)
+        .filter(|entity| gamepads.contains(*entity))
+        .or_else(|| gamepads.iter().min_by_key(|entity| entity.to_bits()));
     if state
         .output
         .is_some_and(|(entity, _)| Some(entity) != selected)

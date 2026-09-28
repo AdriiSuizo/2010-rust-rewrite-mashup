@@ -84,6 +84,35 @@ pub(crate) fn look_rates(look: Vec2, settings: &frame::GameSettings, ads: bool, 
     [pitch_sign * shaped.y * PITCH_RATE * scale, -shaped.x * YAW_RATE * boost * scale]
 }
 
+/// Follows the controller in use: the last one with a button pressed or a
+/// stick pushed well off centre. Connections are logged with their names.
+pub(crate) fn track_active_pad(
+    gamepads: Query<(Entity, &Gamepad, Option<&Name>)>,
+    mut connections: MessageReader<bevy::input::gamepad::GamepadConnectionEvent>,
+    mut active: ResMut<frame::ActivePad>,
+) {
+    for event in connections.read() {
+        match &event.connection {
+            bevy::input::gamepad::GamepadConnection::Connected { name, .. } => {
+                diag::info!(Ui, "controller connected: {name}");
+            }
+            bevy::input::gamepad::GamepadConnection::Disconnected => {
+                diag::info!(Ui, "controller disconnected");
+            }
+        }
+    }
+    if active.0.is_some_and(|entity| gamepads.get(entity).is_err()) {
+        active.0 = None;
+    }
+    for (entity, pad, name) in &gamepads {
+        let moved = pad.left_stick().length() > 0.5 || pad.right_stick().length() > 0.5;
+        if (pad.get_just_pressed().next().is_some() || moved) && active.0 != Some(entity) {
+            diag::info!(Ui, "controller in use: {}", name.map_or("unnamed", |n| n.as_str()));
+            active.0 = Some(entity);
+        }
+    }
+}
+
 /// Menu directions repeat while held: after the first press, then this
 /// often.
 const REPEAT_DELAY: f32 = 0.4;
@@ -104,6 +133,7 @@ pub(crate) struct PadMenuKeys {
 /// closes the menu anywhere.
 pub(crate) fn drive_menus_with_pad(
     gamepads: Query<&Gamepad>,
+    active: Res<frame::ActivePad>,
     menu: Res<ui::MenuEnabled>,
     pending: Res<crate::user_settings::PendingMenuBinding>,
     time: Res<Time>,
@@ -113,7 +143,7 @@ pub(crate) fn drive_menus_with_pad(
     if let Some(key) = state.pulsed.take() {
         keys.release(key);
     }
-    let pad = gamepads.iter().next();
+    let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
     let capturing = pending.capturing_pad();
     let mut wanted: Vec<KeyCode> = Vec::new();
     if let Some(pad) = pad.filter(|_| !capturing) {

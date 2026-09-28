@@ -307,9 +307,11 @@ impl Plugin for ConsolePlugin {
                 (setup_console, crate::user_settings::load_user_settings).chain(),
             )
             .add_systems(PreUpdate, feed_console_keyboard.before(InputSystems))
+            .init_resource::<frame::ActivePad>()
             .add_systems(
                 PreUpdate,
-                crate::gamepad::drive_menus_with_pad
+                (crate::gamepad::track_active_pad, crate::gamepad::drive_menus_with_pad)
+                    .chain()
                     .after(InputSystems)
                     .before(publish_client_action_input),
             )
@@ -440,9 +442,13 @@ fn publish_client_action_input(
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
-    (gamepads, mut boost_time): (Query<&bevy::input::gamepad::Gamepad>, Local<f32>),
+    (gamepads, active, mut boost_time): (
+        Query<&bevy::input::gamepad::Gamepad>,
+        Res<frame::ActivePad>,
+        Local<f32>,
+    ),
 ) {
-    let pad = gamepads.iter().next();
+    let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
     out.pad_aim_assist = settings.pad_aim_assist;
     out.pad_move = [0.0; 2];
     out.pad_look_rate = [0.0; 2];

@@ -58,6 +58,7 @@ pub(crate) fn consume_menu_binding(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&bevy::input::gamepad::Gamepad>,
+    active: Res<frame::ActivePad>,
     mut pending: ResMut<PendingMenuBinding>,
     mut binds: ResMut<KeyBinds>,
     mut view: ResMut<ui::BindingView>,
@@ -77,6 +78,8 @@ pub(crate) fn consume_menu_binding(
         pending.armed = true;
         return;
     }
+    let gamepads: Vec<&bevy::input::gamepad::Gamepad> =
+        active.0.and_then(|entity| gamepads.get(entity).ok()).into_iter().collect();
     let pad_start = gamepads.iter().any(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
     if keys.just_pressed(KeyCode::Escape) || pad_start {
         pending.id = None;
