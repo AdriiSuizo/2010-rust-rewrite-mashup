@@ -38,6 +38,7 @@ pub struct SpawnDecision {
 pub struct MatchBootstrap {
     pub spawns: Vec<AuthoredSpawnPoint>,
     pub classes: Vec<ClassDef>,
+    pub bot_classes: Vec<ClassDef>,
 
     pub seed: u64,
 
@@ -60,6 +61,7 @@ impl Default for MatchBootstrap {
         Self {
             spawns: Vec::new(),
             classes: Vec::new(),
+            bot_classes: Vec::new(),
             seed: 0,
             kind: gamemode_iw4::GameModeKind::FreeForAll,
             allow_debug_actions: false,

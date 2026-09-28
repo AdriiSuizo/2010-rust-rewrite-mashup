@@ -539,7 +539,7 @@ fn setup_console(
         );
     }
 
-    let presets: Vec<String> = ui::default_presets()
+    let presets: Vec<String> = ui::showcase_classes()
         .iter()
         .map(|preset| preset.name.to_owned())
         .collect();

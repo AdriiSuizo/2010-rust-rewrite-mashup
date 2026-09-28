@@ -254,6 +254,14 @@ fn push_answer(world: &mut World, client: u32, answer: MenuAnswer) {
 
 const T5_DEFAULT_CLASSES: [&str; 5] = ["smg_mp", "cqb_mp", "assault_mp", "lmg_mp", "sniper_mp"];
 
+pub(crate) fn is_t5(world: &World) -> bool {
+    world
+        .resource::<Runtime>()
+        .program
+        .as_ref()
+        .is_some_and(|p| p.rules() == crate::script::Realm::T5)
+}
+
 pub(crate) fn choose_default_class(world: &mut World, client: u32, index: u8) {
     let realm = world
         .resource::<Runtime>()
@@ -264,7 +272,7 @@ pub(crate) fn choose_default_class(world: &mut World, client: u32, index: u8) {
         Some(crate::script::Realm::T5) => {
             T5_DEFAULT_CLASSES[index as usize % T5_DEFAULT_CLASSES.len()].to_owned()
         }
-        _ => format!("class{index}"),
+        _ => format!("class{}", index % 5),
     };
     answer_menu(world, client, CLASS_MENU, &response);
 }

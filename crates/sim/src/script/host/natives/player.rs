@@ -1,6 +1,7 @@
 use super::super::args::{arg, float, int, kind, optional, string, vector};
 use super::super::arrays::new_array;
 use super::super::players::{LinkView, PlayerLink};
+use super::super::tables::perk_slot_code;
 use crate::frame::FrameWorld;
 use crate::script::Namespace::Method;
 use crate::script::{Arc, NativeRegistry, Runtime, Value, runtime};
@@ -1164,6 +1165,11 @@ fn register_inventory(registry: &mut NativeRegistry) {
             &name,
             true,
         );
+        if let Some((index, code)) = perk_slot_code(world, &name)
+            && let Some(ps) = FrameWorld::from_world(world).player_mut(ClientId(client))
+        {
+            ps.perk_slots[index] = code;
+        }
         slot(world, client)?.perks.insert(name);
         Ok(Value::Undefined)
     });
@@ -1176,6 +1182,12 @@ fn register_inventory(registry: &mut NativeRegistry) {
             &name,
             false,
         );
+        if let Some((index, code)) = perk_slot_code(world, &name)
+            && let Some(ps) = FrameWorld::from_world(world).player_mut(ClientId(client))
+            && ps.perk_slots[index] == code
+        {
+            ps.perk_slots[index] = 0;
+        }
         slot(world, client)?.perks.remove(&name);
         Ok(Value::Undefined)
     });

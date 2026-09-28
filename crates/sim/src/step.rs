@@ -761,7 +761,7 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
                 index,
             } => {
                 crate::script::answer_join(world.ecs(), id.0);
-                crate::script::choose_default_class(world.ecs(), id.0, index);
+                choose_bot_class(world, *id, index);
             }
             ClientAction::MenuResponse {
                 request_id: _,
@@ -1496,6 +1496,18 @@ fn apply_give_offhand(
         EventAudience::Client(id),
         SimEvent::GiveAccepted { request_id, weapon },
     );
+}
+
+fn choose_bot_class(world: &mut FrameWorld, id: ClientId, index: u8) {
+    let t5 = crate::script::is_t5(world.ecs());
+    let bot_classes = &world.bootstrap_ref().bot_classes;
+    let def = (!bot_classes.is_empty() && !t5)
+        .then(|| bot_classes[index as usize % bot_classes.len()].clone())
+        .filter(|def| !def.locked && validate_class_content(world, def).is_ok());
+    match def {
+        Some(def) => crate::script::choose_class(world.ecs(), id.0, &def),
+        None => crate::script::choose_default_class(world.ecs(), id.0, index),
+    }
 }
 
 fn answer_custom_class(world: &mut FrameWorld, id: ClientId, menu: &str, response: &str) -> bool {

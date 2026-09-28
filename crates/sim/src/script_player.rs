@@ -694,6 +694,7 @@ pub(crate) fn set_perk(world: &mut FrameWorld, id: ClientId, name: &str, on: boo
 pub(crate) fn clear_perks(world: &mut FrameWorld, id: ClientId) {
     if let Some(ps) = world.player_mut(id) {
         ps.perks = [0; 2];
+        ps.perk_slots = [0; 8];
         ps.e_flags &= !playerstate_iw4::eflags::RADAR_JAM;
     }
 }

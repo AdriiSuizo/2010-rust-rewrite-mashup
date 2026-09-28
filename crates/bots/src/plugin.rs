@@ -247,7 +247,7 @@ fn boot_bots(
         bot.class_picks += 1;
         diag::info!(
             Sim,
-            "bots: JoinMatch+changeclass client={} class{index} request_id={class_request}",
+            "bots: JoinMatch+changeclass client={} pick={index} request_id={class_request}",
             bot.id.0,
         );
     }
@@ -539,7 +539,10 @@ fn refresh_nav(world: &SimWorld, nav: &mut BotNav, load: Option<&assets::MapLoad
     // A bake is one indivisible walk of the grid, so nothing counts up while it
     // runs; the edge count is written once, when the graph it produced is the
     // one the bots read.
-    let stage = load.map(|load| load.progress.begin(asset_transport::StageId::Navigation, None));
+    let stage = load.map(|load| {
+        load.progress
+            .begin(asset_transport::StageId::Navigation, None)
+    });
     let mut snapshot = world.clone();
     let generation = nav.graph.generation.wrapping_add(1);
     nav.pending = Some((

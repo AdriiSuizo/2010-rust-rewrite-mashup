@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 
-use crate::classes::presets::default_presets;
 use crate::classes::setup::ClassSlotState;
 use frame::{HostClassLoadouts, HostClassSlot};
 
@@ -14,15 +13,18 @@ pub struct SessionClassStore {
 
 impl Default for SessionClassStore {
     fn default() -> Self {
-        Self::from_presets()
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+        Self::from_showcase(seed)
     }
 }
 
 impl SessionClassStore {
-    pub fn from_presets() -> Self {
+    pub fn from_showcase(seed: u64) -> Self {
         Self {
-            slots: default_presets()
-                .iter()
+            slots: frame::pick_showcase(seed, 5)
+                .into_iter()
                 .map(ClassSlotState::from_preset)
                 .collect(),
             equipped: None,

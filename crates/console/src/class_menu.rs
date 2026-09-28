@@ -1,7 +1,7 @@
 use asset_core::AssetNamespace;
 use bevy::prelude::*;
 use frame::{UiMenuDvars, UiMenuRequest};
-use ui::classes::display::{category_label, class_name, label, localized, preview_image};
+use ui::classes::display::{category_label, label, localized, preview_image};
 use ui::{ClassEditRow, ClassLoadoutCatalog, ClassPickerFolder, SessionClassStore};
 
 use crate::{CommandSpec, ConsoleCommand, ConsoleRegistry};
@@ -267,11 +267,14 @@ pub(crate) fn route(
                 }
                 "ui_class_reset" => {
                     let selected = store.selected;
-                    let preset = ui::preset_at(selected).ok_or("Class is unavailable")?;
                     let slot = store
                         .slots
                         .get_mut(selected)
                         .ok_or("Class is unavailable")?;
+                    let preset = ui::showcase_classes()
+                        .iter()
+                        .find(|preset| preset.name == slot.name)
+                        .ok_or("Class has no preset to reset to")?;
                     let lock = slot.lock_reason.take();
                     *slot = ui::ClassSlotState::from_preset(preset);
                     slot.lock_reason = lock;
@@ -321,12 +324,12 @@ pub(crate) fn route(
             store
                 .slots
                 .get(at)
-                .map(|slot| class_name(slot, at, &loc))
+                .map(|slot| slot.name.clone())
                 .unwrap_or_default(),
         );
     }
     if let Some(slot) = store.slots.get(store.selected) {
-        dvars.set("ui_class_title", class_name(slot, store.selected, &loc));
+        dvars.set("ui_class_title", &slot.name);
         dvars.set("ui_class_saved_name", &slot.name);
         dvars.set("ui_class_index", store.selected.to_string());
         for row in ClassEditRow::ALL {

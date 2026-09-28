@@ -3,9 +3,9 @@ use std::f32::consts::FRAC_PI_4;
 use std::sync::Arc;
 use std::time::Instant;
 
-use asset_iw4::{SND_CURVE_MAX_KNOTS, attenuate, has_free_voice};
-use asset_core::AssetNamespace;
 use asset_audio::{SoundCatalog, lerp_range, unit_random};
+use asset_core::AssetNamespace;
+use asset_iw4::{SND_CURVE_MAX_KNOTS, attenuate, has_free_voice};
 use assets::NamespaceSoundIwd;
 use bevy::{
     audio::{AddAudioSource, AudioSink, AudioSinkPlayback, Volume},
@@ -273,10 +273,15 @@ fn update_all_channels(
 fn apply_svc_local_sound(
     mut cmds: MessageReader<SvcLocalSound>,
     adopted: Res<LastAdoptedSnapshot>,
+    announcer: Res<crate::match_voices::AnnouncerRoutes>,
     mut play: MessageWriter<crate::AliasCommand>,
 ) {
     for cmd in cmds.read() {
-        let Some(alias) = adopted.sound_alias_name(cmd.index).map(str::to_owned) else {
+        let Some((namespace, alias)) = adopted
+            .sound_alias_name(cmd.index)
+            .map(|alias| announcer.route(alias))
+            .map(|(namespace, alias)| (namespace, alias.to_owned()))
+        else {
             diag::warn!(
                 Audio,
                 "audio: svc local sound CS index {} is unresolved (typed gap)",
@@ -286,13 +291,13 @@ fn apply_svc_local_sound(
         };
         if cmd.stop {
             play.write(AliasCommand::Stop {
-                namespace: AssetNamespace::Iw4,
+                namespace,
                 alias,
                 snd_ent: Some(SND_ENT_LOCAL),
             });
         } else {
             play.write(crate::AliasCommand::Play(PlayAlias {
-                namespace: AssetNamespace::Iw4,
+                namespace,
                 alias,
                 fallback: None,
                 origin_inches: None,

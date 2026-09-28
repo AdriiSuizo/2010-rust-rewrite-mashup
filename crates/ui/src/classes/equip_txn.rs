@@ -2,7 +2,6 @@ use bevy::prelude::*;
 use net::{ClientActionInbox, ClientSet, LocalPresentClient, PresentedSnapshot};
 use sim::{ClassId, ClientAction, ClientLifecycle, SimEvent};
 
-use crate::classes::presets::preset_at;
 use crate::classes::select::{
     ClassChangeAllowed, ClassChangeBlockReason, ClassSelectOverlayOpen, ClassSelectPhase,
     ClassSelectStatus, PendingClassEquip, accept_class_equip, reject_class_equip,
@@ -42,10 +41,10 @@ pub fn apply_pending_class_equip(
         return;
     }
     let index = req.class_index;
-    if store.slots.get(index).is_none() && preset_at(index).is_none() {
+    if store.slots.get(index).is_none() {
         diag::info!(
             Ui,
-            "class equip: preset index {index} out of range (request_id={})",
+            "class equip: class index {index} out of range (request_id={})",
             req.request_id
         );
         return;

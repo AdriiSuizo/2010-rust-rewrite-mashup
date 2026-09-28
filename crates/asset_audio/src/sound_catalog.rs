@@ -945,7 +945,11 @@ impl SoundCatalog {
         }
         if ns == AssetNamespace::T5 && dir.is_empty() {
             let path = name.replace('\\', "/");
-            if let Some(relative) = path.strip_prefix("sound/")
+            let relative = path.strip_prefix("sound/").or_else(|| {
+                let (_, rest) = path.split_once('/')?;
+                rest.strip_prefix("sound/")
+            });
+            if let Some(relative) = relative
                 && let Some((directory, file)) = relative.rsplit_once('/')
             {
                 return Some((ns, directory.to_owned(), file.to_owned()));

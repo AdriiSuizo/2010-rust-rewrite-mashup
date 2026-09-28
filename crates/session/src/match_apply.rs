@@ -924,6 +924,7 @@ fn preflight_match_install(
     };
     script_dvars.push(("mapname".into(), zone.to_owned()));
     script_dvars.push(("g_gametype".into(), gametype.to_owned()));
+    script_dvars.push(("sv_maxclients".into(), "18".into()));
     for (name, value) in rules.map_or(&[][..], |rules| &rules.0) {
         match script_dvars
             .iter_mut()
@@ -1447,11 +1448,20 @@ fn install_clip_and_player(
         .map(|row| row.lock_reason.clone())
         .collect();
     let classes: Vec<sim::ClassDef> = projected.into_iter().map(|row| row.def).collect();
+    let bot_classes: Vec<sim::ClassDef> = frame::showcase_classes()
+        .iter()
+        .enumerate()
+        .map(|(index, preset)| {
+            let row = class_row(&preset.into());
+            project_class(index as u32, &row, weapons, combat, equipment).def
+        })
+        .collect();
     let locked_n = lock_reasons.iter().filter(|r| r.is_some()).count();
     let has_intermission_view = intermission_view.is_some();
     if let Err(err) = sim.bootstrap(sim::MatchBootstrap {
         spawns,
         classes,
+        bot_classes,
         seed: 0,
         kind,
         score_limit: std::env::var("IW4L_SCORE_LIMIT")
@@ -1500,23 +1510,24 @@ fn install_clip_and_player(
 pub(crate) fn bootstrap_class_rows(host: Option<&HostClassLoadouts>) -> Vec<ClassRow> {
     let fallback = HostClassLoadouts::default();
     let host = host.filter(|h| !h.slots.is_empty()).unwrap_or(&fallback);
-    host.slots
-        .iter()
-        .map(|slot| ClassRow {
-            weapons: [
-                slot.primary.clone(),
-                slot.secondary.clone(),
-                slot.lethal.clone(),
-                slot.tactical.clone(),
-            ],
-            attachments: [
-                slot.primary_attachments.clone(),
-                slot.secondary_attachments.clone(),
-            ],
-            perks: slot.perks.clone(),
-            deathstreak: slot.deathstreak.clone(),
-        })
-        .collect()
+    host.slots.iter().map(class_row).collect()
+}
+
+fn class_row(slot: &frame::HostClassSlot) -> ClassRow {
+    ClassRow {
+        weapons: [
+            slot.primary.clone(),
+            slot.secondary.clone(),
+            slot.lethal.clone(),
+            slot.tactical.clone(),
+        ],
+        attachments: [
+            slot.primary_attachments.clone(),
+            slot.secondary_attachments.clone(),
+        ],
+        perks: slot.perks.clone(),
+        deathstreak: slot.deathstreak.clone(),
+    }
 }
 
 fn install_shocks(

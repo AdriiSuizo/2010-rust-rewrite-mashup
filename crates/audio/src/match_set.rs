@@ -1,11 +1,9 @@
 use std::collections::{BTreeSet, HashSet};
 
-use asset_core::AssetNamespace;
 use asset_audio::SoundCatalog;
+use asset_core::AssetNamespace;
 use asset_game::WeaponRegistry;
-use assets::{
-    MapLoadProcess, MatchType10SoundHints, PreparedWeapons,
-};
+use assets::{MapLoadProcess, MatchType10SoundHints, PreparedWeapons};
 use bevy::prelude::*;
 use frame::{ClientSet, LaunchIdentity, MatchTornDown, ReturnedToMenu};
 
@@ -72,6 +70,7 @@ pub(crate) fn register(app: &mut App) {
     }
     app.init_resource::<AudioReady>()
         .init_resource::<MatchClipPrep>()
+        .init_resource::<crate::match_voices::AnnouncerRoutes>()
         .add_systems(
             Update,
             (
@@ -88,6 +87,7 @@ fn reset_match_audio_on_match_end(
     mut returned: MessageReader<ReturnedToMenu>,
     mut ready: ResMut<AudioReady>,
     mut prep: ResMut<MatchClipPrep>,
+    mut announcer: ResMut<crate::match_voices::AnnouncerRoutes>,
 ) {
     if torn.read().count() == 0 && returned.read().count() == 0 {
         return;
@@ -97,6 +97,7 @@ fn reset_match_audio_on_match_end(
         stage.cancel();
     }
     *prep = MatchClipPrep::default();
+    *announcer = Default::default();
 }
 
 fn queue_match_clips(
@@ -109,9 +110,11 @@ fn queue_match_clips(
     identity: Option<Res<LaunchIdentity>>,
     catalog: Option<Res<asset_game::MenuCatalog>>,
     script_sound: Option<Res<asset_audio::SessionMapScriptSound>>,
+    teams: Option<Res<asset_game::SessionTeamSettings>>,
     namespace: Option<Res<SoundBankNamespace>>,
     loading: Option<Res<MapLoadProcess>>,
     mut prep: ResMut<MatchClipPrep>,
+    mut announcer: ResMut<crate::match_voices::AnnouncerRoutes>,
     mut ready: ResMut<AudioReady>,
     silent: Option<Res<AudioSilent>>,
 ) {
@@ -121,7 +124,9 @@ fn queue_match_clips(
     if silent.is_some() {
         ready.0 = true;
         if let Some(loading) = loading.as_ref() {
-            loading.progress.record_skipped(asset_transport::StageId::Audio);
+            loading
+                .progress
+                .record_skipped(asset_transport::StageId::Audio);
         }
         diag::info!(Audio, "audio: AudioReady — Silent, no clips prepared");
         return;
@@ -135,7 +140,9 @@ fn queue_match_clips(
     let Some(clips) = clips.as_mut() else {
         ready.0 = true;
         if let Some(loading) = loading.as_ref() {
-            loading.progress.record_skipped(asset_transport::StageId::Audio);
+            loading
+                .progress
+                .record_skipped(asset_transport::StageId::Audio);
         }
         diag::info!(
             Audio,
@@ -184,11 +191,27 @@ fn queue_match_clips(
             Some(bank.as_ref()),
             identity,
         );
-        for alias in
-            crate::match_voices::team_voice_aliases(&bank.0, allies.as_deref(), axis.as_deref())
-        {
+        let voices =
+            crate::match_voices::team_voice_aliases(&bank.0, allies.as_deref(), axis.as_deref());
+        let native = teams.as_deref().map(|teams| &teams.0);
+        *announcer = crate::match_voices::AnnouncerRoutes::build(
+            &bank.0,
+            namespace.namespace,
+            [allies.as_deref(), axis.as_deref()],
+            native,
+            &voices,
+        );
+        diag::info!(
+            Audio,
+            "audio: announcer: {} of {} team voice aliases play as {:?}",
+            announcer.len(),
+            voices.len(),
+            namespace.namespace
+        );
+        for alias in &voices {
             aliases += 1;
-            request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut set);
+            let (ns, alias) = announcer.route(alias);
+            request_named(clips, &bank.0, ns, alias, &mut set);
         }
     }
     if let Some(alias) = script_sound.0.ambient_alias.as_deref() {

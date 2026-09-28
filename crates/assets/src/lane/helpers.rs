@@ -732,3 +732,150 @@ pub(crate) fn link_model_placements(
         script_gaps,
     }
 }
+
+pub(super) fn report_map_models(
+    report: &mut Vec<String>,
+    models: &PreparedMapModels,
+    authored_slots: impl std::fmt::Display,
+) {
+    if let Some(error) = models.static_error.as_ref() {
+        report.push(format!("static models: {error}"));
+    }
+    let smodels = &models.static_draw;
+    report.push(format!(
+        "static models: {}/{authored_slots} authored slots resolved to {} unique meshes ({} unresolved)",
+        smodels.resolved_count(),
+        smodels.meshes.len(),
+        smodels.gaps
+    ));
+    report.push(format!(
+        "script_model: {} placements linked (MapEnts props; separate visibility owner)",
+        models.script_instances.len()
+    ));
+    report.push(format!(
+        "script_brushmodel: {} *N placements (SP_script_brushmodel, not DrawInst)",
+        models.script_brush_models.len()
+    ));
+}
+
+pub(super) fn report_ffa_spawns(report: &mut Vec<String>, spawns: &[asset_world::SpawnPoint]) {
+    report.push(format!(
+        "ffa spawns: {} mp_dm_spawn* ({} start)",
+        spawns.len(),
+        spawns.iter().filter(|p| p.is_initial()).count()
+    ));
+}
+
+pub(super) fn report_intermission(
+    report: &mut Vec<String>,
+    view: Option<&asset_world::IntermissionView>,
+) {
+    report.push(match view {
+        Some(view) => format!(
+            "camera: mp_global_intermission origin={:?} angles={:?}",
+            view.origin, view.angles
+        ),
+        None => "camera: mp_global_intermission not found".into(),
+    });
+}
+
+pub(super) fn report_world_batches(report: &mut Vec<String>, draw: &asset_world::WorldDraw) {
+    let lightmapped = draw.surface_lightmapped.iter().filter(|&&lit| lit).count();
+    report.push(format!(
+        "world batches: {lightmapped} lightmapped, {} fallback surfaces",
+        draw.surface_lightmapped.len() - lightmapped
+    ));
+}
+
+pub(super) fn report_dpvs(report: &mut Vec<String>, draw: &asset_world::WorldDraw) {
+    report.push(format!(
+        "dpvs: cells={} planes={} nodes={} sorted={} portal_verts={} cleared_boxes={}",
+        draw.dpvs.cell_count,
+        draw.dpvs.planes.len(),
+        draw.dpvs.nodes.len(),
+        draw.dpvs.sorted_surf_index.len(),
+        draw.dpvs.portal_verts.len(),
+        draw.dpvs.cleared_boxes
+    ));
+}
+
+pub(super) fn decode_reflection_probes(
+    report: &mut Vec<String>,
+    draw: &asset_world::WorldDraw,
+    materials: &MaterialCatalog,
+) -> Vec<Option<bevy::prelude::Image>> {
+    let images: Vec<_> = draw
+        .reflection_probes
+        .iter()
+        .map(|probe| {
+            let source = materials.images.get(probe.image?)?;
+            asset_material::decode_reflection_probe_cubemap(source)
+                .map_err(|error| {
+                    report.push(format!("reflection probe {} gap: {error}", source.name))
+                })
+                .ok()
+        })
+        .collect();
+    report.push(format!(
+        "reflection probes: {}/{} cubemaps decoded",
+        images.iter().flatten().count(),
+        images.len()
+    ));
+    images
+}
+
+pub(super) fn smodel_lighting_samples(
+    report: &mut Vec<String>,
+    grid: &asset_model::OwnedLightGrid,
+    origins: Vec<(usize, [f32; 3])>,
+    placements: &[Option<StaticModelPlacement>],
+    clip: Option<&asset_world::ClipCollision>,
+) -> Vec<asset_model::SmodelLightingSample> {
+    use asset_model::model_lighting::{
+        build_smodel_lighting_samples_with_sight, census_lit_fragment_tiles,
+    };
+    use lighting_iw4::LIGHT_GRID_SIGHT_CONTENT_MASK as MASK;
+    let origins: Vec<_> = origins
+        .into_iter()
+        .filter(|(slot, _)| placements.get(*slot).is_some_and(Option::is_some))
+        .collect();
+    let tiles = match clip {
+        Some(clip_map) => {
+            let clear = |start, end| clip_map.box_sight_clear(start, end, MASK);
+            let (tiles, census) =
+                build_smodel_lighting_samples_with_sight(&grid.view(), &origins, Some(&clear));
+            report.push(format!(
+                "smodel lighting: lit={} / candidates={} (blocked row={} trunc={} empty={}; CM sight mask=0x{MASK:x} corners need={} cleared={} suppressed={})",
+                census.lit,
+                census.candidates,
+                census.blocked_unmodelled_row,
+                census.blocked_truncated,
+                census.blocked_no_live_corner,
+                census.corners_needing_sight,
+                census.corners_needing_sight.saturating_sub(census.corners_sight_suppressed),
+                census.corners_sight_suppressed,
+            ));
+            tiles
+        }
+        None => {
+            let (tiles, census) =
+                build_smodel_lighting_samples_with_sight(&grid.view(), &origins, None);
+            report.push(format!(
+                "smodel lighting: lit={} / candidates={} (no clipmap — needsTrace corners suppressed; blocked row={} trunc={} empty={})",
+                census.lit,
+                census.candidates,
+                census.blocked_unmodelled_row,
+                census.blocked_truncated,
+                census.blocked_no_live_corner,
+            ));
+            tiles
+        }
+    };
+    if let Some(frag) = census_lit_fragment_tiles(&tiles) {
+        report.push(format!(
+            "smodel lit_fragment mid-grey: tiles={} lum min={:.4} max={:.4} mean={:.4} (specular=0)",
+            frag.tiles, frag.lum_min, frag.lum_max, frag.lum_mean
+        ));
+    }
+    tiles
+}

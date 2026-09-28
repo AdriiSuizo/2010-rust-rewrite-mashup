@@ -405,25 +405,16 @@ pub(crate) fn update_scorebar(
     }
     let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
     for cmd in &mut list.cmds {
-        if let Ok(mut key) = asset_core::AssetKey::parse(&cmd.material) {
-            // IW4 scorebar expressions append `_fade` to faction icons. T5
-            // supplies the base emblem only; translate that authored IW4 variant
-            // to the selected T5 team's exact material, without probing sources.
-            if key.namespace == asset_core::AssetNamespace::T5 {
-                for icon in [teams.0.allies.as_ref(), teams.0.axis.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if key.namespace == icon.namespace
-                        && key.name.strip_suffix("_fade") == Some(icon.name.as_str())
-                    {
-                        key = icon.clone();
-                        break;
-                    }
-                }
-            }
-            cmd.material_namespace = key.namespace;
-            cmd.material = key.name;
+        if cmd.material_namespace == asset_core::AssetNamespace::T5
+            && let Some(icon) = [teams.0.allies.as_ref(), teams.0.axis.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|icon| {
+                    icon.namespace == cmd.material_namespace
+                        && cmd.material.strip_suffix("_fade") == Some(icon.name.as_str())
+                })
+        {
+            cmd.material.clone_from(&icon.name);
         }
         let _ = hud_images.get(cmd.material_namespace, &cmd.material, &mut images);
     }

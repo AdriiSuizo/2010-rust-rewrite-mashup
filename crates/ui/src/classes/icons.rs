@@ -7,8 +7,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 
-use crate::classes::presets::default_presets;
 use crate::classes::setup::picker_icon_stems;
+use frame::showcase_classes;
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct UiAssetRoot(pub Option<PathBuf>);
@@ -59,7 +59,7 @@ pub fn warm_class_select_icons(
 fn decode_class_select_icons(games: &std::path::Path) -> DecodedClassIcons {
     let started = std::time::Instant::now();
     let mut stems = Vec::new();
-    for preset in default_presets() {
+    for preset in showcase_classes() {
         if let Some(stem) = cac_weapon_image(preset.primary) {
             stems.push(stem);
         }
@@ -83,7 +83,7 @@ fn decode_class_select_icons(games: &std::path::Path) -> DecodedClassIcons {
             }
         }
         for perk in preset.perks {
-            stems.push(cac_material_iwd_stem(perk.reference));
+            stems.push(cac_material_iwd_stem(perk));
         }
         stems.push(cac_material_iwd_stem(preset.deathstreak));
     }

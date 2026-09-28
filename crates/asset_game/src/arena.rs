@@ -6,6 +6,8 @@ use crate::CapturedStringTable;
 
 pub const FACTION_ICON_COL: i32 = 5;
 
+const FACTION_VOICE_PREFIX_COL: i32 = 7;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArenaCharsets {
     pub map: String,
@@ -25,6 +27,53 @@ pub struct MapTeamSettings {
     pub axis: Option<asset_core::AssetKey>,
     pub allies_charset: Option<String>,
     pub axis_charset: Option<String>,
+    pub allies_strings: FactionStrings,
+    pub axis_strings: FactionStrings,
+    pub allies_voice: Option<String>,
+    pub axis_voice: Option<String>,
+    pub allies_music: TeamMusic,
+    pub axis_music: TeamMusic,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TeamMusic {
+    pub spawn: Option<String>,
+    pub victory: Option<String>,
+    pub defeat: Option<String>,
+    pub winning: Option<String>,
+    pub losing: Option<String>,
+}
+
+impl TeamMusic {
+    fn prefixed(prefix: &str) -> Self {
+        let music = |line: &str| Some(format!("{prefix}{line}_music"));
+        Self {
+            spawn: music("spawn"),
+            victory: music("victory"),
+            defeat: music("defeat"),
+            winning: music("winning"),
+            losing: music("losing"),
+        }
+    }
+
+    fn t5(script: &str, team: &str) -> Self {
+        let spawn =
+            crate::game_nested_string_assignment(script, &["music", &format!("spawn_{team}")]);
+        Self {
+            spawn: spawn.map(|state| format!("mus_{}", state.to_ascii_lowercase())),
+            victory: Some("mus_victory".to_owned()),
+            defeat: Some("mus_loss".to_owned()),
+            winning: Some("mus_time_running_out".to_owned()),
+            losing: Some("mus_time_running_out".to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FactionStrings {
+    pub name: Option<String>,
+    pub eliminated: Option<String>,
+    pub forfeited: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -178,6 +227,27 @@ pub fn team_settings(
         let rgb = [rgb[0]?, rgb[1]?, rgb[2]?];
         rgb.iter().all(|v| v.is_finite()).then_some(rgb)
     };
+    let prefix = |charset: &str| {
+        let prefix = table.lookup_col(charset, FACTION_VOICE_PREFIX_COL);
+        (!prefix.is_empty()).then_some(prefix)
+    };
+    let voice = |charset: &str| prefix(charset).map(|prefix| format!("{prefix}1mc_"));
+    let strings = |charset: &str| {
+        let key = |column| {
+            let key = table.lookup_col(charset, column);
+            (!key.is_empty()).then(|| key.to_owned())
+        };
+        FactionStrings {
+            name: key(1),
+            eliminated: key(3),
+            forfeited: key(4),
+        }
+    };
+    let music = |charset: Option<&str>| {
+        charset
+            .and_then(prefix)
+            .map_or_else(TeamMusic::default, TeamMusic::prefixed)
+    };
     MapTeamSettings {
         allies_color: allieschar.and_then(color),
         axis_color: axischar.and_then(color),
@@ -201,6 +271,12 @@ pub fn team_settings(
         }),
         allies_charset: allieschar.map(str::to_owned),
         axis_charset: axischar.map(str::to_owned),
+        allies_voice: allieschar.and_then(voice),
+        axis_voice: axischar.and_then(voice),
+        allies_music: music(allieschar),
+        axis_music: music(axischar),
+        allies_strings: allieschar.map_or_else(FactionStrings::default, strings),
+        axis_strings: axischar.map_or_else(FactionStrings::default, strings),
         ..Default::default()
     }
 }
@@ -547,6 +623,26 @@ pub fn t5_settings_from_teamset_gsc(script: &str) -> MapTeamSettings {
         }),
         allies_charset: asset_audio::game_string_assignment(script, "allies").map(str::to_owned),
         axis_charset: asset_audio::game_string_assignment(script, "axis").map(str::to_owned),
+        allies_strings: teamset_strings(script, "allies"),
+        axis_strings: teamset_strings(script, "axis"),
+        allies_voice: crate::game_nested_string_assignment(script, &["voice", "allies"])
+            .map(str::to_owned),
+        axis_voice: crate::game_nested_string_assignment(script, &["voice", "axis"])
+            .map(str::to_owned),
+        allies_music: TeamMusic::t5(script, "allies"),
+        axis_music: TeamMusic::t5(script, "axis"),
+    }
+}
+
+fn teamset_strings(script: &str, team: &str) -> FactionStrings {
+    let key = |suffix| {
+        crate::game_nested_string_assignment(script, &["strings", &format!("{team}_{suffix}")])
+            .map(str::to_owned)
+    };
+    FactionStrings {
+        name: key("name"),
+        eliminated: key("eliminated"),
+        forfeited: key("forfeited"),
     }
 }
 

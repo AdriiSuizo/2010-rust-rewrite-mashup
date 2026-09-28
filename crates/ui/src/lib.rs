@@ -19,7 +19,6 @@ pub use classes::icons::{
     ClassSelectIconCache, UiAssetRoot, cac_attachment_image, cac_material_iwd_stem,
     cac_weapon_image, pretty_weapon_name,
 };
-pub use classes::presets::{ClassPreset, PerkPreset, default_presets, preset_at, preset_index};
 pub use classes::select::{
     ClassChangeAllowed, ClassChangeBlockReason, ClassEquipRefusal, ClassEquipRequest,
     ClassSelectHighlight, ClassSelectOverlayOpen, ClassSelectPhase, ClassSelectStatus,
@@ -29,6 +28,7 @@ pub use classes::select::{
 pub use classes::setup::{ClassEditRow, ClassLoadoutCatalog, ClassPickerFolder, ClassSlotState};
 pub use classes::store::SessionClassStore;
 pub use frame::{AppScreen, LaunchIdentity, LaunchReport};
+pub use frame::{ClassPreset, showcase_classes};
 pub use gap_hud::GapHud;
 pub use launch_report::publish_gap_hud;
 pub use layers::{

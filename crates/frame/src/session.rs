@@ -337,87 +337,11 @@ pub struct HostClassSlot {
 impl Default for HostClassLoadouts {
     fn default() -> Self {
         Self {
-            slots: vec![
-                HostClassSlot {
-                    name: "assault".into(),
-                    primary: "iw4:weapon/ak47_mp".into(),
-                    primary_attachments: Vec::new(),
-                    secondary: "iw4:weapon/usp_mp".into(),
-                    secondary_attachments: Vec::new(),
-                    lethal: "iw4:weapon/semtex_mp".into(),
-                    tactical: "iw4:weapon/flash_grenade_mp".into(),
-                    perks: [
-                        "specialty_fastreload".into(),
-                        "specialty_bulletdamage".into(),
-                        "specialty_bulletaccuracy".into(),
-                    ],
-                    deathstreak: "specialty_copycat".into(),
-                },
-                HostClassSlot {
-                    name: "specops".into(),
-                    primary: "iw4:weapon/ump45_mp".into(),
-                    primary_attachments: Vec::new(),
-                    secondary: "iw4:weapon/usp_mp".into(),
-                    secondary_attachments: Vec::new(),
-                    lethal: "iw4:weapon/throwingknife_mp".into(),
-                    tactical: "iw4:weapon/smoke_grenade_mp".into(),
-
-                    perks: [
-                        "specialty_marathon".into(),
-                        "specialty_lightweight".into(),
-                        "specialty_heartbreaker".into(),
-                    ],
-                    deathstreak: "specialty_finalstand".into(),
-                },
-                HostClassSlot {
-                    name: "demolitions".into(),
-                    primary: "iw4:weapon/spas12_mp".into(),
-                    primary_attachments: Vec::new(),
-                    secondary: "iw4:weapon/deserteagle_mp".into(),
-                    secondary_attachments: Vec::new(),
-                    lethal: "iw4:weapon/semtex_mp".into(),
-                    tactical: "iw4:weapon/flash_grenade_mp".into(),
-
-                    perks: [
-                        "specialty_scavenger".into(),
-                        "specialty_explosivedamage".into(),
-                        "specialty_bulletaccuracy".into(),
-                    ],
-                    deathstreak: "specialty_combathigh".into(),
-                },
-                HostClassSlot {
-                    name: "sniper".into(),
-                    primary: "iw4:weapon/cheytac_mp".into(),
-                    primary_attachments: Vec::new(),
-                    secondary: "iw4:weapon/usp_mp".into(),
-                    secondary_attachments: Vec::new(),
-                    lethal: "iw4:weapon/throwingknife_mp".into(),
-
-                    tactical: "iw4:weapon/smoke_grenade_mp".into(),
-                    perks: [
-                        "specialty_bling".into(),
-                        "specialty_coldblooded".into(),
-                        "specialty_localjammer".into(),
-                    ],
-                    deathstreak: "specialty_copycat".into(),
-                },
-                HostClassSlot {
-                    name: "famas_burst".into(),
-                    primary: "iw4:weapon/famas_mp".into(),
-                    primary_attachments: Vec::new(),
-                    secondary: "iw4:weapon/beretta_mp".into(),
-                    secondary_attachments: Vec::new(),
-                    lethal: "iw4:weapon/semtex_mp".into(),
-                    tactical: "iw4:weapon/concussion_grenade_mp".into(),
-
-                    perks: [
-                        "specialty_scavenger".into(),
-                        "specialty_bulletdamage".into(),
-                        "specialty_bulletaccuracy".into(),
-                    ],
-                    deathstreak: "specialty_copycat".into(),
-                },
-            ],
+            slots: crate::showcase_classes()
+                .iter()
+                .take(5)
+                .map(HostClassSlot::from)
+                .collect(),
         }
     }
 }

@@ -1,3 +1,4 @@
+pub mod class_presets;
 pub mod retire;
 pub mod schedule;
 pub mod script_entity_notify;
@@ -6,6 +7,7 @@ pub mod session;
 pub mod settings;
 pub mod ui;
 
+pub use class_presets::{ClassPreset, pick_showcase, showcase_classes};
 pub use retire::Retiring;
 pub use schedule::{
     AUTHORITY_TOC, AuthorityBookkeeping, AuthorityEdge, AuthoritySet, CLIENT_TOC,

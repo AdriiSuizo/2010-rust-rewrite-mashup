@@ -103,6 +103,31 @@ impl ScriptSources {
         );
     }
 
+    pub(crate) fn set_table_cells(
+        &mut self,
+        table: &str,
+        key: &str,
+        cells: &[(usize, String)],
+    ) -> bool {
+        let Some(table) = self.tables.get_mut(&normalize(table)) else {
+            return false;
+        };
+        let Some(row) = table
+            .cells
+            .chunks_exact_mut(table.columns.max(1))
+            .take(table.rows)
+            .find(|row| row[0].eq_ignore_ascii_case(key))
+        else {
+            return false;
+        };
+        for (column, value) in cells {
+            if let Some(cell) = row.get_mut(*column) {
+                cell.clone_from(value);
+            }
+        }
+        true
+    }
+
     pub(crate) fn insert_source(&mut self, module: &str, source: String) {
         self.sources
             .insert(normalize(module), Ok(source.into_bytes()));

@@ -2,6 +2,10 @@ use std::path::Path;
 
 use fastfile_iw4::load_zone;
 
+use super::helpers::{
+    decode_reflection_probes, report_dpvs, report_ffa_spawns, report_intermission,
+    report_map_models, report_world_batches, smodel_lighting_samples,
+};
 use super::{
     CommonCensus, CommonWalkSink, LaneGap, LoadedWorld, MaterialPopulation, MaterialPopulationSink,
     ZoneLane, ZoneWalkSink,
@@ -11,7 +15,7 @@ use crate::{
     session_load::PreparedWorld,
 };
 use asset_core::ZoneGame;
-use asset_material::{decode_material_color_maps, decode_reflection_probe_cubemap};
+use asset_material::decode_material_color_maps;
 use asset_transport::{LoadProgress, StageId, ZoneImage, ZoneMemory};
 use asset_world::{
     WorldDrawPolicy, build_clip_collision, build_world_draw, census_entity_string_keys,
@@ -490,25 +494,7 @@ impl ZoneLane for Iw4Lane {
                         "primary lights: n={n} dir={dir} omni={omni} spot={spot} named_defs={named} falloff_width={falloff_w} (light-def name retained; atten_image filled after global absorb)"
                     ));
                 }
-                if let Some(error) = map_models.static_error.as_ref() {
-                    report.push(format!("static models: {error}"));
-                }
-                let smodels = &map_models.static_draw;
-                report.push(format!(
-                "static models: {}/{} authored slots resolved to {} unique meshes ({} unresolved)",
-                smodels.resolved_count(),
-                geometry.smodel_count,
-                smodels.meshes.len(),
-                smodels.gaps
-            ));
-                report.push(format!(
-                    "script_model: {} placements linked (MapEnts props; separate visibility owner)",
-                    map_models.script_instances.len()
-                ));
-                report.push(format!(
-                    "script_brushmodel: {} *N placements (SP_script_brushmodel, not DrawInst)",
-                    map_models.script_brush_models.len()
-                ));
+                report_map_models(&mut report, &map_models, geometry.smodel_count);
                 let asset_world::PreparedMapModels {
                     static_draw:
                         asset_world::StaticModelDraw {
@@ -526,82 +512,23 @@ impl ZoneLane for Iw4Lane {
 
                 stage.done();
                 let stage = progress.begin_scoped(StageId::MapAssets, "lighting", None);
-                let smodel_lighting_samples = {
-                    use asset_model::model_lighting::{
-                        OwnedLightGrid, build_smodel_lighting_samples_with_sight,
-                        census_lit_fragment_tiles, collect_smodel_lighting_origins,
-                    };
-                    use lighting_iw4::LIGHT_GRID_SIGHT_CONTENT_MASK;
-                    match OwnedLightGrid::from_stream(&stream, geometry.light_grid) {
-                        Some(owned) => {
-                            let origins: Vec<_> =
-                                collect_smodel_lighting_origins(&stream, geometry)
-                                    .into_iter()
-                                    .filter(|(slot, _)| {
-                                        static_model_instances
-                                            .get(*slot)
-                                            .and_then(|placement| placement.as_ref())
-                                            .is_some()
-                                    })
-                                    .collect();
-                            let (tiles, census) = if let Some(ref clip_map) = clip {
-                                let clear = |start: [f32; 3], end: [f32; 3]| {
-                                    clip_map.box_sight_clear(
-                                        start,
-                                        end,
-                                        LIGHT_GRID_SIGHT_CONTENT_MASK,
-                                    )
-                                };
-                                let (tiles, census) = build_smodel_lighting_samples_with_sight(
-                                    &owned.view(),
-                                    &origins,
-                                    Some(&clear),
-                                );
-                                report.push(format!(
-                                "smodel lighting: lit={} / candidates={} (blocked row={} trunc={} empty={}; CM sight mask=0x{LIGHT_GRID_SIGHT_CONTENT_MASK:x} corners need={} cleared={} suppressed={})",
-                                census.lit,
-                                census.candidates,
-                                census.blocked_unmodelled_row,
-                                census.blocked_truncated,
-                                census.blocked_no_live_corner,
-                                census.corners_needing_sight,
-                                census.corners_needing_sight.saturating_sub(census.corners_sight_suppressed),
-                                census.corners_sight_suppressed,
-                            ));
-                                (tiles, census)
-                            } else {
-                                let (tiles, census) = build_smodel_lighting_samples_with_sight(
-                                    &owned.view(),
-                                    &origins,
-                                    None,
-                                );
-                                report.push(format!(
-                                "smodel lighting: lit={} / candidates={} (no clipmap — needsTrace corners suppressed; blocked row={} trunc={} empty={})",
-                                census.lit,
-                                census.candidates,
-                                census.blocked_unmodelled_row,
-                                census.blocked_truncated,
-                                census.blocked_no_live_corner,
-                            ));
-                                (tiles, census)
-                            };
-                            let _ = census;
-                            if let Some(frag) = census_lit_fragment_tiles(&tiles) {
-                                report.push(format!(
-                                "smodel lit_fragment mid-grey: tiles={} lum min={:.4} max={:.4} mean={:.4} (specular=0)",
-                                frag.tiles, frag.lum_min, frag.lum_max, frag.lum_mean
-                            ));
-                            }
-                            (tiles, Some(owned))
-                        }
-                        None => {
-                            report
-                                .push("smodel lighting: none (no owned light-grid tables)".into());
-                            (Vec::new(), None)
-                        }
+                let light_grid =
+                    asset_model::OwnedLightGrid::from_stream(&stream, geometry.light_grid);
+                let smodel_lighting_samples = match &light_grid {
+                    Some(grid) => smodel_lighting_samples(
+                        &mut report,
+                        grid,
+                        asset_model::model_lighting::collect_smodel_lighting_origins(
+                            &stream, geometry,
+                        ),
+                        &static_model_instances,
+                        clip.as_ref(),
+                    ),
+                    None => {
+                        report.push("smodel lighting: none (no owned light-grid tables)".into());
+                        Vec::new()
                     }
                 };
-                let (smodel_lighting_samples, light_grid) = smodel_lighting_samples;
                 stage.done();
                 let handoff = progress.begin_scoped(StageId::MapAssets, "handoff", None);
                 let intermission_view = intermission_view(&stream);
@@ -617,11 +544,7 @@ impl ZoneLane for Iw4Lane {
                     "s1 arenas walked: map={arena_bytes} ({:.1}MiB) (ZoneMemory freed after the walk; ZoneImage dropped)",
                     arena_bytes as f64 / (1024.0 * 1024.0),
                 ));
-                report.push(format!(
-                    "ffa spawns: {} mp_dm_spawn* ({} start)",
-                    dm_spawns.len(),
-                    dm_spawns.iter().filter(|p| p.is_initial()).count()
-                ));
+                report_ffa_spawns(&mut report, &dm_spawns);
                 report.push(format!(
                     "world mesh: {} vertices, {} triangles, {} surfaces ({} skipped, {} sky)",
                     draw.stats.vertices,
@@ -645,22 +568,8 @@ impl ZoneLane for Iw4Lane {
                 "draw path: DPVS portal walk + one AABB descent per visible cell into surfaceVisData/smodelVisData"
                     .into(),
             );
-                match intermission_view {
-                    Some(view) => report.push(format!(
-                        "camera: mp_global_intermission origin={:?} angles={:?}",
-                        view.origin, view.angles
-                    )),
-                    None => report.push("camera: mp_global_intermission not found".into()),
-                }
-                let lightmapped_surfaces = draw
-                    .surface_lightmapped
-                    .iter()
-                    .filter(|&&lightmapped| lightmapped)
-                    .count();
-                report.push(format!(
-                    "world batches: {lightmapped_surfaces} lightmapped, {} fallback surfaces",
-                    draw.surface_lightmapped.len() - lightmapped_surfaces
-                ));
+                report_intermission(&mut report, intermission_view.as_ref());
+                report_world_batches(&mut report, &draw);
                 let material_surfaces = draw
                     .surface_materials
                     .iter()
@@ -725,40 +634,9 @@ impl ZoneLane for Iw4Lane {
                     }
                     Err(gap) => report.push(format!("lightmap gap: {gap}")),
                 }
-                let reflection_probe_images = draw
-                    .reflection_probes
-                    .iter()
-                    .map(|probe| {
-                        probe.image.and_then(|image| {
-                            map_materials.images.get(image).and_then(|source| {
-                                match decode_reflection_probe_cubemap(source) {
-                                    Ok(image) => Some(image),
-                                    Err(error) => {
-                                        report.push(format!(
-                                            "reflection probe {} gap: {error}",
-                                            source.name
-                                        ));
-                                        None
-                                    }
-                                }
-                            })
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                report.push(format!(
-                    "reflection probes: {}/{} cubemaps decoded",
-                    reflection_probe_images.iter().flatten().count(),
-                    reflection_probe_images.len()
-                ));
-                report.push(format!(
-                    "dpvs: cells={} planes={} nodes={} sorted={} portal_verts={} cleared_boxes={}",
-                    draw.dpvs.cell_count,
-                    draw.dpvs.planes.len(),
-                    draw.dpvs.nodes.len(),
-                    draw.dpvs.sorted_surf_index.len(),
-                    draw.dpvs.portal_verts.len(),
-                    draw.dpvs.cleared_boxes
-                ));
+                let reflection_probe_images =
+                    decode_reflection_probes(&mut report, &draw, &map_materials);
+                report_dpvs(&mut report, &draw);
                 let min = draw.stats.min;
                 let max = draw.stats.max;
                 let world_bounds = draw.stats.bounds;

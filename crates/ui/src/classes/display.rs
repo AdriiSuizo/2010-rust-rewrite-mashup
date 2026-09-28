@@ -1,6 +1,6 @@
 use asset_core::AssetNamespace;
 
-use crate::{ClassLoadoutCatalog, ClassPickerFolder, ClassSlotState, preset_at, pretty_weapon_name};
+use crate::{ClassLoadoutCatalog, ClassPickerFolder, pretty_weapon_name};
 
 pub fn localized(loc: &asset_game::LocalizeCatalog, key: &str, fallback: &str) -> String {
     loc.text(key.trim_start_matches('@'))
@@ -15,7 +15,11 @@ pub fn category_label(folder: ClassPickerFolder, loc: &asset_game::LocalizeCatal
     )
 }
 
-pub fn label(key: &str, catalog: &ClassLoadoutCatalog, loc: &asset_game::LocalizeCatalog) -> String {
+pub fn label(
+    key: &str,
+    catalog: &ClassLoadoutCatalog,
+    loc: &asset_game::LocalizeCatalog,
+) -> String {
     if key.is_empty() {
         return localized(loc, "MENU_NONE", "None");
     }
@@ -35,14 +39,6 @@ pub fn label(key: &str, catalog: &ClassLoadoutCatalog, loc: &asset_game::Localiz
                 .map_or(key, |(_, attachment)| attachment),
         )
     })
-}
-
-pub fn class_name(slot: &ClassSlotState, at: usize, loc: &asset_game::LocalizeCatalog) -> String {
-    if preset_at(at).is_some_and(|preset| preset.name == slot.name) {
-        localized(loc, &format!("CLASS_SLOT{}", at + 1), &slot.name)
-    } else {
-        slot.name.clone()
-    }
 }
 
 pub fn preview_image(key: &str, catalog: &ClassLoadoutCatalog) -> String {

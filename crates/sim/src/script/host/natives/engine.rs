@@ -652,6 +652,23 @@ fn signal(world: &mut World, name: &str) -> Result<Value, String> {
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    register_entities(registry);
+    register_placement(registry);
+    register_appearance(registry);
+    register_motion(registry);
+    register_attachments(registry);
+    register_sound_and_fx(registry);
+    register_entity_state(registry);
+    super::super::hud::register(registry);
+    register_traces(registry);
+    register_match(registry);
+    register_level(registry);
+    register_weapon_facts(registry);
+    register_damage(registry);
+    register_refused(registry);
+}
+
+fn register_entities(registry: &mut NativeRegistry) {
     use Namespace::{Function, Method};
 
     registry.register(Function, "getent", |world, _, args| {
@@ -780,6 +797,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         crate::script::runtime::raise(world, Value::Object(id), "death", Vec::new());
         Ok(Value::Undefined)
     });
+}
+
+fn register_placement(registry: &mut NativeRegistry) {
+    use Namespace::Method;
+
     registry.register(Method, "setorigin", |world, receiver, args| {
         let origin = vector(args, 0)?;
         let id = entity_id(world, receiver)?;
@@ -854,6 +876,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let id = entity_id(world, receiver)?;
         Ok(Value::Int(world.resource::<Runtime>().entities[&id].number))
     });
+}
+
+fn register_appearance(registry: &mut NativeRegistry) {
+    use Namespace::Method;
+
     registry.register(Method, "setmodel", |world, receiver, args| {
         let model = string(args, 0)?;
         let id = entity_id(world, receiver)?;
@@ -944,6 +971,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             world.resource::<Runtime>().entities[&id].light,
         ))
     });
+}
+
+fn register_motion(registry: &mut NativeRegistry) {
+    use Namespace::Method;
+
     registry.register(Method, "linkto", |world, receiver, args| {
         if let Some(client) = runtime(world).player_client_of(receiver) {
             super::player::link_to(
@@ -1133,6 +1165,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         runtime(world).set_object_field(id, "origin", Value::Vector(ground));
         Ok(Value::Undefined)
     });
+}
+
+fn register_attachments(registry: &mut NativeRegistry) {
+    use Namespace::Method;
+
     registry.register(Method, "attach", |world, receiver, args| {
         let model: Arc<str> = string(args, 0)?.into();
         let tag: Arc<str> = optional(args, 1, string)?.unwrap_or_default().into();
@@ -1192,6 +1229,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             .ok_or("bad attachment index")?;
         Ok(Value::String(tag.clone()))
     });
+}
+
+fn register_sound_and_fx(registry: &mut NativeRegistry) {
+    use Namespace::{Function, Method};
+
     registry.register(Function, "playfx", |world, _, args| {
         let name = name(world, int(args, 0)?)?;
         let origin = vector(args, 1)?;
@@ -1303,6 +1345,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         }
         Ok(Value::Undefined)
     });
+}
+
+fn register_entity_state(registry: &mut NativeRegistry) {
+    use Namespace::Method;
+
     macro_rules! entity_accepts {
         ($($name:literal),* $(,)?) => {$(
             registry.register(Method, $name, |world, receiver, _| {
@@ -1347,8 +1394,10 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "playsoundasmaster",
         "logstring",
     ];
+}
 
-    super::super::hud::register(registry);
+fn register_traces(registry: &mut NativeRegistry) {
+    use Namespace::{Function, Method};
 
     registry.register(Function, "bullettrace", |world, _, args| {
         let (start, end) = (vector(args, 0)?, vector(args, 1)?);
@@ -1453,6 +1502,10 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Method, "damageconetrace", |world, receiver, args| {
         cone_trace(world, receiver, args, DAMAGE_CONE_MASK)
     });
+}
+
+fn register_match(registry: &mut NativeRegistry) {
+    use Namespace::Function;
 
     registry.register(Function, "setteamscore", |world, _, args| {
         let team = team_key(args)?;
@@ -1558,6 +1611,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Function, "getclientmatchdata", |world, _, args| {
         get_match_data(world, "client", args)
     });
+}
+
+fn register_level(registry: &mut NativeRegistry) {
+    use Namespace::{Function, Method};
+
     registry.register(Function, "soundexists", |_, _, args| {
         string(args, 0)?;
         Ok(Value::Int(1))
@@ -1672,6 +1730,10 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "setmatchdatadef",
         "setclientmatchdatadef",
     ];
+}
+
+fn register_weapon_facts(registry: &mut NativeRegistry) {
+    use Namespace::Function;
 
     registry.register(Function, "weaponclass", |world, _, args| {
         Ok(enum_name(
@@ -1713,16 +1775,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let frame = crate::frame::FrameWorld::from_world(world);
         Ok(Value::string(frame.weapon_script_name(alternate)))
     });
+}
 
-    macro_rules! refused {
-        ($namespace:ident: $($name:literal),* => $message:literal) => {$(
-            registry.register($namespace, $name, |_, _, _| Err($message.into()));
-        )*};
-    }
-    refused!(Function: "getanimlength", "animhasnotetrack", "getnotetracktimes"
-        => "animation data is not loaded in the simulation");
-    refused!(Function: "getweaponmodel", "getweaponhidetags"
-        => "weapon models are not loaded in the simulation");
+fn register_damage(registry: &mut NativeRegistry) {
+    use Namespace::{Function, Method};
+
     registry.register(Function, "radiusdamage", |world, _, args| {
         radius_damage(world, None, args)
     });
@@ -1737,6 +1794,20 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         float(args, 3)?;
         Ok(Value::Undefined)
     });
+}
+
+fn register_refused(registry: &mut NativeRegistry) {
+    use Namespace::{Function, Method};
+
+    macro_rules! refused {
+        ($namespace:ident: $($name:literal),* => $message:literal) => {$(
+            registry.register($namespace, $name, |_, _, _| Err($message.into()));
+        )*};
+    }
+    refused!(Function: "getanimlength", "animhasnotetrack", "getnotetracktimes"
+        => "animation data is not loaded in the simulation");
+    refused!(Function: "getweaponmodel", "getweaponhidetags"
+        => "weapon models are not loaded in the simulation");
     refused!(Function: "kick" => "no client with that number");
     refused!(Method: "getcorpseanim", "startragdoll", "isragdoll" => "receiver is not a corpse");
     refused!(Method: "itemweaponsetammo" => "receiver is not a weapon item");

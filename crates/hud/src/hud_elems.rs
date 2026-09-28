@@ -296,8 +296,12 @@ pub(crate) fn update_hud_elems(
                 });
                 continue;
             };
+            let (material_namespace, material) = match asset_core::AssetKey::parse(material) {
+                Ok(key) if key.kind == asset_core::AssetKind::Material => (key.namespace, key.name),
+                _ => (crate::images::HUD_CHROME_NAMESPACE, material.to_owned()),
+            };
             if hud_images
-                .get(crate::images::HUD_CHROME_NAMESPACE, material, &mut images)
+                .get(material_namespace, &material, &mut images)
                 .is_none()
             {
                 gaps.raise(GapCause::HudElemImageMissing {
@@ -323,7 +327,7 @@ pub(crate) fn update_hud_elems(
                 hud_elem_placement(surface.placement(), elem, cg_time, 0.0, font_height)
             };
             cmds.push(Draw2dCmd {
-                material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+                material_namespace,
                 x: placed.x,
                 y: placed.y,
                 w: placed.w,
@@ -333,7 +337,7 @@ pub(crate) fn update_hud_elems(
                 s1: 1.0,
                 t1: 1.0,
                 color: face_color(color),
-                material: material.to_owned(),
+                material,
                 op: Draw2dOp::StretchPic,
                 provenance,
                 layer: 1,

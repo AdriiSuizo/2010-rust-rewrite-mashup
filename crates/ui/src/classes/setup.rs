@@ -425,12 +425,9 @@ pub struct ClassSlotState {
 
 impl ClassSlotState {
     pub fn from_preset(preset: &crate::ClassPreset) -> Self {
-        let perk = |i: usize| {
-            preset
-                .perks
-                .get(i)
-                .map(|p| p.reference.to_owned())
-                .unwrap_or_else(|| NO_PERK.to_owned())
+        let perk = |i: usize| match preset.perks[i] {
+            "" => NO_PERK.to_owned(),
+            perk => perk.to_owned(),
         };
         Self {
             name: preset.name.to_owned(),

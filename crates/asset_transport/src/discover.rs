@@ -689,6 +689,33 @@ pub fn find_t5_localized_zones(
     anchor: &Path,
     language: Option<&str>,
 ) -> Result<Vec<ZoneFile>, String> {
+    let (dir, prefix) = t5_language_archive(anchor, language)?;
+    Ok(["code_post_gfx_mp", "common_mp", "ui_mp"]
+        .into_iter()
+        .filter_map(|stem| t5_localized_zone(&dir, &prefix, stem))
+        .collect())
+}
+
+pub fn find_t5_localized_zone(
+    anchor: &Path,
+    language: Option<&str>,
+    stem: &str,
+) -> Result<Option<ZoneFile>, String> {
+    let (dir, prefix) = t5_language_archive(anchor, language)?;
+    Ok(t5_localized_zone(&dir, &prefix, stem))
+}
+
+fn t5_localized_zone(dir: &Path, prefix: &str, stem: &str) -> Option<ZoneFile> {
+    let zone_name = format!("{prefix}{stem}");
+    let path = dir.join(format!("{zone_name}.ff"));
+    path.is_file().then_some(ZoneFile {
+        path,
+        zone_name,
+        alias_note: None,
+    })
+}
+
+fn t5_language_archive(anchor: &Path, language: Option<&str>) -> Result<(PathBuf, String), String> {
     let root = game_root_for_zone(anchor)?.join("zone");
     let mut choices: Vec<_> = files_under(vec![root])
         .filter_map(Result::ok)
@@ -725,16 +752,5 @@ pub fn find_t5_localized_zones(
         .strip_suffix("code_post_gfx_mp.ff")
         .ok_or("T5 language prefix")?;
     let dir = chosen.parent().ok_or("T5 language directory")?;
-    Ok(["code_post_gfx_mp", "common_mp", "ui_mp"]
-        .into_iter()
-        .filter_map(|stem| {
-            let zone_name = format!("{prefix}{stem}");
-            let path = dir.join(format!("{zone_name}.ff"));
-            path.is_file().then_some(ZoneFile {
-                path,
-                zone_name,
-                alias_note: None,
-            })
-        })
-        .collect())
+    Ok((dir.to_path_buf(), prefix.to_owned()))
 }
