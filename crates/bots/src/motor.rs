@@ -168,9 +168,6 @@ impl Motor {
         if intent.crouch {
             cmd.buttons |= buttons::CROUCH;
         }
-        if intent.jump && walking {
-            cmd.buttons |= buttons::JUMP;
-        }
         cmd
     }
 

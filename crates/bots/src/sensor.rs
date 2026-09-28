@@ -102,10 +102,6 @@ pub fn observe_focused(
             if snapshot.meta.kind.is_team() && other_meta.client_state_team == team {
                 continue;
             }
-            // A Minecraft world's mobs hunt players, not each other.
-            if sim::voxel::active() && sim::voxel::is_mob_client(bot.0) && sim::voxel::is_mob_client(id.0) {
-                continue;
-            }
             // Out of range or outside the cone is a complete answer on its own;
             // only a client that needed a probe it did not get is unsensed.
             if !in_range_and_fov(ps.origin, other.origin, forward, half) {

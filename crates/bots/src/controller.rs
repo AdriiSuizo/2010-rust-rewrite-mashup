@@ -67,8 +67,6 @@ pub struct HostController {
     progress_origin: Option<[f32; 3]>,
     progress_tick: u32,
     escape: Option<([f32; 3], u32)>,
-    /// The route asked for a jump onto a block this think.
-    jump: bool,
 }
 
 impl HostController {
@@ -81,7 +79,6 @@ impl HostController {
             memory: Memory::default(),
             task: Task::default(),
             intent: BotIntent::default(),
-            jump: false,
             motor: Motor::new(seed),
             last_think_tick: None,
             reaction_until: 0,
@@ -371,9 +368,7 @@ impl HostController {
         let previous_stage = self.decision.stage;
         let previous = self.decision.objective;
         self.decision.objective = objective.filter(|_| self.task.kind == TaskKind::TouchObj);
-        self.jump = false;
         self.intent = self.intent_for(obs, world, nav, astar_budget, objective);
-        self.intent.jump = self.jump;
         self.decision.stage = if matches!(
             self.intent.path,
             PathOutcome::Blocked | PathOutcome::Unreachable
@@ -1175,13 +1170,6 @@ impl HostController {
         nav: Option<&NavGraph>,
         astar_budget: &mut u32,
     ) -> (MoveMode, PathOutcome, Option<[f32; 3]>) {
-        // A Minecraft world is not the map the graph was baked on: walk
-        // straight at the goal and jump up blocks, as its mobs do.
-        if sim::voxel::active() {
-            let (mode, outcome, goal, jump) = block_walk_step(from, to, world);
-            self.jump = jump;
-            return (mode, outcome, goal);
-        }
         if let Some(graph) = nav.filter(|g| !g.is_empty()) {
             return self.route_nav(from, to, world, graph, astar_budget);
         }
@@ -1568,38 +1556,6 @@ fn walk_step(
         }
         Ok(WalkSample::Blocked) => (MoveMode::Hold, PathOutcome::Blocked, Some(to)),
         Err(_) => (MoveMode::Hold, PathOutcome::BudgetExhausted, Some(to)),
-    }
-}
-
-/// Map units a jump clears: one block of a Minecraft world and a little.
-const BLOCK_JUMP_IN: f32 = 40.0;
-
-/// `walk_step` over a block world: a step blocked at the feet but clear a
-/// block higher is climbed with a jump.
-fn block_walk_step(
-    from: [f32; 3],
-    to: [f32; 3],
-    world: &mut impl WorldQuery,
-) -> (MoveMode, PathOutcome, Option<[f32; 3]>, bool) {
-    let d = [to[0] - from[0], to[1] - from[1]];
-    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
-    if len < 8.0 {
-        return (MoveMode::Hold, PathOutcome::Clear, Some(to), false);
-    }
-    let scale = (32.0 / len).min(1.0);
-    let step = [from[0] + d[0] * scale, from[1] + d[1] * scale, from[2]];
-    match world.walk_hull(from, step) {
-        Ok(WalkSample::Clear) => (MoveMode::Walk, PathOutcome::Clear, Some(to), false),
-        Ok(WalkSample::BreakGlass) => (MoveMode::BreakGlass, PathOutcome::Clear, Some(step), false),
-        Ok(WalkSample::Blocked) => {
-            let lift = |p: [f32; 3]| [p[0], p[1], p[2] + BLOCK_JUMP_IN];
-            match world.hull_trace(lift(from), lift(step)) {
-                Ok(trace) if trace.fraction >= 1.0 => (MoveMode::Walk, PathOutcome::Clear, Some(to), true),
-                Ok(_) => (MoveMode::Hold, PathOutcome::Blocked, Some(to), false),
-                Err(_) => (MoveMode::Hold, PathOutcome::BudgetExhausted, Some(to), false),
-            }
-        }
-        Err(_) => (MoveMode::Hold, PathOutcome::BudgetExhausted, Some(to), false),
     }
 }
 

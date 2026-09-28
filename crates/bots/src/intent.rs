@@ -34,8 +34,6 @@ pub struct BotIntent {
     /// selection is held through every phase of the change, not pulsed once.
     pub weapon: Option<u16>,
     pub path: PathOutcome,
-    /// Jump this command, to climb onto a block.
-    pub jump: bool,
 }
 
 impl Default for BotIntent {
@@ -52,7 +50,6 @@ impl Default for BotIntent {
             sprint: false,
             weapon: None,
             path: PathOutcome::None,
-            jump: false,
         }
     }
 }

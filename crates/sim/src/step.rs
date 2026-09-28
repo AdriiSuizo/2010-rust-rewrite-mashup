@@ -2308,23 +2308,7 @@ fn resolve_pending_spawns(world: &mut FrameWorld, tick: Tick) {
             .map(|m| m.client_state_team)
             .unwrap_or(entity_iw4::TEAM_FREE);
         let forced = world.client_meta_mut(id).forced_spawn.take();
-        let mob = crate::voxel::active() && crate::voxel::is_mob_client(id.0);
-        let report = if mob {
-            let Some((origin, yaw)) = crate::voxel::take_mob_spawn() else {
-                continue;
-            };
-            crate::spawn::SpawnAttemptReport {
-                tried: 1,
-                rejected: Vec::new(),
-                accepted: Some(crate::spawn::SpawnDecision {
-                    classname: String::from("minecraft_mob"),
-                    source_index: crate::spawn::FORCED_SPAWN_SOURCE,
-                    raw_origin: origin,
-                    raw_angles: [0.0, yaw, 0.0],
-                    traced_origin: origin,
-                }),
-            }
-        } else if let Some(pick) = forced {
+        let report = if let Some(pick) = forced {
             let report = crate::spawn::decide_forced_spawn(world, pick, &avoid, client_state_team);
             log_forced_spawn(id, pick, &report);
             report

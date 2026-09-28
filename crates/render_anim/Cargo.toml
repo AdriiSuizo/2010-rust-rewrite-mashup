@@ -35,8 +35,6 @@ bytemuck = { version = "1", features = ["derive"] }
 skate-host = { path = "../../skate/crates/skate-host" }
 minecraft_terrain = { path = "../minecraft_terrain" }
 minecraftoss-core = { path = "D:/MinecraftOSS/engine/core" }
-minecraftoss-world = { path = "D:/MinecraftOSS/engine/world" }
-bots = { path = "../bots" }
 glam = "0.29"
 image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1"
