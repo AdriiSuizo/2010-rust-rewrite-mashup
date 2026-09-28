@@ -29,6 +29,8 @@ pub const MINECRAFT_LIGHT_VOLUME: u32 = 64;
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct McLight {
     world_rel_from_clip: [f32; 16],
+    /// The same for view model draws, which have their own projection.
+    viewmodel_rel_from_clip: [f32; 16],
     /// View origin in map units; `w` is 1 while the lighting applies.
     view_origin: [f32; 4],
     /// The block at map origin.
@@ -222,6 +224,10 @@ fn prepare_light(
         let origin = exec.view_origin;
         let clip_from_rel = clip_from_world * Mat4::from_translation(origin);
         light.world_rel_from_clip = clip_from_rel.inverse().to_cols_array();
+        let viewmodel_clip_from_world = exec.viewmodel_clip_from_world.unwrap_or(clip_from_world);
+        light.viewmodel_rel_from_clip = (viewmodel_clip_from_world * Mat4::from_translation(origin))
+            .inverse()
+            .to_cols_array();
         // Without a volume yet, the pixel light is the eye's.
         let lit = resources.volume_held.is_some();
         light.view_origin = [origin.x, origin.y, origin.z, if lit { 1.0 } else { 2.0 }];
@@ -251,6 +257,7 @@ fn prepare_light(
 const HOOK_WGSL: &str = r#"
 struct McLight {
     world_rel_from_clip: mat4x4<f32>,
+    viewmodel_rel_from_clip: mat4x4<f32>,
     view_origin: vec4<f32>,
     block_origin: vec4<f32>,
     volume: vec4<f32>,
@@ -305,9 +312,18 @@ struct McPixel {
     n: vec3<f32>,
 }
 
+// View model pixels sit in the nearest band of window depth.
+const MC_VIEWMODEL_DEPTH: f32 = 1.0 - 0.015625;
+
 // Taken on entry, where derivatives are in uniform control flow: the pixel in
-// map space and its surface normal, facing the eye.
-fn mc_enter(h: vec4<f32>) -> McPixel {
+// map space and its surface normal, facing the eye. `clip` is the vertex
+// clip position and `depth` the window depth, which tells view model pixels,
+// projected their own way, from the rest.
+fn mc_enter(clip: vec4<f32>, depth: f32) -> McPixel {
+    var h = mc_light.world_rel_from_clip * clip;
+    if depth > MC_VIEWMODEL_DEPTH {
+        h = mc_light.viewmodel_rel_from_clip * clip;
+    }
     let rel = h.xyz / h.w;
     var n = cross(dpdx(rel), dpdy(rel));
     if dot(n, rel) > 0.0 {
@@ -377,7 +393,7 @@ fn inject(source: &str) -> Option<String> {
     out.push_str(&format!("    @location({world_location}) mc_world: vec4<f32>,\n"));
     out.push_str(&source[line_end..vertex_close]);
     out.push_str(&format!(
-        "        sm3_constant_base,\n        mc_light.world_rel_from_clip * {position},\n    );"
+        "        sm3_constant_base,\n        {position},\n    );"
     ));
     let rest = &source[vertex_close + "        sm3_constant_base,\n    );".len()..];
 
@@ -388,7 +404,7 @@ fn inject(source: &str) -> Option<String> {
     while let Some(found) = rest[cursor..].find(SIGNATURE_END) {
         let open = cursor + found + SIGNATURE_END.len();
         tail.push_str(&rest[cursor..open]);
-        tail.push_str("    let mc_px = mc_enter(varyings.mc_world);\n");
+        tail.push_str("    let mc_px = mc_enter(varyings.mc_world, varyings.position.z);\n");
         let body_end = rest[open..].find("\n}\n").map(|i| open + i)?;
         let body = &rest[open..body_end];
         let ret_at = body.rfind("    return ")?;
