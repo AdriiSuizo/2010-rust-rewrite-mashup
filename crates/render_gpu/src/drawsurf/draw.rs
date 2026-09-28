@@ -32,5 +32,6 @@ pub(crate) fn register_drawsurf_render(app: &mut App) {
     super::iw_tess::register(app);
     super::model_lighting_tiles::register(app);
     super::minecraft_world::register(app);
+    super::minecraft_light::register(app);
     super::geometry_diagnostic::register(app);
 }

@@ -929,6 +929,8 @@ pub fn extract_minecraft_world(
     mut main_world: ResMut<bevy::render::MainWorld>,
     mut frame: ResMut<render_gpu::MinecraftWorldFrame>,
     mut atlas_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
+    mut celestial_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
+    mut clouds_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftClouds>)>>,
 ) {
     let Some(mut view) = main_world.get_resource_mut::<render_anim::minecraft_world::MinecraftWorldView>() else {
         return;
@@ -967,4 +969,43 @@ pub fn extract_minecraft_world(
         transparent_start: mesh.transparent_start,
     }));
     frame.visible = view.visible.iter().map(|(pos, _)| to_pos(*pos)).collect();
+    frame.environment = view.environment;
+    frame.eye_light = view.eye_light;
+    frame.light_volume = view.light_volume.clone();
+    frame.celestial = view.celestial.as_ref().map(|image| {
+        let key = std::sync::Arc::as_ptr(image) as usize;
+        if let Some((held, converted)) = celestial_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let converted = std::sync::Arc::new(render_gpu::MinecraftAtlasImage {
+            width: image.width(),
+            height: image.height(),
+            levels: vec![image.as_raw().clone()],
+        });
+        *celestial_of = Some((key, converted.clone()));
+        converted
+    });
+    frame.clouds = view.clouds.as_ref().map(|clouds| {
+        let key = std::sync::Arc::as_ptr(clouds) as usize;
+        if let Some((held, converted)) = clouds_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let converted = std::sync::Arc::new(render_gpu::MinecraftClouds {
+            vertices: clouds
+                .0
+                .iter()
+                .map(|v| {
+                    let (p, c) = (v.position, v.color);
+                    [p[0], p[1], p[2], c[0], c[1], c[2], c[3]]
+                })
+                .collect(),
+            indices: clouds.1.clone(),
+        });
+        *clouds_of = Some((key, converted.clone()));
+        converted
+    });
 }

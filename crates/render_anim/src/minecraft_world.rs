@@ -6,7 +6,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
 use bevy::prelude::*;
-use minecraft_terrain::mesh::{Atlas, SectionMesh};
+use minecraft_terrain::clouds::CloudMask;
+use minecraft_terrain::day_cycle::{DayCycle, Skybox};
+use minecraft_terrain::environment::{DimensionEnvironment, View};
+use minecraft_terrain::lighting::SkyLight;
+use minecraft_terrain::mesh::{Atlas, SectionMesh, Vertex};
 use minecraft_terrain::pack::PackStack;
 use minecraft_terrain::scene::HandcraftedScene;
 use minecraft_terrain::sections::{CullCamera, SectionPos};
@@ -15,6 +19,9 @@ use minecraftoss_core::BlockStateId;
 use minecraftoss_core::registries::{DataPaths, Registries};
 
 const VIEW_DISTANCE: i32 = 8;
+const TICK_SECONDS: f64 = 1.0 / 20.0;
+/// Blocks on a side of the light volume MW2 models are lit from.
+pub const LIGHT_VOLUME: i32 = 64;
 /// Chunk sections fade in over this long, as the viewer's default option.
 const FADE_MILLIS: u64 = 750;
 
@@ -31,6 +38,16 @@ pub struct MinecraftWorldView {
     pub visible: Vec<(SectionPos, f32)>,
     /// Bumped when the world is replaced, so stale sections are dropped.
     pub generation: u64,
+    /// The environment uniform of MinecraftOSS for this frame, in block space.
+    pub environment: [[f32; 4]; 16],
+    /// Sun and the eight moon phases, 32 pixels each, side by side.
+    pub celestial: Option<Arc<image::RgbaImage>>,
+    pub clouds: Option<Arc<(Vec<Vertex>, Vec<u32>)>>,
+    /// Sky and block light around the player: origin block, then
+    /// `LIGHT_VOLUME` cubed pairs, x fastest then z then y.
+    pub light_volume: Option<Arc<([i32; 3], Vec<u8>)>>,
+    /// Sky and block light at the eye, for the view model.
+    pub eye_light: [f32; 2],
 }
 
 struct Loaded {
@@ -40,12 +57,22 @@ struct Loaded {
     atlas: Arc<Atlas>,
     registries: Arc<Registries>,
     seed: i64,
+    environment: DimensionEnvironment,
+    celestial: Arc<image::RgbaImage>,
+    cloud_mask: Option<CloudMask>,
 }
 
 #[derive(Default)]
 struct Runtime {
     loading: Option<mpsc::Receiver<Result<Loaded, String>>>,
     world: Option<Loaded>,
+    day: DayCycle,
+    environment_accumulator: f64,
+    environment_primed: bool,
+    light: Option<SkyLight>,
+    light_volume_at: Option<[i32; 3]>,
+    light_volume_age: u32,
+    cloud_center: Option<(i32, i32)>,
     /// Shape id of each block state already seen.
     shapes: HashMap<BlockStateId, u16>,
     /// Boxes of each shape id, to reuse an id for a repeated shape.
@@ -81,6 +108,10 @@ fn load(seed: i64) -> Result<Loaded, String> {
     let build = minecraft_terrain::mesh::build(&HandcraftedScene::default(), &packs)
         .map_err(|e| e.to_string())?;
     let scene = HandcraftedScene::streamed(stream.states.clone());
+    let environment =
+        DimensionEnvironment::load(&registries, Dimension::Overworld.dimension_type())?;
+    let celestial = Arc::new(celestial_image(&packs).map_err(|e| e.to_string())?);
+    let cloud_mask = CloudMask::from_pack(&packs).ok();
     Ok(Loaded {
         stream,
         scene,
@@ -88,7 +119,37 @@ fn load(seed: i64) -> Result<Loaded, String> {
         atlas: build.atlas,
         registries,
         seed,
+        environment,
+        celestial,
+        cloud_mask,
     })
+}
+
+/// The sky's sun and moon phases, laid out as MinecraftOSS lays them out.
+fn celestial_image(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
+    let mut celestial = image::RgbaImage::new(32 * 9, 32);
+    let names = [
+        "environment/celestial/sun",
+        "environment/celestial/moon/full_moon",
+        "environment/celestial/moon/waning_gibbous",
+        "environment/celestial/moon/third_quarter",
+        "environment/celestial/moon/waning_crescent",
+        "environment/celestial/moon/new_moon",
+        "environment/celestial/moon/waxing_crescent",
+        "environment/celestial/moon/first_quarter",
+        "environment/celestial/moon/waxing_gibbous",
+    ];
+    for (index, path) in names.iter().enumerate() {
+        let id = minecraft_terrain::pack::ResourceId::parse(&format!("minecraft:{path}"))?;
+        if let Some(bytes) = packs.texture(&id)? {
+            let img =
+                image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?.to_rgba8();
+            let tile =
+                image::imageops::resize(&img, 32, 32, image::imageops::FilterType::Nearest);
+            image::imageops::replace(&mut celestial, &tile, (index as i64) * 32, 0);
+        }
+    }
+    Ok(celestial)
 }
 
 fn seed() -> i64 {
@@ -106,6 +167,7 @@ fn seed() -> i64 {
 
 #[allow(clippy::too_many_arguments)]
 fn update(
+    time: Res<Time>,
     mut installed: MessageReader<frame::MatchInstalled>,
     mut torn_down: MessageReader<frame::MatchTornDown>,
     local: Res<net::LocalPresentClient>,
@@ -146,6 +208,21 @@ fn update(
                 let (x, y, z) = world.stream.player_spawn;
                 view.origin = [x, y, z];
                 view.atlas = Some(world.atlas.clone());
+                view.celestial = Some(world.celestial.clone());
+                runtime.day = DayCycle::default();
+                // Game ticks since sunrise to start at: 6000 noon, 13000
+                // dusk, 18000 midnight.
+                if let Some(ticks) = std::env::var("IW4L_MINECRAFT_TIME")
+                    .ok()
+                    .and_then(|t| t.trim().parse::<f64>().ok())
+                {
+                    runtime.day.set(ticks);
+                }
+                runtime.environment_accumulator = 0.0;
+                runtime.environment_primed = false;
+                runtime.light = Some(SkyLight::streamed());
+                runtime.light_volume_at = None;
+                runtime.cloud_center = None;
                 view.generation += 1;
                 sim::voxel::activate(
                     authority.0.content().clip_brushes(),
@@ -176,6 +253,13 @@ fn update(
         shapes,
         shape_ids,
         was_alive,
+        day,
+        environment_accumulator,
+        environment_primed,
+        light,
+        light_volume_at,
+        light_volume_age,
+        cloud_center,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -268,6 +352,154 @@ fn update(
     view.uploads.extend(update.uploads);
     view.removed.extend(update.removed);
     view.visible = update.visible;
+    let Some(light) = light.as_mut() else {
+        return;
+    };
+    for (chunk, column) in update.lights {
+        light.set_chunk_column(chunk, column);
+    }
+
+    // The Overworld clock and the environment attributes of MinecraftOSS.
+    let dt = time.delta_secs_f64();
+    day.advance(dt);
+    let eye_block = (eye[0].floor() as i32, eye[1].floor() as i32, eye[2].floor() as i32);
+    view.eye_light = [
+        f32::from(light.get(eye_block)),
+        f32::from(light.get_block(eye_block)),
+    ];
+    world
+        .environment
+        .update_rain_fog(0.0, light.get(eye_block), false, (dt * 20.0) as f32);
+    *environment_accumulator += dt;
+    if !*environment_primed || *environment_accumulator >= TICK_SECONDS {
+        *environment_accumulator = (*environment_accumulator % TICK_SECONDS).min(TICK_SECONDS);
+        let scene = &world.scene;
+        world.environment.tick(
+            day.ticks.floor() as i64,
+            0.0,
+            0.0,
+            eye,
+            |x, y, z| scene.noise_biome((x, y, z)).map_or(0, |id| id.0),
+            !*environment_primed,
+        );
+        *environment_primed = true;
+    }
+    let partial_tick = (*environment_accumulator / TICK_SECONDS).clamp(0.0, 1.0) as f32;
+    let sky = world.environment.sky_state(&View {
+        partial_tick,
+        forward,
+        camera_y: eye[1] as f32,
+        render_distance: VIEW_DISTANCE as u32,
+        rain_level: 0.0,
+        thunder_level: 0.0,
+    });
+    let render_distance = VIEW_DISTANCE as f32 * 16.0;
+    let right = forward.cross(glam::Vec3::Y).normalize_or(glam::Vec3::X);
+    let up = right.cross(forward).normalize_or(glam::Vec3::Y);
+    let put = |v: glam::Vec3| [v.x, v.y, v.z, 0.0];
+    let game_time = day.ticks;
+    view.environment = [
+        put(forward),
+        put(right),
+        put(up),
+        [eye[0] as f32, eye[1] as f32, eye[2] as f32, 0.0],
+        put(sky.sky),
+        [sky.fog.x, sky.fog.y, sky.fog.z, render_distance.min(sky.sky_fog_end)],
+        [
+            sky.sky_light_color.x,
+            sky.sky_light_color.y,
+            sky.sky_light_color.z,
+            sky.sky_light_factor,
+        ],
+        sky.sunset,
+        [sky.sun_direction.x, sky.sun_direction.y, sky.sun_direction.z, sky.rain_brightness],
+        [sky.moon_direction.x, sky.moon_direction.y, sky.moon_direction.z, sky.rain_brightness],
+        // The brightness option at its default.
+        [sky.cloud.x, sky.cloud.y, sky.cloud.z, 0.5],
+        [aspect, 0.0, sky.star_brightness, sky.star_angle],
+        [sky.moon_phase as f32, (game_time as f32) * 0.03, 96.0, 160.0],
+        [
+            sky.fog_start,
+            sky.fog_end,
+            render_distance - (render_distance / 10.0).clamp(4.0, 64.0),
+            render_distance,
+        ],
+        [
+            sky.ambient.x,
+            sky.ambient.y,
+            sky.ambient.z,
+            match sky.skybox {
+                Skybox::Overworld => 0.0,
+                Skybox::End => 1.0,
+                _ => 2.0,
+            },
+        ],
+        [
+            sky.block_light_tint.x,
+            sky.block_light_tint.y,
+            sky.block_light_tint.z,
+            sky.block_factor,
+        ],
+    ];
+
+    // Clouds, rebuilt when the camera crosses a cloud cell.
+    if let Some(mask) = &world.cloud_mask {
+        let center = mask.center(eye[0] as f32, eye[2] as f32, game_time);
+        if *cloud_center != Some(center) {
+            *cloud_center = Some(center);
+            let mesh = mask.build(center, eye[1] as f32);
+            view.clouds = Some(Arc::new((mesh.vertices, mesh.indices)));
+        }
+    }
+
+    // The light MW2 models stand in, around the player.
+    *light_volume_age += 1;
+    let half = LIGHT_VOLUME / 2;
+    let corner = [block.0 - half, block.1 - half, block.2 - half];
+    let moved =
+        light_volume_at.is_none_or(|at| (0..3).any(|k| (at[k] - corner[k]).abs() >= 4));
+    if moved || *light_volume_age >= 20 {
+        *light_volume_age = 0;
+        *light_volume_at = Some(corner);
+        let n = LIGHT_VOLUME;
+        let index = |x: i32, y: i32, z: i32| (((y * n + z) * n + x) * 2) as usize;
+        let mut raw = vec![0u8; (n * n * n * 2) as usize];
+        for y in 0..n {
+            for z in 0..n {
+                for x in 0..n {
+                    let pos = (corner[0] + x, corner[1] + y, corner[2] + z);
+                    let at = index(x, y, z);
+                    raw[at] = light.get(pos);
+                    raw[at + 1] = light.get_block(pos);
+                }
+            }
+        }
+        // Unlit cells (inside blocks) take their brightest neighbour, so a
+        // model beside a block is not darkened by filtering into it. Levels
+        // become unorm bytes.
+        let mut data = vec![0u8; raw.len()];
+        for y in 0..n {
+            for z in 0..n {
+                for x in 0..n {
+                    let at = index(x, y, z);
+                    let (mut sky, mut block) = (raw[at], raw[at + 1]);
+                    if sky == 0 && block == 0 {
+                        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+                            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                            if (0..n).contains(&nx) && (0..n).contains(&ny) && (0..n).contains(&nz) {
+                                let near = index(nx, ny, nz);
+                                sky = sky.max(raw[near]);
+                                block = block.max(raw[near + 1]);
+                            }
+                        }
+                    }
+                    data[at] = sky.min(15) * 17;
+                    data[at + 1] = block.min(15) * 17;
+                }
+            }
+        }
+        view.light_volume = Some(Arc::new((corner, data)));
+    }
 }
 
 fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
@@ -278,6 +510,9 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
         view.uploads.clear();
         view.removed.clear();
         view.visible.clear();
+        view.celestial = None;
+        view.clouds = None;
+        view.light_volume = None;
         view.generation += 1;
     }
 }

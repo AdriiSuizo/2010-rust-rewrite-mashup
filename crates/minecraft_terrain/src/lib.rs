@@ -2,6 +2,9 @@
 //! vanilla light solver and the section mesher, from MinecraftOSS
 //! (`engine/viewer`, commit 9e4108d) with its GPU binding code left out.
 pub use minecraftoss_core::fast_hash;
+pub mod clouds;
+pub mod day_cycle;
+pub mod environment;
 pub mod fluid;
 pub mod frame_spans;
 pub(crate) mod interface;

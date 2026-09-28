@@ -626,6 +626,8 @@ fn exact_pipeline_plan(
         },
         constants_layout: registry.bind_group_layout(device, &port.constants_layout),
         textures_layout: registry.bind_group_layout(device, &port.textures_layout),
+        minecraft_layout: registry
+            .bind_group_layout(device, &super::minecraft_light::layout_descriptor()),
     };
     (source, plan)
 }
@@ -3285,6 +3287,7 @@ fn submit_exact_draws<'a>(
     last_refusal: &mut Option<GpuSubmitRefusal>,
     encode_not_ready: &mut u32,
     focused_object_id: Option<u16>,
+    minecraft: Option<&BindGroup>,
 ) -> (u32, f32, [u32; 4], [u32; 4], u32, RecordCensus) {
     let mut draws = draws.into_iter().peekable();
     if draws.peek().is_none() {
@@ -3350,6 +3353,7 @@ fn submit_exact_draws<'a>(
                 last_refusal,
                 encode_not_ready,
                 focused_object_id,
+                minecraft,
             );
         indexed = indexed.saturating_add(run_indexed);
         focused_drawn = focused_drawn.saturating_add(run_focused_drawn);
@@ -3392,6 +3396,7 @@ fn submit_exact_draw_run<'a>(
     last_refusal: &mut Option<GpuSubmitRefusal>,
     encode_not_ready: &mut u32,
     focused_object_id: Option<u16>,
+    minecraft: Option<&BindGroup>,
 ) -> (u32, f32, [u32; 4], [u32; 4], u32, RecordCensus) {
     let attachments = [Some(attachment)];
     let mut pass = TrackedRenderPass::new(
@@ -3549,6 +3554,9 @@ fn submit_exact_draw_run<'a>(
         if bound_arena != Some(draw.arena_lane) {
             issue_indirect_batch!();
             pass.set_bind_group(0, constants_bind, &[]);
+            if let Some(minecraft) = minecraft {
+                pass.set_bind_group(super::minecraft_light::MINECRAFT_GROUP, minecraft, &[]);
+            }
             bound_arena = Some(draw.arena_lane);
             record_n.group0 = record_n.group0.saturating_add(1);
         }
@@ -4373,6 +4381,7 @@ fn record_shadowmap_draws<'a>(
     label: &'static str,
     miss: &mut u32,
     miss_rows: &mut BTreeMap<String, u32>,
+    minecraft: Option<&BindGroup>,
 ) -> (u32, RecordCensus) {
     let (sx, sy, sw, sh) = scissor_xywh(scissor);
     let vp = viewport;
@@ -4504,6 +4513,9 @@ fn record_shadowmap_draws<'a>(
         if !constants_bound {
             pass.set_bind_group(0, constants_bind, &[]);
             pass.set_bind_group(1, textures_bind, &[]);
+            if let Some(minecraft) = minecraft {
+                pass.set_bind_group(super::minecraft_light::MINECRAFT_GROUP, minecraft, &[]);
+            }
             constants_bound = true;
             record_n.group0 = record_n.group0.saturating_add(1);
             record_n.group1 = record_n.group1.saturating_add(1);
@@ -5006,6 +5018,7 @@ fn record_shadowmap_spot(
     context: &mut RenderContext,
     smodel_skinned_vertex: Option<&Buffer>,
     smodel_skinned_index: Option<&Buffer>,
+    minecraft: Option<&BindGroup>,
 ) -> SpotShadowSubmit {
     if work.all_prepared.is_empty() {
         return SpotShadowSubmit {
@@ -5055,6 +5068,7 @@ fn record_shadowmap_spot(
             "iw4_shadowmap_spot_slot",
             &mut work.miss,
             &mut work.miss_rows,
+            minecraft,
         );
         indexed = indexed.saturating_add(run_indexed);
         record_n.add(run_binds);
@@ -5641,6 +5655,7 @@ fn record_shadowmap_sun(
     context: &mut RenderContext,
     smodel_skinned_vertex: Option<&Buffer>,
     smodel_skinned_index: Option<&Buffer>,
+    minecraft: Option<&BindGroup>,
 ) -> SunShadowSubmit {
     if let Some(submit) = work.early.take() {
         return submit;
@@ -5705,6 +5720,7 @@ fn record_shadowmap_sun(
                 "iw4_shadowmap_sun_partition",
                 &mut work.miss,
                 &mut work.miss_rows,
+                minecraft,
             );
             indexed = indexed.saturating_add(run_indexed);
             record_n.add(run_binds);

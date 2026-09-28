@@ -1,6 +1,8 @@
 //! The Minecraft map's terrain: MinecraftOSS section meshes drawn before the
 //! exact material passes, with the same camera and scene depth range, so the
-//! players, weapons and effects that follow sort against it.
+//! players, weapons and effects that follow sort against it. The sky, clouds,
+//! lightmap and fog are MinecraftOSS's shaders driven by its environment
+//! uniform, so the world has Minecraft's day and night.
 use std::sync::Arc;
 
 use bevy::core_pipeline::{Core3d, Core3dSystems};
@@ -32,8 +34,6 @@ use super::scene_depth::{SCENE_DEPTH_FORMAT, SceneDepthTexture};
 /// Bytes of one MinecraftOSS `SectionVertex`: position, atlas uv, colour,
 /// sky and block light (times 16), padding.
 pub const MINECRAFT_VERTEX_BYTES: u64 = 28;
-/// Map units per block, as `sim::voxel::BLOCK`.
-const BLOCK: f32 = 40.0;
 
 pub struct MinecraftSectionUpload {
     pub pos: [i32; 3],
@@ -49,6 +49,12 @@ pub struct MinecraftAtlasImage {
     pub levels: Vec<Vec<u8>>,
 }
 
+/// Cloud geometry in blocks: position then colour per vertex.
+pub struct MinecraftClouds {
+    pub vertices: Vec<[f32; 7]>,
+    pub indices: Vec<u32>,
+}
+
 /// One frame of the Minecraft world as the render world sees it.
 #[derive(Resource, Default)]
 pub struct MinecraftWorldFrame {
@@ -60,22 +66,30 @@ pub struct MinecraftWorldFrame {
     pub removed: Vec<[i32; 3]>,
     pub visible: Vec<[i32; 3]>,
     pub generation: u64,
+    /// MinecraftOSS's environment uniform, in blocks.
+    pub environment: [[f32; 4]; 16],
+    /// Sun and moon phases side by side.
+    pub celestial: Option<Arc<MinecraftAtlasImage>>,
+    pub clouds: Option<Arc<MinecraftClouds>>,
+    /// First block, then sky and block light as unorm pairs.
+    pub light_volume: Option<Arc<([i32; 3], Vec<u8>)>>,
+    pub eye_light: [f32; 2],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct TerrainView {
     clip_from_rel: [f32; 16],
+    rel_from_clip: [f32; 16],
     /// View origin in map units.
     view: [f32; 4],
-    /// The block at map origin; `w` is the fog end in blocks.
+    /// The block at map origin.
     origin: [f32; 4],
-    sky: [f32; 4],
+    environment: [[f32; 4]; 16],
 }
 
 const VIEW_SIZE: u64 = std::mem::size_of::<TerrainView>() as u64;
-/// The plains sky colour, in sRGB values as Minecraft keeps it.
-const SKY: [f32; 4] = [0.47, 0.65, 1.0, 1.0];
+const CLOUD_VERTEX_BYTES: u64 = 28;
 
 struct SectionGpu {
     vertices: Buffer,
@@ -89,11 +103,13 @@ struct TerrainGpu {
     generation: u64,
     view: Option<Buffer>,
     atlas: Option<(Arc<MinecraftAtlasImage>, TextureView)>,
+    celestial: Option<(Arc<MinecraftAtlasImage>, TextureView)>,
+    clouds: Option<(Arc<MinecraftClouds>, Buffer, Buffer, u32)>,
     sampler: Option<Sampler>,
     bind: Option<BindGroup>,
     sections: HashMap<[i32; 3], SectionGpu>,
     visible: Vec<[i32; 3]>,
-    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 3]>,
+    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 4]>,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -125,6 +141,9 @@ fn layout() -> BindGroupLayoutDescriptor {
             sampler(SamplerBindingType::Filtering)
                 .visibility(ShaderStages::FRAGMENT)
                 .build(2, ShaderStages::FRAGMENT),
+            texture_2d(TextureSampleType::Float { filterable: true })
+                .visibility(ShaderStages::FRAGMENT)
+                .build(3, ShaderStages::FRAGMENT),
         ],
     )
 }
@@ -166,6 +185,36 @@ fn prepare_terrain(
         gpu.atlas = Some((atlas, view));
         gpu.bind = None;
     }
+    if let Some(celestial) = frame.celestial.clone()
+        && gpu
+            .celestial
+            .as_ref()
+            .is_none_or(|(held, _)| !Arc::ptr_eq(held, &celestial))
+    {
+        let view = upload_atlas(&device, &queue, &celestial);
+        gpu.celestial = Some((celestial, view));
+        gpu.bind = None;
+    }
+    match frame.clouds.clone() {
+        Some(clouds) if gpu.clouds.as_ref().is_none_or(|(held, ..)| !Arc::ptr_eq(held, &clouds)) => {
+            gpu.clouds = (!clouds.indices.is_empty()).then(|| {
+                let vertices = device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("iw4l_minecraft_cloud_vertices"),
+                    contents: bytemuck::cast_slice(&clouds.vertices),
+                    usage: BufferUsages::VERTEX,
+                });
+                let indices = device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("iw4l_minecraft_cloud_indices"),
+                    contents: bytemuck::cast_slice(&clouds.indices),
+                    usage: BufferUsages::INDEX,
+                });
+                let count = clouds.indices.len() as u32;
+                (clouds, vertices, indices, count)
+            });
+        }
+        Some(_) => {}
+        None => gpu.clouds = None,
+    }
     if gpu.view.is_none() {
         gpu.view = Some(device.create_buffer(&BufferDescriptor {
             label: Some("iw4l_minecraft_terrain_view"),
@@ -184,8 +233,12 @@ fn prepare_terrain(
         }));
     }
     if gpu.bind.is_none()
-        && let (Some(view), Some((_, atlas)), Some(sampler)) =
-            (gpu.view.as_ref(), gpu.atlas.as_ref(), gpu.sampler.as_ref())
+        && let (Some(view), Some((_, atlas)), Some((_, celestial)), Some(sampler)) = (
+            gpu.view.as_ref(),
+            gpu.atlas.as_ref(),
+            gpu.celestial.as_ref(),
+            gpu.sampler.as_ref(),
+        )
     {
         let layout = registry.bind_group_layout(&device, &layout());
         let bind = device.create_bind_group(
@@ -207,6 +260,10 @@ fn prepare_terrain(
                 BindGroupEntry {
                     binding: 2,
                     resource: BindingResource::Sampler(sampler),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::TextureView(celestial),
                 },
             ],
         );
@@ -244,14 +301,16 @@ fn prepare_terrain(
     gpu.visible = frame.visible.clone();
 
     let mut view = TerrainView {
-        sky: SKY,
+        environment: frame.environment,
         ..TerrainView::default()
     };
     if let Some(exec) = published.as_ref().map(|p| &p.exec_frame)
         && let Some(clip_from_world) = exec.clip_from_world
     {
         let o = exec.view_origin;
-        view.clip_from_rel = (clip_from_world * Mat4::from_translation(o)).to_cols_array();
+        let clip_from_rel = clip_from_world * Mat4::from_translation(o);
+        view.clip_from_rel = clip_from_rel.to_cols_array();
+        view.rel_from_clip = clip_from_rel.inverse().to_cols_array();
         view.view = [o.x, o.y, o.z, 1.0];
     }
     view.origin = [
@@ -322,7 +381,7 @@ fn draw_terrain(
     let (target, depth, extracted_view, msaa) = view.into_inner();
     let format = target.main_texture_format();
     let samples = msaa.map_or(1, Msaa::samples);
-    let [sky, opaque, translucent] = gpu
+    let [sky, opaque, translucent, clouds] = gpu
         .pipelines
         .entry((format, samples))
         .or_insert_with(|| pipelines(&device, &registry, format, samples))
@@ -371,27 +430,92 @@ fn draw_terrain(
         pass.set_index_buffer(section.indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(section.transparent_start..section.count, 0, 0..1);
     }
+    if let Some((_, vertices, indices, count)) = gpu.clouds.as_ref() {
+        pass.set_render_pipeline(&clouds);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(0..*count, 0, 0..1);
+    }
 }
 
 const TERRAIN_WGSL: &str = r#"
+// MinecraftOSS's environment uniform (viewer/src/sky.wgsl), in blocks.
+struct Environment {
+    forward: vec4<f32>, right: vec4<f32>, up: vec4<f32>, camera_pos: vec4<f32>,
+    sky: vec4<f32>, fog: vec4<f32>, light: vec4<f32>, sunset: vec4<f32>,
+    sun_dir: vec4<f32>, moon_dir: vec4<f32>, cloud: vec4<f32>, params: vec4<f32>,
+    extra: vec4<f32>,
+    fog_distances: vec4<f32>,
+    ambient: vec4<f32>,
+    block_tint: vec4<f32>,
+}
 struct TerrainView {
     clip_from_rel: mat4x4<f32>,
+    rel_from_clip: mat4x4<f32>,
     view: vec4<f32>,
     origin: vec4<f32>,
-    sky: vec4<f32>,
+    environment: Environment,
 }
 @group(0) @binding(0) var<uniform> view: TerrainView;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
+@group(0) @binding(3) var celestials: texture_2d<f32>;
 
 const BLOCK: f32 = 40.0;
+
+// Block space to map space relative to the view.
+fn rel_from_block(position: vec3<f32>) -> vec3<f32> {
+    let rel = position - view.origin.xyz;
+    return vec3<f32>(rel.x, -rel.z, rel.y) * BLOCK - view.view.xyz;
+}
+
+fn light_brightness(level: f32) -> f32 {
+    return level / (4.0 - 3.0 * level);
+}
+
+// Minecraft 26.3 lightmap.fsh as MinecraftOSS ports it: ambient, sky light
+// scaled by the sky factor, and tinted block light, then the brightness
+// option's notGamma blend.
+fn lightmap(sky_level: f32, block_level: f32) -> vec3<f32> {
+    let environment = view.environment;
+    let sky = sky_level / 15.0;
+    let block = block_level / 15.0;
+    var color = environment.ambient.rgb;
+    color += environment.light.rgb * (light_brightness(sky) * environment.light.w);
+    let parabolic = (2.0 * block - 1.0) * (2.0 * block - 1.0);
+    let block_color = mix(environment.block_tint.rgb, vec3<f32>(1.0), 0.9 * parabolic);
+    color += block_color * (light_brightness(block) * environment.block_tint.w);
+    color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+    let greatest = max(color.r, max(color.g, color.b));
+    let inverted = 1.0 - greatest;
+    let gamma = color * ((1.0 - inverted * inverted * inverted * inverted) / max(greatest, 0.00001));
+    return mix(color, gamma, environment.cloud.w);
+}
+
+// Minecraft 26.3 fog.glsl: the larger of spherical environmental fog and
+// cylindrical render-distance fog, each linear between its start and end.
+fn linear_fog_value(vertex_distance: f32, fog_start: f32, fog_end: f32) -> f32 {
+    if vertex_distance <= fog_start { return 0.0; }
+    if vertex_distance >= fog_end { return 1.0; }
+    return (vertex_distance - fog_start) / (fog_end - fog_start);
+}
+
+fn fog_value(world_pos: vec3<f32>) -> f32 {
+    let environment = view.environment;
+    let pos = world_pos - environment.camera_pos.xyz;
+    let spherical = length(pos);
+    let cylindrical = max(length(pos.xz), abs(pos.y));
+    return max(
+        linear_fog_value(spherical, environment.fog_distances.x, environment.fog_distances.y),
+        linear_fog_value(cylindrical, environment.fog_distances.z, environment.fog_distances.w),
+    );
+}
 
 struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) colour: vec4<f32>,
-    @location(2) light: vec2<f32>,
-    @location(3) distance: f32,
+    @location(2) world_pos: vec3<f32>,
 }
 
 @vertex
@@ -401,45 +525,20 @@ fn vertex(
     @location(2) colour: vec4<f32>,
     @location(3) light: vec2<f32>,
 ) -> Out {
-    let rel = position - view.origin.xyz;
-    let map = vec3<f32>(rel.x, -rel.z, rel.y) * BLOCK;
     var out: Out;
-    out.clip = view.clip_from_rel * vec4<f32>(map - view.view.xyz, 1.0);
+    out.clip = view.clip_from_rel * vec4<f32>(rel_from_block(position), 1.0);
     out.uv = uv;
-    out.colour = colour;
     // Unorm of level * 16 back to a level in 0..15.
-    out.light = light * 255.0 / 16.0;
-    out.distance = length(map - view.view.xyz) / BLOCK;
+    let level = light * (255.0 / 16.0);
+    out.colour = vec4<f32>(colour.rgb * lightmap(level.x, level.y), colour.a);
+    out.world_pos = position;
     return out;
-}
-
-fn light_brightness(level: f32) -> f32 {
-    return level / (4.0 - 3.0 * level);
-}
-
-// MinecraftOSS's port of 26.3 lightmap.fsh with a daytime Overworld: no
-// ambient light, full sky light, warm block light, and the default
-// brightness option's notGamma blend.
-fn lightmap(sky_level: f32, block_level: f32) -> vec3<f32> {
-    let sky = sky_level / 15.0;
-    let block = block_level / 15.0;
-    var color = vec3<f32>(light_brightness(sky));
-    let parabolic = (2.0 * block - 1.0) * (2.0 * block - 1.0);
-    let block_color = mix(vec3<f32>(1.0, 0.85, 0.7), vec3<f32>(1.0), 0.9 * parabolic);
-    color += block_color * light_brightness(block);
-    color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
-    let greatest = max(color.r, max(color.g, color.b));
-    let inverted = 1.0 - greatest;
-    let gamma = color * ((1.0 - inverted * inverted * inverted * inverted) / max(greatest, 0.00001));
-    return mix(color, gamma, 0.5);
 }
 
 // Minecraft's values are display values, as the target's are.
 fn shade(in: Out, texel: vec4<f32>) -> vec4<f32> {
-    let lit = texel.rgb * in.colour.rgb * lightmap(in.light.x, in.light.y);
-    let fog_end = max(view.origin.w, 16.0);
-    let fog = smoothstep(fog_end * 0.75, fog_end, in.distance);
-    return vec4<f32>(mix(lit, view.sky.rgb, fog), texel.a * in.colour.a);
+    let lit = texel.rgb * in.colour.rgb;
+    return vec4<f32>(mix(lit, view.environment.fog.rgb, fog_value(in.world_pos)), texel.a * in.colour.a);
 }
 
 @fragment
@@ -457,23 +556,114 @@ fn translucent(in: Out) -> @location(0) vec4<f32> {
     return shade(in, texel);
 }
 
+// viewer/src/sky.wgsl, with the view ray taken from the MW2 camera.
 struct SkyOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) height: f32,
+    @location(0) ndc: vec2<f32>,
 }
 
 @vertex
 fn sky_vertex(@builtin(vertex_index) index: u32) -> SkyOut {
     let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
     var out: SkyOut;
-    out.clip = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
-    out.height = uv.y;
+    out.ndc = uv * 2.0 - 1.0;
+    out.clip = vec4<f32>(out.ndc, 0.0, 1.0);
     return out;
+}
+
+fn celestial(ray: vec3<f32>, direction: vec3<f32>, half_size: f32, slot: f32, moon: bool) -> vec4<f32> {
+    let facing = dot(ray, direction);
+    if facing <= 0.0 { return vec4<f32>(0.0); }
+    // SkyRenderer rotates the XZ quad by Y=-90 degrees and then by the
+    // celestial X angle: local +X becomes world +Z, local +Z becomes
+    // (-direction.y, direction.x, 0). Its quads sit 100 units from the eye.
+    let tangent_u = vec3<f32>(0.0, 0.0, 1.0);
+    let tangent_v = vec3<f32>(-direction.y, direction.x, 0.0);
+    let projected = ray / facing;
+    var uv = vec2<f32>(dot(projected, tangent_u), dot(projected, tangent_v)) / (2.0 * half_size) + 0.5;
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { return vec4<f32>(0.0); }
+    // The moon phase quad reverses both texture axes in buildMoonPhases.
+    if moon { uv = vec2<f32>(1.0) - uv; }
+    let atlas_uv = vec2<f32>((slot + uv.x) / 9.0, uv.y);
+    return textureSampleLevel(celestials, atlas_sampler, atlas_uv, 0.0);
+}
+
+fn hash2(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+fn stars(ray: vec3<f32>) -> f32 {
+    let angle = view.environment.params.w;
+    let ca = cos(angle);
+    let sa = sin(angle);
+    let turned = vec3<f32>(ray.x, ray.y * ca - ray.z * sa, ray.y * sa + ray.z * ca);
+    let spherical = vec2<f32>(atan2(turned.z, turned.x) / 6.2831853 + 0.5, asin(clamp(turned.y, -1.0, 1.0)) / 3.14159265 + 0.5);
+    let cell_uv = spherical * vec2<f32>(320.0, 160.0);
+    let cell = floor(cell_uv);
+    let seed = hash2(cell);
+    if seed < 0.982 { return 0.0; }
+    let center = vec2<f32>(hash2(cell + 9.0), hash2(cell + 31.0));
+    let size = 0.045 + hash2(cell + 51.0) * 0.035;
+    let offset = abs(fract(cell_uv) - center);
+    return select(0.0, view.environment.params.z, all(offset < vec2<f32>(size)));
 }
 
 @fragment
 fn sky_fragment(in: SkyOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(mix(view.sky.rgb * 1.05, view.sky.rgb * 0.85, in.height), 1.0);
+    let environment = view.environment;
+    let far = view.rel_from_clip * vec4<f32>(in.ndc, 0.5, 1.0);
+    let map_ray = far.xyz / far.w;
+    let ray = normalize(vec3<f32>(map_ray.x, map_ray.z, -map_ray.y));
+    // SkyRenderer's 16-block-high fan has a 512-block radius. Its fog value
+    // interpolates between the center and rim vertex distances.
+    var color = environment.fog.rgb;
+    if ray.y > 0.0 {
+        let radius = 16.0 * length(ray.xz) / ray.y;
+        if radius < 512.0 {
+            let vertex_distance = mix(16.0, length(vec2<f32>(512.0, 16.0)), radius / 512.0);
+            color = mix(environment.sky.rgb, environment.fog.rgb, clamp(vertex_distance / environment.fog.w, 0.0, 1.0));
+        }
+    }
+    if ray.y > -0.01 {
+        let star = stars(ray) * smoothstep(-0.01, 0.07, ray.y);
+        color = mix(color, vec3<f32>(1.0), star);
+    }
+    let sun_horizontal = normalize(vec3<f32>(environment.sun_dir.x, 0.0, environment.sun_dir.z + 0.0001));
+    let view_horizontal = normalize(vec3<f32>(ray.x, 0.0, ray.z + 0.0001));
+    let sunset = environment.sunset.a * pow(max(dot(sun_horizontal, view_horizontal), 0.0), 8.0)
+        * (1.0 - smoothstep(0.0, 0.35, abs(ray.y)));
+    color = mix(color, environment.sunset.rgb, sunset);
+    let sun = celestial(ray, environment.sun_dir.xyz, 0.3, 0.0, false);
+    // Minecraft's celestial pipeline uses OVERLAY (source alpha, destination one).
+    color = min(color + sun.rgb * sun.a * environment.sun_dir.w, vec3<f32>(1.0));
+    let moon = celestial(ray, environment.moon_dir.xyz, 0.2, environment.extra.x + 1.0, true);
+    color = min(color + moon.rgb * moon.a * environment.moon_dir.w, vec3<f32>(1.0));
+    return vec4<f32>(color, 1.0);
+}
+
+// viewer/src/clouds.wgsl.
+struct CloudOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) colour: vec4<f32>,
+    @location(1) distance: f32,
+}
+
+@vertex
+fn cloud_vertex(@location(0) position: vec3<f32>, @location(1) colour: vec4<f32>) -> CloudOut {
+    // CloudRenderer moves the texture at 0.03 blocks per game tick, with a
+    // fixed 3.96-block Z phase. Geometry is rebuilt only on cell boundaries.
+    let world = position - vec3<f32>(view.environment.extra.y, 0.0, 3.96);
+    var out: CloudOut;
+    out.clip = view.clip_from_rel * vec4<f32>(rel_from_block(world), 1.0);
+    out.colour = colour;
+    out.distance = distance(world, view.environment.camera_pos.xyz);
+    return out;
+}
+
+@fragment
+fn cloud_fragment(in: CloudOut) -> @location(0) vec4<f32> {
+    let alpha = 0.8 * (1.0 - clamp(in.distance / 1024.0, 0.0, 1.0));
+    return vec4<f32>(view.environment.cloud.rgb * in.colour.rgb, alpha);
 }
 "#;
 
@@ -482,7 +672,7 @@ fn pipelines(
     registry: &ExactPipelineRegistry,
     format: TextureFormat,
     samples: u32,
-) -> [RenderPipeline; 3] {
+) -> [RenderPipeline; 4] {
     let shader = unsafe {
         device.create_shader_module(ShaderModuleDescriptor {
             label: Some("iw4l_minecraft_terrain"),
@@ -525,6 +715,23 @@ fn pipelines(
         array_stride: MINECRAFT_VERTEX_BYTES,
         step_mode: VertexStepMode::Vertex,
         attributes: &attributes,
+    }];
+    let cloud_attributes = [
+        VertexAttribute {
+            format: VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        VertexAttribute {
+            format: VertexFormat::Float32x4,
+            offset: 12,
+            shader_location: 1,
+        },
+    ];
+    let cloud_buffers = [RawVertexBufferLayout {
+        array_stride: CLOUD_VERTEX_BYTES,
+        step_mode: VertexStepMode::Vertex,
+        attributes: &cloud_attributes,
     }];
     let make = |vertex: &str, fragment: &str, buffers: &[RawVertexBufferLayout], depth_write: bool, compare: CompareFunction, blend: Option<BlendState>| {
         device.create_render_pipeline(&RawRenderPipelineDescriptor {
@@ -572,6 +779,14 @@ fn pipelines(
             "vertex",
             "translucent",
             &buffers,
+            false,
+            CompareFunction::GreaterEqual,
+            Some(BlendState::ALPHA_BLENDING),
+        ),
+        make(
+            "cloud_vertex",
+            "cloud_fragment",
+            &cloud_buffers,
             false,
             CompareFunction::GreaterEqual,
             Some(BlendState::ALPHA_BLENDING),

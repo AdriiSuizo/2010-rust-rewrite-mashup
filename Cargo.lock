@@ -5196,6 +5196,7 @@ name = "render_anim"
 version = "0.1.0"
 dependencies = [
  "anim_iw4",
+ "anyhow",
  "asset_iw4",
  "assets",
  "audio",
@@ -5210,6 +5211,7 @@ dependencies = [
  "gamemode_iw4",
  "glam 0.29.3",
  "hud_iw4",
+ "image",
  "lighting_iw4",
  "math_iw4",
  "minecraft_terrain",
@@ -5336,6 +5338,7 @@ dependencies = [
  "hud",
  "hud_iw4",
  "lighting_iw4",
+ "naga",
  "perf",
  "render_backend",
  "render_frame",
