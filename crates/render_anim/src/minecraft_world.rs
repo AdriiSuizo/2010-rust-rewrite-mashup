@@ -84,6 +84,7 @@ struct Runtime {
     light_volume_age: u32,
     cloud_center: Option<(i32, i32)>,
     mining: crate::minecraft_mining::Mining,
+    inventory_ui: crate::minecraft_inventory::InventoryUi,
     entities: Option<crate::minecraft_entities::Entities>,
     /// Shape id of each block state already seen.
     shapes: HashMap<BlockStateId, u16>,
@@ -94,6 +95,8 @@ struct Runtime {
 
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<MinecraftWorldView>()
+        .init_resource::<frame::MinecraftUi>()
+        .init_resource::<frame::InventoryPuppet>()
         .insert_non_send(Runtime::default())
         .add_systems(
             Update,
@@ -188,6 +191,11 @@ fn update(
     presented: Res<net::PresentedSnapshot>,
     authority: Option<ResMut<net::AuthorityWorld>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    (mut ui, mut puppet, mut images): (
+        ResMut<frame::MinecraftUi>,
+        ResMut<frame::InventoryPuppet>,
+        ResMut<Assets<Image>>,
+    ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
 ) {
@@ -279,12 +287,18 @@ fn update(
         cloud_center,
         mining,
         entities,
+        inventory_ui,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
+        ui.active = false;
+        ui.inventory_open = false;
+        puppet.active = false;
         return;
     };
     let Some(ps) = presented.player(local.0) else {
+        ui.active = false;
+        puppet.active = false;
         return;
     };
 
@@ -382,7 +396,9 @@ fn update(
         time.elapsed_secs_f64(),
     );
     if let Some(entities) = entities.as_mut() {
-        entities.broke(&world.scene, &broken);
+        let positions: Vec<_> = broken.iter().map(|(pos, ..)| *pos).collect();
+        entities.broke(&world.scene, &positions);
+        entities.drop_blocks(&broken);
     }
 
     let eye = sim::voxel::to_block(origin, [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current]);
@@ -463,6 +479,73 @@ fn update(
         for (amount, from) in hits {
             sim::voxel::push_player_damage(local.0.0, amount, from.map(|b| sim::voxel::to_map(origin, b)));
         }
+        // The inventory: MW2 guns as items, the HUD's clicks, the hotbar's
+        // gun, and what the HUD shows.
+        let owned: Vec<u32> = ps
+            .weapons
+            .iter()
+            .filter(|&&w| w > 0)
+            .map(|&w| w as u32)
+            .filter(|&w| authority.0.weapon_combat_row(w).is_some_and(|facts| facts.inventory_type == 0))
+            .collect();
+        ui.active = alive;
+        if !alive {
+            ui.inventory_open = false;
+        }
+        inventory_ui.sync_weapons(&mut entities.inventory, &owned);
+        let mut selected = entities.selected;
+        let thrown = inventory_ui.apply_input(&mut ui, &mut entities.inventory, &mut selected);
+        let thrower = crate::minecraft_inventory::Thrower {
+            eye: glam::DVec3::from_array(eye),
+            yaw: mc_yaw,
+            pitch: ps.viewangles[0],
+        };
+        crate::minecraft_inventory::throw(&mut entities.world_items, thrown, &thrower);
+        ui.weapon_request = inventory_ui.weapon_request(&entities.inventory, &mut selected, ps.weapon as u32);
+        entities.selected = selected;
+        inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
+
+        // The player's MW2 body stands in the inventory's character box: in
+        // front of the camera where the box shows, facing it, turned and
+        // aiming towards the mouse.
+        puppet.active = false;
+        if ui.inventory_open
+            && alive
+            && let (Some([cx, cy, box_h]), Ok(window)) = (ui.character_box, windows.single())
+        {
+            let (w, h) = (window.width().max(1.0), window.height().max(1.0));
+            let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
+            let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
+            let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
+            let up = right.cross(fwd).normalize_or(Vec3::Z);
+            // Hor+ MW2: 65 degrees across at 4:3, so about 51 up the screen.
+            let tan_v = (51.0f32.to_radians() * 0.5).tan();
+            let distance = 30.0;
+            let ndc = [cx / w * 2.0 - 1.0, 1.0 - cy / h * 2.0];
+            let scale = (box_h / h) * 2.0 * distance * tan_v / 76.0;
+            let eye_map = Vec3::new(ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current);
+            let centre = eye_map
+                + fwd * distance
+                + right * (ndc[0] * distance * tan_v * (w / h))
+                + up * (ndc[1] * distance * tan_v);
+            let feet = centre - up * (36.0 * scale);
+            // Facing the camera, turned by the mouse as vanilla's
+            // `InventoryScreen.renderEntityInInventoryFollowsMouse` turns its body.
+            let turn = (ui.gaze[0] * 1.2).atan() * 0.7;
+            let facing = -fwd * turn.cos() + right * turn.sin();
+            let x_axis = (facing - up * facing.dot(up)).normalize_or(-fwd);
+            let y_axis = up.cross(x_axis);
+            puppet.root = Mat4::from_cols(
+                (x_axis * scale).extend(0.0),
+                (y_axis * scale).extend(0.0),
+                (up * scale).extend(0.0),
+                feet.extend(1.0),
+            );
+            puppet.pitch = (ui.gaze[1] * 1.2).atan().to_degrees() * 0.6;
+            puppet.client = local.0.0;
+            puppet.active = true;
+        }
+
         sim::voxel::set_mob_boxes(entities.boxes());
         entities.tick_scene(&world.scene, mob_ticks);
         let sky_darken = (15.0 - world.environment.sky_light_level()).clamp(0.0, 15.0) as u8;

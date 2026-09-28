@@ -14,6 +14,12 @@ use minecraft_terrain::server::{PlayerEdit, ServerHandle, ServerSim, TickInput};
 use minecraft_terrain::terrain::TerrainStream;
 use minecraft_terrain::client_mobs::{ClientMobs, server_mobs};
 use minecraft_terrain::mesh::ItemVisuals;
+use minecraft_terrain::server::{EntitySnapshot, ServerItem};
+use minecraftoss_player::inventory::{Inventory, ItemStack};
+use minecraftoss_player::items::{ItemEntity, WorldItems};
+use minecraftoss_player::loot::LootBook;
+use minecraftoss_player::rng::XoroshiroRandom;
+use std::collections::{HashMap, HashSet};
 use minecraft_terrain::pack::PackStack;
 use minecraft_terrain::poof_particles::PoofParticles;
 use minecraft_terrain::portal_particles::PortalParticles;
@@ -39,7 +45,31 @@ pub(crate) struct Entities {
     items: ItemVisuals,
     clock: f64,
     ticks: u64,
+    /// The player's inventory: vanilla slots, stacking and recipes.
+    pub(crate) inventory: Inventory,
+    /// The selected hotbar slot.
+    pub(crate) selected: usize,
+    /// Item entities as the client shows them: the server's, and drops the
+    /// client spawned that the server has not taken yet.
+    pub(crate) world_items: WorldItems,
+    server_item_ids: HashSet<u32>,
+    /// Client drops handed to the server: the command count that sent each.
+    server_handed: HashMap<u32, (u64, ItemEntity)>,
+    /// Stacks the server let the player pick up, not yet in the inventory.
+    server_picked: Vec<(i32, [f64; 3], String, i32, Option<String>)>,
+    server_snapshot: Option<EntitySnapshot>,
+    server_handled: u64,
+    loot: Option<LootBook>,
+    loot_sequences: HashMap<String, XoroshiroRandom>,
+    seed: i64,
+    random: minecraftoss_player::rng::LegacyRandom,
 }
+
+/// What bullets and blasts count as for block loot: vanilla drops nothing
+/// from stone or ores broken bare-handed.
+const LOOT_TOOL: &str = "minecraft:diamond_pickaxe";
+/// TNT's power: a blast drops each block's loot one time in this many.
+const BLAST_POWER: f32 = 4.0;
 
 /// The mobs drawn this frame: entity models (cut out, back-face culled,
 /// translucent) and their shadows, in `mesh::Vertex`s; and what goes with
@@ -67,9 +97,27 @@ impl Entities {
     pub(crate) fn new(stream: &TerrainStream, seed: i64) -> Self {
         let sim = ServerSim::new(stream.world_gen(), stream.states.clone(), "minecraft:overworld");
         let mut server = ServerHandle::spawn(sim);
-        // Mob loot, from the game's data JAR when MinecraftOSS has one.
-        if let Some(jar) = data_jar() {
-            server.load_loot(jar, seed as u64);
+        // Mob and block loot and the recipes (stack sizes), from the game's
+        // data JAR when MinecraftOSS has one.
+        let jar = data_jar();
+        let mut inventory = Inventory::default();
+        let mut loot = None;
+        if let Some(jar) = jar {
+            server.load_loot(jar.clone(), seed as u64);
+            match minecraftoss_player::crafting::RecipeBook::from_jar(&jar) {
+                Ok(recipes) => {
+                    let recipes = std::sync::Arc::new(recipes);
+                    server.set_recipe_book(recipes.clone());
+                    inventory.recipes = recipes;
+                }
+                Err(error) => diag::warn!(World, "Minecraft recipes unavailable: {error:#}"),
+            }
+            match LootBook::from_jar(&jar) {
+                Ok(book) => loot = Some(book),
+                Err(error) => diag::warn!(World, "Minecraft block loot unavailable: {error:#}"),
+            }
+        } else {
+            diag::warn!(World, "Minecraft data JAR not found: no loot or recipes");
         }
         Self {
             server,
@@ -80,6 +128,18 @@ impl Entities {
             items: ItemVisuals::default(),
             clock: 0.0,
             ticks: 0,
+            inventory,
+            selected: 0,
+            world_items: WorldItems::default(),
+            server_item_ids: HashSet::new(),
+            server_handed: HashMap::new(),
+            server_picked: Vec::new(),
+            server_snapshot: None,
+            server_handled: 0,
+            loot,
+            loot_sequences: HashMap::new(),
+            seed,
+            random: minecraftoss_player::rng::LegacyRandom::new((seed ^ 0x1735) as u64),
         }
     }
 
@@ -89,6 +149,128 @@ impl Entities {
 
     pub(crate) fn unload_chunk(&mut self, pos: minecraftoss_core::ChunkPos) {
         self.server.unload_chunk(pos);
+    }
+
+    /// Block loot for what the weapons broke, dropped as vanilla drops it
+    /// (`Block.popResource`); a blast keeps each drop one time in four.
+    pub(crate) fn drop_blocks(&mut self, broken: &[((i32, i32, i32), Block, bool)]) {
+        let Some(loot) = self.loot.as_ref() else {
+            return;
+        };
+        let tool = ItemStack::new(LOOT_TOOL, 1);
+        for (pos, block, blast) in broken {
+            let block = minecraftoss_player::Block { id: block.id.key(), properties: block.properties.clone() };
+            let Some(drops) = loot.roll_drops_named(&block, Some(&tool), self.seed as u64, &mut self.loot_sequences) else {
+                continue;
+            };
+            for mut drop in drops {
+                if *blast && self.random.next_float() >= 1.0 / BLAST_POWER {
+                    continue;
+                }
+                if drop.components.is_none() {
+                    drop.max = drop.max.min(self.inventory.recipes.max_stack(&drop.id));
+                }
+                self.world_items.spawn_block_drop(drop, *pos);
+            }
+        }
+    }
+
+    /// `ItemEntity`s to draw and pick up, as the viewer's
+    /// `server_items_tick` does for a server-simulated world: client drops
+    /// go to the server, stacks the server offered go into the inventory,
+    /// and the server's items are mirrored for drawing.
+    fn server_items_tick(&mut self, feet: DVec3) {
+        let entities = std::mem::take(&mut self.world_items.entities);
+        let to_hand: Vec<ItemEntity> = entities
+            .iter()
+            .filter(|e| !self.server_item_ids.contains(&e.entity_id) && !self.server_handed.contains_key(&e.entity_id))
+            .cloned()
+            .collect();
+        for entity in &to_hand {
+            let components = entity.stack.components.as_ref().map(|c| c.to_string());
+            self.server.spawn_item(
+                &entity.stack.id,
+                i32::from(entity.stack.count),
+                components.as_deref(),
+                entity.position.to_array(),
+                entity.velocity.to_array(),
+                i32::from(entity.pickup_delay),
+                entity.age as i32,
+            );
+            self.server_handed.insert(entity.entity_id, (self.server.sent(), entity.clone()));
+        }
+        let previous: HashMap<u32, ItemEntity> = entities.into_iter().map(|e| (e.entity_id, e)).collect();
+        let target = feet + DVec3::Y * 0.81;
+        self.world_items.tick_pickup_effects(target);
+        for (id, position, item, count, components) in std::mem::take(&mut self.server_picked) {
+            let recipes = self.inventory.recipes.clone();
+            let make_stack = |item: &str, count: i32| {
+                let mut stack = ItemStack::new(item, count.clamp(0, 255) as u8);
+                stack.components = components.as_deref().and_then(|c| serde_json::from_str(c).ok());
+                if stack.components.is_none() {
+                    stack.max = stack.max.min(recipes.max_stack(item));
+                }
+                stack
+            };
+            let taken = match self.inventory.add_item(make_stack(&item, count), self.selected) {
+                None => count,
+                Some(rest) => {
+                    let rest_count = i32::from(rest.count);
+                    self.server.spawn_item(&item, rest_count, components.as_deref(), feet.to_array(), [0.0; 3], 0, 0);
+                    count - rest_count
+                }
+            };
+            if taken <= 0 {
+                continue;
+            }
+            let transfer = make_stack(&item, taken);
+            let snapshot = previous.get(&(id as u32)).cloned().unwrap_or_else(|| ItemEntity {
+                entity_id: id as u32,
+                stack: transfer.clone(),
+                position: DVec3::from_array(position),
+                previous_position: DVec3::from_array(position),
+                velocity: DVec3::ZERO,
+                age: 0,
+                bob_offset: bob_offset(id),
+                pickup_delay: 0,
+                on_ground: true,
+            });
+            self.world_items.note_pickup(snapshot, target, transfer);
+        }
+        let Some(snapshot) = self.server_snapshot.take() else {
+            self.world_items.entities = previous.into_values().collect();
+            self.world_items.entities.sort_by_key(|e| e.entity_id);
+            return;
+        };
+        let recipes = self.inventory.recipes.clone();
+        self.world_items.entities = snapshot
+            .items
+            .into_iter()
+            .map(|item: ServerItem| {
+                let mut stack = ItemStack::new(&item.item, item.count.clamp(0, 255) as u8);
+                stack.components = item.components.as_deref().and_then(|c| serde_json::from_str(c).ok());
+                if stack.components.is_none() {
+                    stack.max = stack.max.min(recipes.max_stack(&item.item));
+                }
+                ItemEntity {
+                    entity_id: item.id as u32,
+                    stack,
+                    position: DVec3::from_array(item.position),
+                    previous_position: DVec3::from_array(item.previous_position),
+                    velocity: DVec3::from_array(item.velocity),
+                    age: item.age.max(0) as u32,
+                    bob_offset: bob_offset(item.id),
+                    pickup_delay: item.pickup_delay.clamp(0, i32::from(u16::MAX)) as u16,
+                    on_ground: item.on_ground,
+                }
+            })
+            .collect();
+        self.server_item_ids = self.world_items.entities.iter().map(|e| e.entity_id).collect();
+        let handled = self.server_handled;
+        self.server_handed.retain(|_, (sent, _)| *sent > handled);
+        for (_, entity) in self.server_handed.values() {
+            self.world_items.entities.push(entity.clone());
+        }
     }
 
     /// Client ticks run so far.
@@ -133,7 +315,8 @@ impl Entities {
         player: &PlayerView,
     ) -> (Vec<((i32, i32, i32), Option<Block>)>, Vec<(i32, Option<[f64; 3]>)>) {
         self.clock += dt;
-        if self.clock >= TICK_SECONDS {
+        let ticked = self.clock >= TICK_SECONDS;
+        if ticked {
             self.clock = (self.clock - TICK_SECONDS).min(TICK_SECONDS);
             self.ticks += 1;
             // Packets first, then the client level's entity ticks.
@@ -175,7 +358,9 @@ impl Entities {
                 difficulty: 2,
                 simulation_center: center,
                 simulation_distance: 8,
-                pickup: None,
+                pickup: player
+                    .alive
+                    .then(|| (player.feet, Box::new(self.inventory.clone()), self.selected)),
                 mob_players: vec![candidate],
                 mob_views: vec![(
                     PLAYER,
@@ -201,6 +386,11 @@ impl Entities {
         let mut changes = Vec::new();
         let mut hits = Vec::new();
         for output in self.server.poll() {
+            self.server_handled = output.handled;
+            if let Some(snapshot) = output.entities {
+                self.server_snapshot = Some(snapshot);
+            }
+            self.server_picked.extend(output.picked);
             changes.extend(output.changes);
             if let Some(mobs) = output.mobs {
                 self.world = *mobs;
@@ -215,6 +405,9 @@ impl Entities {
                 };
                 hits.push(((hit.damage / HEALTH_SCALE).round() as i32, from));
             }
+        }
+        if ticked {
+            self.server_items_tick(DVec3::from_array(player.feet));
         }
         (changes, hits)
     }
@@ -357,6 +550,11 @@ impl Entities {
             forward,
             light,
         );
+        if let Ok(items) = self.items.mesh(&self.world_items, packs, atlas, light, partial) {
+            let base = out.items.vertices.len() as u32;
+            out.items.vertices.extend(items.vertices);
+            out.items.indices.extend(items.indices.iter().map(|i| i + base));
+        }
         self.poof.append_mesh(&mut out.items, atlas, forward, partial, light);
         self.portal.append_mesh(&mut out.items, atlas, forward, partial, light);
         let held: Vec<_> =
@@ -372,6 +570,12 @@ impl Entities {
         }
         out
     }
+}
+
+/// The viewer's `server_bob_offset`: a server item's bob phase from its id.
+fn bob_offset(id: i32) -> f32 {
+    let hash = (id as u32).wrapping_mul(0x9e37_79b9).rotate_left(13).wrapping_mul(0x85eb_ca6b);
+    hash as f32 / u32::MAX as f32 * std::f32::consts::TAU
 }
 
 /// The game's data JAR the MinecraftOSS harness downloaded (loot tables,

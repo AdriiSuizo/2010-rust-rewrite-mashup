@@ -164,6 +164,7 @@ fn begin_remote_body_tess() {}
 
 fn occupy_remote_scene_ents(
     skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
@@ -215,6 +216,7 @@ fn occupy_remote_scene_ents(
             .map(|ps| ps.other_flags)
             .unwrap_or(0),
         rendering_third_person: (skate.active && !skate.bones.is_empty())
+            || puppet.as_ref().is_some_and(|p| p.active)
             || crate::occupancy::third_person::presented_is_third_person(
                 &presented, local.0, in_killcam,
             ),
@@ -301,6 +303,7 @@ fn occupy_remote_scene_ents(
 
 fn sync_remote_bodies(
     skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
     mut commands: Commands,
     local: Res<LocalPresentClient>,
     presented: Res<PresentedSnapshot>,
@@ -331,6 +334,7 @@ fn sync_remote_bodies(
             .map(|ps| ps.other_flags)
             .unwrap_or(0),
         rendering_third_person: (skate.active && !skate.bones.is_empty())
+            || puppet.as_ref().is_some_and(|p| p.active)
             || crate::occupancy::third_person::presented_is_third_person(
                 &presented, local.0, in_killcam,
             ),
@@ -394,6 +398,9 @@ fn sync_remote_bodies(
         if skate.active && !skate.bones.is_empty() && client.0 == skate.client {
             pose = Transform::from_matrix(skate.root);
         }
+        if let Some(puppet) = puppet.as_ref().filter(|p| p.active && client.0 == p.client) {
+            pose = Transform::from_matrix(puppet.root);
+        }
         let marker = RemotePlayer {
             is_bot: meta.is_some_and(|m| {
                 m.name == entity_iw4::pack_client_state_name("bot")
@@ -439,6 +446,7 @@ enum RemoteSkinAction<'a> {
 
 struct RemotePoseFrame<'a> {
     skate: &'a frame::SkateMode,
+    puppet: Option<&'a frame::InventoryPuppet>,
     script: &'a assets::ParsedPlayerAnimScript,
     tree: &'a assets::CompiledAnimTreeDefinition,
     catalog: &'a assets::XAnimCatalog,
@@ -488,6 +496,7 @@ fn remote_body_scene_slot(
 
 fn pose_remote_bodies(
     skate: Res<frame::SkateMode>,
+    puppet: Option<Res<frame::InventoryPuppet>>,
     time: Res<Time>,
     gaps: Res<RenderPresentationGaps>,
     sources: Option<Res<assets::PlayerAnimSources>>,
@@ -610,6 +619,7 @@ fn pose_remote_bodies(
     let last_cache_hits = pose_hashes.take_last_cache_hits();
     let mut pose_frame = RemotePoseFrame {
         skate: &skate,
+        puppet: puppet.as_deref(),
         script,
         tree,
         catalog: &xanims.0,
@@ -756,7 +766,10 @@ impl<'a> RemotePoseFrame<'a> {
         let world_weapons = self.world_weapons;
         let kits = self.kits;
         let weapon = sample.weapon;
-        let view_pitch_deg = sample.view_pitch_deg;
+        let view_pitch_deg = match self.puppet {
+            Some(puppet) if puppet.active && persist_key == puppet.client => puppet.pitch,
+            _ => sample.view_pitch_deg,
+        };
         let prone = sample.prone;
         let crouch = sample.crouch;
         let dt = self.dt;

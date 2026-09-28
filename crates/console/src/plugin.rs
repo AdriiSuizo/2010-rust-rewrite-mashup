@@ -424,11 +424,12 @@ fn publish_client_action_input(
     binds: Res<KeyBinds>,
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
-    menu: Res<MenuEnabled>,
+    (menu, minecraft): (Res<MenuEnabled>, Option<Res<frame::MinecraftUi>>),
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
 ) {
+    let inventory_open = minecraft.as_ref().is_some_and(|ui| ui.active && ui.inventory_open);
     skate.input_blocked = console.open || menu.0;
     if !skate.input_blocked && keys.just_pressed(KeyCode::KeyJ) { skate.toggle_requested = true; }
     hud_input.menu_open = menu.0;
@@ -469,7 +470,7 @@ fn publish_client_action_input(
     let now = out.now_msec;
     let frame = out.frame_msec;
 
-    if console.open || menu.0 || keys.just_pressed(KeyCode::Escape) {
+    if console.open || menu.0 || inventory_open || keys.just_pressed(KeyCode::Escape) {
         for _ in motion.read() {}
         for key_num in 0..input_iw4::KEY_COUNT {
             if out.client.keys[key_num].down != 0 {
@@ -542,6 +543,7 @@ fn publish_client_action_input(
 fn sync_cursor_grab(
     console: Res<ConsoleState>,
     menu: Option<Res<MenuEnabled>>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
     screen: Option<Res<AppScreen>>,
     mut focused: MessageReader<WindowFocused>,
     mut entered: MessageReader<CursorEntered>,
@@ -553,7 +555,8 @@ fn sync_cursor_grab(
     }
     returned |= entered.read().count() > 0;
 
-    let menu_open = menu.map(|m| m.0).unwrap_or(false);
+    let menu_open = menu.map(|m| m.0).unwrap_or(false)
+        || minecraft.is_some_and(|ui| ui.active && ui.inventory_open);
     let in_game = screen
         .as_ref()
         .is_some_and(|s| matches!(**s, AppScreen::InGame));

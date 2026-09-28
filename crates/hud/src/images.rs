@@ -149,6 +149,12 @@ pub struct HudImages {
 }
 
 impl HudImages {
+    /// An image made at run time, drawn under a material name of its own.
+    pub fn insert_runtime(&mut self, name: &str, handle: Handle<Image>) {
+        self.by_name
+            .insert(iwd_key(HUD_CHROME_NAMESPACE, name, HudSampling::Color, None), Some(handle));
+    }
+
     pub fn set_games_root(&mut self, root: &Path) {
         if self.games_root == root {
             return;

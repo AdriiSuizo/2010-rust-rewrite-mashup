@@ -180,6 +180,8 @@ pub struct HudTessPass {
     pub mantle_hint: TessJob,
     pub use_hint: TessJob,
     pub match_start: TessJob,
+    /// The Minecraft map's hotbar and inventory.
+    pub minecraft: TessJob,
 }
 
 /// What the HUD tess flush systems' own bodies cost this frame.

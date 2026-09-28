@@ -723,7 +723,7 @@ fn reliable_seq_after(a: u16, b: u16) -> bool {
 }
 
 pub fn sample_client_input(
-    skate: Option<Res<frame::SkateMode>>,
+    (skate, mut minecraft): (Option<Res<frame::SkateMode>>, Option<ResMut<frame::MinecraftUi>>),
     time: Res<Time>,
     mut actions: ResMut<ClientActionInput>,
     mut look: ResMut<LookState>,
@@ -825,6 +825,24 @@ pub fn sample_client_input(
             } else {
                 ps.weapon
             };
+        }
+    }
+    // On a Minecraft map the hotbar picks the gun: MW2's weapon cycling and
+    // action slots give way to the gun its selection asks for.
+    let hotbar = minecraft.as_ref().is_some_and(|ui| ui.active);
+    if hotbar {
+        actions.client.action_slots.clear();
+        actions.client.weapon_cycles.clear();
+        if let (Some(ps), Some(ui)) = (ps.filter(|_| !frozen), minecraft.as_mut())
+            && let Some(target) = ui.weapon_request
+            && target != select.index
+            && ps.weapons.contains(&(target as i32))
+            && input_iw4::weapon_select::weapon_cycle_allowed(ps, clock.time(), select.time, 0, 0)
+        {
+            select.index = target;
+            select.mapped_index = target;
+            select.time = clock.time();
+            input_iw4::cl_set_ads(&mut actions.client, false);
         }
     }
     let slots = std::mem::take(&mut actions.client.action_slots);

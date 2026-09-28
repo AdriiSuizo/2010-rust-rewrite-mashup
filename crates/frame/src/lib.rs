@@ -33,3 +33,5 @@ pub use ui_sound::{UiPlayMusic, UiPlaySound, UiStopMusic, register_ui_sound};
 
 pub mod skate;
 pub use skate::SkateMode;
+pub mod minecraft_ui;
+pub use minecraft_ui::{InventoryPuppet, McClick, McSlot, McStack, MinecraftUi};

@@ -16,6 +16,7 @@ mod killcam_skip;
 mod killfeed;
 mod mantle_hint;
 mod match_start;
+mod minecraft_inventory;
 mod overhead_names;
 mod playercard;
 mod plugin;

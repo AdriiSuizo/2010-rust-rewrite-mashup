@@ -61,17 +61,18 @@ impl Mining {
         ((self.rng >> 40) as u32 as f32) / ((1u32 << 24) as f32)
     }
 
-    /// Applies this tick's shots and explosions; the blocks they broke.
+    /// Applies this tick's shots and explosions; the blocks they broke, each
+    /// with whether a blast broke it.
     pub(crate) fn apply(
         &mut self,
         events: Vec<sim::voxel::VoxelEvent>,
         world: &mut WorldRefs<'_>,
         now: f64,
-    ) -> Vec<BlockPos> {
+    ) -> Vec<(BlockPos, minecraft_terrain::scene::Block, bool)> {
         if self.particles.is_none() {
             self.particles = BlockParticles::new(world.packs).ok();
         }
-        let mut broken = Vec::new();
+        let mut broken: Vec<(BlockPos, bool)> = Vec::new();
         for event in events {
             match event {
                 sim::voxel::VoxelEvent::Shot { block, damage } => {
@@ -89,14 +90,14 @@ impl Mining {
                         {
                             let _ = particles.spawn(world.packs, &*world.scene, pos, &block, world.atlas);
                         }
-                        broken.push(pos);
+                        broken.push((pos, false));
                     }
                 }
                 sim::voxel::VoxelEvent::Explosion { center } => {
                     for pos in self.exploded_positions(world, center, TNT_POWER) {
                         if hardness(world, pos).is_some() {
                             self.progress.remove(&pos);
-                            broken.push(pos);
+                            broken.push((pos, true));
                         }
                     }
                 }
@@ -105,17 +106,22 @@ impl Mining {
         }
         self.progress.retain(|_, (_, at)| now - *at < PROGRESS_SECONDS);
         if broken.is_empty() {
-            return broken;
+            return Vec::new();
         }
         broken.sort_unstable();
-        broken.dedup();
-        for &pos in &broken {
+        broken.dedup_by_key(|(pos, _)| *pos);
+        let mut out = Vec::with_capacity(broken.len());
+        for &(pos, blast) in &broken {
+            if let Some(block) = Scene::block(&*world.scene, pos).cloned() {
+                out.push((pos, block, blast));
+            }
             world.scene.set(pos, None);
             sim::voxel::set_block_shape(pos.0, pos.1, pos.2, 0);
         }
-        world.stream.record_edits(world.scene, &broken);
-        world.stream.mark_edited(world.scene, &broken);
-        broken
+        let positions: Vec<BlockPos> = broken.iter().map(|(pos, _)| *pos).collect();
+        world.stream.record_edits(world.scene, &positions);
+        world.stream.mark_edited(world.scene, &positions);
+        out
     }
 
     /// `ServerExplosion.calculateExplodedPositions`: rays from the centre
