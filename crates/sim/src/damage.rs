@@ -137,6 +137,38 @@ pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &
     apply_glass_blast_hits(world, tick, glass);
 }
 
+/// Damage the Minecraft world's mobs dealt players this tick, as world
+/// damage the player does to itself.
+pub(crate) fn apply_block_world_damage(world: &mut FrameWorld, tick: Tick) {
+    if !world.publishes_snapshot() {
+        return;
+    }
+    for (client, amount, from) in crate::voxel::take_player_damage() {
+        let target = ClientId(client);
+        let Some(meta) = world.client_meta(target) else {
+            continue;
+        };
+        if meta.lifecycle != ClientLifecycle::Alive || amount <= 0 {
+            continue;
+        }
+        let life = meta.life_sequence;
+        let attempt = DamageAttempt {
+            source: crate::DamageSource::Melee,
+            pellet: crate::PelletId(0),
+            attacker: target,
+            attacker_life: life,
+            target,
+            target_life: life,
+            weapon: 0,
+            amount,
+            killcam_entity_start_time: 0,
+            inflictor_origin: from,
+            hitloc: 0,
+        };
+        let _ = apply_damage_attempt(world, tick, &attempt);
+    }
+}
+
 pub(crate) fn apply_explosion_destructibles(
     world: &mut FrameWorld,
     blast: &ExplosionBlast,

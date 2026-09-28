@@ -790,6 +790,7 @@ fn run_players_system(ecs: &mut World) {
 
     *world.old_buttons_mut() = original_buttons;
     *world.old_cmd_angles_mut() = original_angles;
+    crate::damage::apply_block_world_damage(&mut world, tick);
 
     restamp_debug_move_look(&mut world, &input.actions);
 

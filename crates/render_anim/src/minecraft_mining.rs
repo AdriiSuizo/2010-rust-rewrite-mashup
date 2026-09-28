@@ -61,8 +61,13 @@ impl Mining {
         ((self.rng >> 40) as u32 as f32) / ((1u32 << 24) as f32)
     }
 
-    /// Applies this tick's shots and explosions.
-    pub(crate) fn apply(&mut self, events: Vec<sim::voxel::VoxelEvent>, world: &mut WorldRefs<'_>, now: f64) {
+    /// Applies this tick's shots and explosions; the blocks they broke.
+    pub(crate) fn apply(
+        &mut self,
+        events: Vec<sim::voxel::VoxelEvent>,
+        world: &mut WorldRefs<'_>,
+        now: f64,
+    ) -> Vec<BlockPos> {
         if self.particles.is_none() {
             self.particles = BlockParticles::new(world.packs).ok();
         }
@@ -95,11 +100,12 @@ impl Mining {
                         }
                     }
                 }
+                sim::voxel::VoxelEvent::MobShot { .. } => {}
             }
         }
         self.progress.retain(|_, (_, at)| now - *at < PROGRESS_SECONDS);
         if broken.is_empty() {
-            return;
+            return broken;
         }
         broken.sort_unstable();
         broken.dedup();
@@ -109,6 +115,7 @@ impl Mining {
         }
         world.stream.record_edits(world.scene, &broken);
         world.stream.mark_edited(world.scene, &broken);
+        broken
     }
 
     /// `ServerExplosion.calculateExplodedPositions`: rays from the centre

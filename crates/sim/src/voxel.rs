@@ -48,6 +48,9 @@ pub enum VoxelEvent {
     Shot { block: [i32; 3], damage: f32 },
     /// An explosion went off here, in blocks.
     Explosion { center: [f64; 3] },
+    /// A bullet struck the mob with this key, with the damage it would have
+    /// done at that range, from this block point.
+    MobShot { key: u64, damage: f32, from: [f64; 3] },
 }
 
 static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::new());
@@ -82,6 +85,82 @@ pub fn push_explosion(origin: [f32; 3]) {
     if let Ok(mut events) = EVENTS.lock() {
         events.push(VoxelEvent::Explosion { center });
     }
+}
+
+/// The world's mobs as bullets see them: a key and a block-space box
+/// `[min, max]` each.
+static MOB_BOXES: RwLock<Vec<(u64, [f64; 6])>> = RwLock::new(Vec::new());
+
+pub fn set_mob_boxes(boxes: Vec<(u64, [f64; 6])>) {
+    if let Ok(mut held) = MOB_BOXES.write() {
+        *held = boxes;
+    }
+}
+
+/// The nearest mob on the map-space segment `start`..`end`: its key and the
+/// distance to it in map units.
+pub(crate) fn mob_on_segment(start: [f32; 3], end: [f32; 3]) -> Option<(u64, f32)> {
+    let world = WORLD.read().ok()?;
+    let origin = world.as_ref()?.origin;
+    let a = to_block(origin, start);
+    let b = to_block(origin, end);
+    let d: [f64; 3] = std::array::from_fn(|k| b[k] - a[k]);
+    let boxes = MOB_BOXES.read().ok()?;
+    let mut best: Option<(u64, f64)> = None;
+    for &(key, bb) in boxes.iter() {
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        let mut hit = true;
+        for k in 0..3 {
+            if d[k].abs() < 1e-12 {
+                if a[k] < bb[k] || a[k] > bb[k + 3] {
+                    hit = false;
+                    break;
+                }
+                continue;
+            }
+            let (u, v) = ((bb[k] - a[k]) / d[k], (bb[k + 3] - a[k]) / d[k]);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+            if t0 > t1 {
+                hit = false;
+                break;
+            }
+        }
+        if hit && best.is_none_or(|(_, t)| t0 < t) {
+            best = Some((key, t0));
+        }
+    }
+    let length = f64::from(
+        ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2) + (end[2] - start[2]).powi(2)).sqrt(),
+    );
+    best.map(|(key, t)| (key, (t * length) as f32))
+}
+
+pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3]) {
+    let Ok(world) = WORLD.read() else {
+        return;
+    };
+    let Some(world) = world.as_ref() else {
+        return;
+    };
+    let from = to_block(world.origin, from);
+    if let Ok(mut events) = EVENTS.lock() {
+        events.push(VoxelEvent::MobShot { key, damage, from });
+    }
+}
+
+/// Damage the world's mobs dealt the players: client, amount, and where it
+/// came from in map space.
+static PLAYER_DAMAGE: std::sync::Mutex<Vec<(u32, i32, Option<[f32; 3]>)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn push_player_damage(client: u32, amount: i32, from: Option<[f32; 3]>) {
+    if let Ok(mut damage) = PLAYER_DAMAGE.lock() {
+        damage.push((client, amount, from));
+    }
+}
+
+pub(crate) fn take_player_damage() -> Vec<(u32, i32, Option<[f32; 3]>)> {
+    PLAYER_DAMAGE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default()
 }
 
 pub fn take_events() -> Vec<VoxelEvent> {
@@ -122,6 +201,8 @@ pub fn deactivate() {
         *world = None;
     }
     let _ = take_events();
+    let _ = take_player_damage();
+    set_mob_boxes(Vec::new());
 }
 
 /// Adds shape ids to the table and returns the first new id.

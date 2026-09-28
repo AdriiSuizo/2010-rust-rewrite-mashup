@@ -5216,6 +5216,8 @@ dependencies = [
  "math_iw4",
  "minecraft_terrain",
  "minecraftoss-core",
+ "minecraftoss-entities",
+ "minecraftoss-player",
  "net",
  "perf",
  "playerstate_iw4",

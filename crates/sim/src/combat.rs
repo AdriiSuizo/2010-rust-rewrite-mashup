@@ -1050,6 +1050,18 @@ pub(crate) fn phase_trace(
             continue;
         }
         let mut glass_hit: Vec<u32> = Vec::new();
+        let mut mob_shot = false;
+        if world.publishes_snapshot() && crate::voxel::active() {
+            let first_surface = segments
+                .iter()
+                .find(|s| matches!(s.collider, None | Some(ColliderId::World { .. })))
+                .map_or(end, |s| s.end);
+            if let Some((key, dist)) = crate::voxel::mob_on_segment(em.origin, first_surface) {
+                let damage = bullet_damage_at_distance(&facts, dist).max(0) as f32;
+                crate::voxel::push_mob_shot(key, damage, em.origin);
+                mob_shot = true;
+            }
+        }
         for segment in &segments {
             let exit = segment.surface_flags & fx_iw4::FX_IMPACT_EXIT_SURFACE_FLAG != 0;
             let dist = {
@@ -1127,6 +1139,7 @@ pub(crate) fn phase_trace(
             };
             if matches!(segment.collider, None | Some(ColliderId::World { .. }))
                 && !exit
+                && !mob_shot
                 && world.publishes_snapshot()
                 && crate::voxel::active()
             {

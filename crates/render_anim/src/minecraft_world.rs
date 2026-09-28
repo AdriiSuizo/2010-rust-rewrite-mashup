@@ -81,6 +81,7 @@ struct Runtime {
     light_volume_age: u32,
     cloud_center: Option<(i32, i32)>,
     mining: crate::minecraft_mining::Mining,
+    entities: Option<crate::minecraft_entities::Entities>,
     /// Shape id of each block state already seen.
     shapes: HashMap<BlockStateId, u16>,
     /// Boxes of each shape id, to reuse an id for a repeated shape.
@@ -221,6 +222,7 @@ fn update(
                 view.celestial = Some(world.celestial.clone());
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
+                runtime.entities = Some(crate::minecraft_entities::Entities::new(&world.stream));
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -273,6 +275,7 @@ fn update(
         light_volume_age,
         cloud_center,
         mining,
+        entities,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -329,6 +332,9 @@ fn update(
                 }
             }
         }
+        if let Some(entities) = entities.as_mut() {
+            entities.load_chunk(&chunk);
+        }
         sim::voxel::set_chunk(
             chunk.pos.x,
             chunk.pos.z,
@@ -341,11 +347,28 @@ fn update(
     }
     for pos in forgotten {
         sim::voxel::remove_chunk(pos.x, pos.z);
+        if let Some(entities) = entities.as_mut() {
+            entities.unload_chunk(pos);
+        }
     }
 
-    // Shots and explosions from the authoritative game.
-    mining.apply(
-        sim::voxel::take_events(),
+    // Shots and explosions from the authoritative game: bullets that met a
+    // mob hurt it, the rest mine.
+    let (mob_shots, events): (Vec<_>, Vec<_>) = sim::voxel::take_events()
+        .into_iter()
+        .partition(|event| matches!(event, sim::voxel::VoxelEvent::MobShot { .. }));
+    // Minecraft's yaw: 0 facing +Z (map -Y), turning towards -X.
+    let yaw_rad = ps.viewangles[1].to_radians();
+    let mc_yaw = (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees();
+    if let Some(entities) = entities.as_mut() {
+        for shot in mob_shots {
+            if let sim::voxel::VoxelEvent::MobShot { key, damage, from } = shot {
+                entities.shoot(key, damage, from, mc_yaw);
+            }
+        }
+    }
+    let broken = mining.apply(
+        events,
         &mut crate::minecraft_mining::WorldRefs {
             stream: &mut world.stream,
             scene: &mut world.scene,
@@ -355,6 +378,9 @@ fn update(
         },
         time.elapsed_secs_f64(),
     );
+    if let Some(entities) = entities.as_mut() {
+        entities.broke(&world.scene, &broken);
+    }
 
     let eye = sim::voxel::to_block(origin, [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current]);
     let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
@@ -389,6 +415,59 @@ fn update(
     let dt = time.delta_secs_f64();
     let partial = mining.tick(&world.scene, dt);
     view.particles = mining.particle_mesh(&world.atlas, forward, partial, light);
+
+    // The mobs: a server tick when due, the blocks it changed, its hits on
+    // the player, the mobs' boxes for bullets and their meshes.
+    if let Some(entities) = entities.as_mut() {
+        let player = crate::minecraft_entities::PlayerView {
+            feet,
+            alive,
+            health: ps.health as f32,
+            yaw: mc_yaw,
+            pitch: ps.viewangles[0],
+        };
+        let bright_outside = world.environment.sky_light_level() > 11.0;
+        let (changes, hits) = entities.tick(dt, day.ticks as i64, bright_outside, &player);
+        if !changes.is_empty() {
+            let blocks = &world.registries.blocks;
+            let mut positions = Vec::with_capacity(changes.len());
+            for (pos, block) in changes {
+                let state = block.as_ref().and_then(|b| world.stream.states.state_of(b));
+                let shape = state.map_or(0, |state| {
+                    *shapes.entry(state).or_insert_with(|| {
+                        let boxes = blocks.collision_boxes(state);
+                        if boxes.is_empty() {
+                            return 0;
+                        }
+                        let key: Vec<[u32; 6]> = boxes.iter().map(|b| b.map(|v| (v as f32).to_bits())).collect();
+                        if let Some(&id) = shape_ids.get(&key) {
+                            return id;
+                        }
+                        let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
+                        let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
+                        shape_ids.insert(key, id);
+                        id
+                    })
+                });
+                sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
+                world.scene.set(pos, block);
+                positions.push(pos);
+            }
+            world.stream.mark_edited(&world.scene, &positions);
+        }
+        for (amount, from) in hits {
+            sim::voxel::push_player_damage(local.0.0, amount, from.map(|b| sim::voxel::to_map(origin, b)));
+        }
+        sim::voxel::set_mob_boxes(entities.boxes());
+        let mut mesh = minecraft_terrain::mesh::ChunkMesh::default();
+        entities.append_mesh(&mut mesh, &world.scene, &world.atlas, light, forward);
+        let (bytes, indices) = &mut view.particles;
+        let base = (bytes.len() / std::mem::size_of::<minecraft_terrain::mesh::SectionVertex>()) as u32;
+        let vertices: Vec<minecraft_terrain::mesh::SectionVertex> =
+            mesh.vertices.iter().map(minecraft_terrain::mesh::SectionVertex::from_vertex).collect();
+        bytes.extend_from_slice(bytemuck::cast_slice(&vertices));
+        indices.extend(mesh.indices.iter().map(|i| i + base));
+    }
     view.cracks = mining.crack_mesh();
     day.advance(dt);
     let eye_block = (eye[0].floor() as i32, eye[1].floor() as i32, eye[2].floor() as i32);
