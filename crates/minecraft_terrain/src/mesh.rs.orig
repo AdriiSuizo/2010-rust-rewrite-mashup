@@ -483,18 +483,6 @@ fn build_internal<S: Scene>(scene: &S, packs: &PackStack, preload_blocks: bool) 
         ResourceId::parse("minecraft:entity/equipment/pig_saddle/saddle")?,
         (),
     );
-    for id in crate::horse_render::all_textures() {
-        textures.insert(id, ());
-    }
-    // Humanoid armour (`EquipmentLayerRenderer`'s humanoid layers).
-    for layer in ["humanoid", "humanoid_leggings"] {
-        for material in crate::armor_render::MATERIALS.iter().copied().chain(["leather_overlay"]) {
-            let id = ResourceId::parse(&format!("minecraft:entity/equipment/{layer}/{material}"))?;
-            if packs.texture(&id)?.is_some() {
-                textures.insert(id, ());
-            }
-        }
-    }
     for chunk in scene.chunks() {
         for x in chunk.0 * 16..chunk.0 * 16 + 16 {
             for z in chunk.1 * 16..chunk.1 * 16 + 16 {
@@ -688,8 +676,6 @@ pub struct ItemVisuals {
 struct ItemVisual {
     model: ResolvedModel,
     ground: Mat4,
-    /// The `thirdperson_righthand` display transform.
-    right_hand: Mat4,
     min_y: f32,
     tints: Vec<[f32; 3]>,
     flat: bool,
@@ -719,7 +705,6 @@ impl ItemVisuals {
                 return Ok(None);
             }
             let ground = crate::model::item_display_transform(packs, &resource, "ground")?;
-            let right_hand = crate::model::item_display_transform(packs, &resource, "thirdperson_righthand")?;
             let definition = packs.item_definition(&resource)?;
             let tints = definition
                 .as_ref()
@@ -747,7 +732,6 @@ impl ItemVisuals {
                 ItemVisual {
                     model,
                     ground,
-                    right_hand,
                     min_y: min.y,
                     tints,
                     flat: max.z - min.z <= 0.0625,
@@ -917,28 +901,6 @@ impl ItemVisuals {
         Ok(())
     }
 
-    /// Items mobs hold (`ItemInHandLayer`, `CrossedArmsItemLayer`): each
-    /// under its holder's pose, then its display transform, tinted as its
-    /// item definition says, lit at its point.
-    pub fn append_held_items(&mut self, mesh: &mut ChunkMesh, items: &[HeldItem], packs: &PackStack, atlas: &Atlas, sky_light: &SkyLight) -> Result<()> {
-        for item in items {
-            let Some((display, mut tints)) = self.model(&item.id, packs)?.map(|visual| {
-                (match item.display { HeldDisplay::RightHand => visual.right_hand, HeldDisplay::Ground => visual.ground }, visual.tints.clone())
-            }) else {
-                continue;
-            };
-            if let Some(color) = item.first_tint {
-                if tints.is_empty() {
-                    tints.push(color);
-                } else {
-                    tints[0] = color;
-                }
-            }
-            self.append_model(mesh, &item.id, item.light, item.pose * display, 1.0, Some(&tints), packs, atlas, sky_light)?;
-        }
-        Ok(())
-    }
-
     /// Block models under whole poses (an enderman's carried block), each lit
     /// at its point.
     pub fn append_posed_blocks(&mut self, mesh: &mut ChunkMesh, blocks: &[(Mat4, Vec3, String)], packs: &PackStack, atlas: &Atlas, sky_light: &SkyLight) -> Result<()> {
@@ -948,16 +910,9 @@ impl ItemVisuals {
         Ok(())
     }
 
-    /// One item model placed with a pose, lit at `pos`, untinted.
+    /// One item model placed with a pose, lit at `pos`.
     #[allow(clippy::too_many_arguments)]
     fn append_block_model(&mut self, mesh: &mut ChunkMesh, id: &str, pos: Vec3, pose: Mat4, brightness: f32, packs: &PackStack, atlas: &Atlas, sky_light: &SkyLight) -> Result<()> {
-        self.append_model(mesh, id, pos, pose, brightness, None, packs, atlas, sky_light)
-    }
-
-    /// One item model placed with a pose, lit at `pos`, its faces with a
-    /// tint index coloured from `tints` when given.
-    #[allow(clippy::too_many_arguments)]
-    fn append_model(&mut self, mesh: &mut ChunkMesh, id: &str, pos: Vec3, pose: Mat4, brightness: f32, tints: Option<&[[f32; 3]]>, packs: &PackStack, atlas: &Atlas, sky_light: &SkyLight) -> Result<()> {
         let Some(visual) = self.model(id, packs)? else {
             return Ok(());
         };
@@ -982,13 +937,12 @@ impl ItemVisuals {
                     ];
                     let normal = pose.transform_vector3(face_normal(&face.direction)?).normalize();
                     let shade = level_item_shade(normal) * if white { 4.0 } else { 1.0 };
-                    let tint = tints.zip(face.tint_index).and_then(|(tints, index)| tints.get(index)).copied().unwrap_or([1.0; 3]);
                     let start = mesh.vertices.len() as u32;
                     for (corner, uv) in corners.into_iter().zip(uv) {
                         mesh.vertices.push(Vertex {
                             position: pose.transform_point3(Vec3::from_array(corner)).to_array(),
                             uv,
-                            color: [tint[0] * shade, tint[1] * shade, tint[2] * shade, 1.0],
+                            color: [shade, shade, shade, 1.0],
                             sky_light: sky,
                             block_light: block,
                         });
@@ -1002,67 +956,15 @@ impl ItemVisuals {
     }
 }
 
-/// Which display transform a held item takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeldDisplay {
-    /// `THIRD_PERSON_RIGHT_HAND` (`ItemInHandLayer`).
-    RightHand,
-    /// `GROUND` (`CrossedArmsItemLayer`, a witch's potion).
-    Ground,
-}
-
-/// An item a mob holds: its holder's pose, where it is lit, the item, its
-/// display and a colour for its first tint (a potion's).
-#[derive(Clone, Debug)]
-pub struct HeldItem {
-    pub pose: Mat4,
-    pub light: Vec3,
-    pub id: String,
-    pub display: HeldDisplay,
-    pub first_tint: Option<[f32; 3]>,
-}
-
-/// What `EntityRenderer.extractShadow` reads of one entity.
-#[derive(Clone, Copy, Debug)]
-pub struct ShadowCaster {
-    /// The render state's position: the interpolated feet.
-    pub position: glam::DVec3,
-    /// `distanceToCameraSq`: from the entity's current position.
-    pub distance_squared: f64,
-    /// `getShadowRadius`, before the 32-block cap.
-    pub radius: f32,
-    /// `getShadowStrength`.
-    pub strength: f32,
-}
-
-/// Dropped items' shadows (`ItemEntityRenderer`: radius 0.15, strength
-/// 0.75).
-pub fn item_shadow_casters(items: &WorldItems, camera_position: glam::DVec3, partial_tick: f32) -> Vec<ShadowCaster> {
-    items
-        .entities
-        .iter()
-        .map(|entity| ShadowCaster {
-            position: entity.previous_position.lerp(entity.position, f64::from(partial_tick.clamp(0.0, 1.0))),
-            distance_squared: entity.position.distance_squared(camera_position),
-            radius: 0.15,
-            strength: 0.75,
-        })
-        .collect()
-}
-
-/// `EntityRenderer.extractShadow`/`extractShadowPiece` and
-/// `ShadowFeatureRenderer`: each block column under the entity within its
-/// radius, down to a depth its strength allows, gets the shadow texture
-/// on top of a full-collision, visible block below a spot lit above 3,
-/// fading with depth and darkening with that light (`Lightmap.
-/// getBrightness`). `raw_brightness` is `getMaxLocalRawBrightness`; the
-/// texture clamps outside the circle, so each quad is cut to the radius.
-pub fn entity_shadows<S: Scene>(
-    casters: &[ShadowCaster],
+/// EntityRenderer.extractShadowPiece and ShadowFeatureRenderer for dropped
+/// items. The source shadow is a 0.15-block radius textured quad projected
+/// onto each full collision face immediately below the entity.
+pub fn item_shadows<S: Scene>(
+    items: &WorldItems,
     scene: &S,
     atlas: &Atlas,
-    raw_brightness: &dyn Fn(BlockPos) -> u8,
-    ambient_light: f32,
+    camera_position: Vec3,
+    partial_tick: f32,
 ) -> Result<ChunkMesh> {
     let mut mesh = ChunkMesh::default();
     let sprite = ResourceId::parse("minecraft:misc/shadow")?;
@@ -1070,61 +972,69 @@ pub fn entity_shadows<S: Scene>(
         return Ok(mesh);
     }
     let [u0, v0, u1, v1] = atlas.region(&sprite);
-    for caster in casters {
-        let radius = caster.radius.min(32.0);
-        if radius <= 0.0 {
+    let radius = 0.15_f32;
+    for entity in &items.entities {
+        let position = entity
+            .previous_position
+            .lerp(entity.position, partial_tick.clamp(0.0, 1.0) as f64)
+            .as_vec3();
+        let distance_squared = position.distance_squared(camera_position);
+        let power = (1.0 - distance_squared / 256.0) * 0.75;
+        if power <= 0.0 {
             continue;
         }
-        let pow = ((1.0 - caster.distance_squared / 256.0) * f64::from(caster.strength)) as f32;
-        if pow <= 0.0 {
-            continue;
-        }
-        let state = caster.position;
-        let r = f64::from(radius);
-        let depth = (pow / 0.5 - 1.0).min(radius);
-        let (x0, x1) = ((state.x - r).floor() as i32, (state.x + r).floor() as i32);
-        let (z0, z1) = ((state.z - r).floor() as i32, (state.z + r).floor() as i32);
-        let (y0, y1) = ((state.y - f64::from(depth)).floor() as i32, state.y.floor() as i32);
-        for z in z0..=z1 {
-            for x in x0..=x1 {
-                for y in y0..=y1 {
-                    let power_at_depth = pow - (state.y - f64::from(y)) as f32 * 0.5;
-                    let below = (x, y - 1, z);
-                    // RenderShape.INVISIBLE: air and barriers.
-                    if scene.block(below).is_none_or(|b| matches!(b.id.path.as_str(), "air" | "cave_air" | "void_air" | "barrier" | "structure_void" | "light" | "moving_piston")) {
+        let depth = (power / 0.5 - 1.0).min(radius);
+        for x in (position.x - radius).floor() as i32..=(position.x + radius).floor() as i32 {
+            for z in (position.z - radius).floor() as i32..=(position.z + radius).floor() as i32 {
+                for y in (position.y - depth).floor() as i32..=position.y.floor() as i32 {
+                    let Some(block) = scene.block((x, y - 1, z)) else {
+                        continue;
+                    };
+                    let path = block.id.path.as_str();
+                    if matches!(
+                        path,
+                        "air" | "water" | "lava" | "short_grass" | "tall_grass" | "torch" | "chest"
+                    ) || path.ends_with("_slab")
+                        || path.ends_with("_stairs")
+                    {
                         continue;
                     }
-                    let brightness = raw_brightness((x, y, z));
-                    if brightness <= 3 || !scene.full_collision_at(below) {
+                    let alpha = ((power - (position.y - y as f32) * 0.5) * 0.5).clamp(0.0, 1.0);
+                    if alpha <= 0.0 {
                         continue;
                     }
-                    let v = f32::from(brightness) / 15.0;
-                    let curved = v / (4.0 - 3.0 * v);
-                    let light = ambient_light * (1.0 - curved) + curved;
-                    let alpha = (power_at_depth * 0.5 * light).clamp(0.0, 1.0);
-                    // The piece's corners relative to the entity, as floats.
-                    let (rx, ry, rz) = ((f64::from(x) - state.x) as f32, (f64::from(y) - state.y) as f32, (f64::from(z) - state.z) as f32);
-                    let (x_min, x_max) = (rx.max(-radius), (rx + 1.0).min(radius));
-                    let (z_min, z_max) = (rz.max(-radius), (rz + 1.0).min(radius));
+                    let x_min = (position.x - radius).max(x as f32);
+                    let x_max = (position.x + radius).min(x as f32 + 1.0);
+                    let z_min = (position.z - radius).max(z as f32);
+                    let z_max = (position.z + radius).min(z as f32 + 1.0);
                     if x_min >= x_max || z_min >= z_max {
                         continue;
                     }
-                    let origin = state.as_vec3();
                     let start = mesh.vertices.len() as u32;
-                    for (px, pz) in [(x_min, z_min), (x_min, z_max), (x_max, z_max), (x_max, z_min)] {
-                        let su = -px / 2.0 / radius + 0.5;
-                        let sv = -pz / 2.0 / radius + 0.5;
+                    for (px, pz) in [
+                        (x_min, z_min),
+                        (x_min, z_max),
+                        (x_max, z_max),
+                        (x_max, z_min),
+                    ] {
+                        let su = 0.5 - (px - position.x) / (2.0 * radius);
+                        let sv = 0.5 - (pz - position.z) / (2.0 * radius);
                         mesh.vertices.push(Vertex {
-                            // Lifted a thousandth off the block top so it
-                            // never loses the depth test to it.
-                            position: (origin + Vec3::new(px, ry + 0.001, pz)).to_array(),
+                            position: [px, y as f32 + 0.001, pz],
                             uv: [u0 + (u1 - u0) * su, v0 + (v1 - v0) * sv],
                             color: [1.0, 1.0, 1.0, alpha],
                             sky_light: 15.0,
                             block_light: 0.0,
                         });
                     }
-                    mesh.indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+                    mesh.indices.extend_from_slice(&[
+                        start,
+                        start + 1,
+                        start + 2,
+                        start,
+                        start + 2,
+                        start + 3,
+                    ]);
                     mesh.faces += 1;
                 }
             }
@@ -1253,32 +1163,9 @@ fn rotated_direction(dir: &str, degrees: u16) -> Result<&str> {
 }
 pub fn make_atlas(packs: &PackStack, mut textures: Vec<ResourceId>) -> Result<Atlas> {
     textures.insert(0, ResourceId::parse("minecraft:missingno")?);
+    let count = textures.len();
+    let side = (count as f32).sqrt().ceil() as u32;
     let tile = 64u32;
-    // Entity skins keep their own resolution, as vanilla binds each one on
-    // its own: one larger than a cell spans several cells, a texel to a
-    // pixel. Everything else fills one cell.
-    let mut images = Vec::with_capacity(textures.len());
-    let mut spans = Vec::with_capacity(textures.len());
-    for id in &textures {
-        let bytes = if id.path == "missingno" { None } else { packs.texture(id)? };
-        let span = match &bytes {
-            Some(bytes) if id.path.starts_with("entity/") && packs.animation(id)?.is_none() => {
-                let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png).into_dimensions()?;
-                (width.div_ceil(tile).max(1), height.div_ceil(tile).max(1))
-            }
-            _ => (1, 1),
-        };
-        images.push(bytes);
-        spans.push(span);
-    }
-    let cells: u32 = spans.iter().map(|&(w, h)| w * h).sum();
-    let mut side = (cells as f32).sqrt().ceil() as u32;
-    let positions = loop {
-        if let Some(positions) = place_cells(&spans, side) {
-            break positions;
-        }
-        side += 1;
-    };
     let mut pixels = RgbaImage::new(side * tile, side * tile);
     let mut mipmaps = (1..=4)
         .map(|level| RgbaImage::new(side * (tile >> level), side * (tile >> level)))
@@ -1288,9 +1175,13 @@ pub fn make_atlas(packs: &PackStack, mut textures: Vec<ResourceId>) -> Result<At
     let mut animated = Vec::new();
     let mut animated_tiles = Vec::new();
     for (i, id) in textures.into_iter().enumerate() {
-        let (col, row) = positions[i];
-        let (span_w, span_h) = spans[i];
-        let image = images[i].take();
+        let col = i as u32 % side;
+        let row = i as u32 / side;
+        let image = if id.path == "missingno" {
+            None
+        } else {
+            packs.texture(&id)?
+        };
         let mut dark_cutout = false;
         let mut native_leaf_mips = None;
         let tile_image = if let Some(bytes) = image {
@@ -1341,7 +1232,7 @@ pub fn make_atlas(packs: &PackStack, mut textures: Vec<ResourceId>) -> Result<At
                     FilterType::Nearest,
                 )
             } else {
-                image::imageops::resize(&frame, span_w * tile, span_h * tile, FilterType::Nearest)
+                image::imageops::resize(&frame, tile, tile, FilterType::Nearest)
             }
         } else {
             if id.path != "missingno" {
@@ -1388,8 +1279,8 @@ pub fn make_atlas(packs: &PackStack, mut textures: Vec<ResourceId>) -> Result<At
                 .map(|level| {
                     image::imageops::resize(
                         &tile_image,
-                        (span_w * tile) >> level,
-                        (span_h * tile) >> level,
+                        tile >> level,
+                        tile >> level,
                         FilterType::Triangle,
                     )
                 })
@@ -1419,8 +1310,8 @@ pub fn make_atlas(packs: &PackStack, mut textures: Vec<ResourceId>) -> Result<At
             [
                 (col * tile) as f32 / width + 0.5 / width,
                 (row * tile) as f32 / width + 0.5 / width,
-                ((col + span_w) * tile) as f32 / width - 0.5 / width,
-                ((row + span_h) * tile) as f32 / width - 0.5 / width,
+                ((col + 1) * tile) as f32 / width - 0.5 / width,
+                ((row + 1) * tile) as f32 / width - 0.5 / width,
             ],
         );
     }
@@ -1432,35 +1323,6 @@ pub fn make_atlas(packs: &PackStack, mut textures: Vec<ResourceId>) -> Result<At
         animated,
         animated_tiles,
     })
-}
-/// Grid cells for each texture's span (columns, rows) in a `side`-cell
-/// square: the multi-cell ones first, then the rest in order, each at the
-/// first free spot; `None` when they do not fit.
-fn place_cells(spans: &[(u32, u32)], side: u32) -> Option<Vec<(u32, u32)>> {
-    let mut used = vec![false; (side * side) as usize];
-    let mut positions = vec![(0, 0); spans.len()];
-    let mut order: Vec<usize> = (0..spans.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(spans[i].0 * spans[i].1));
-    let mut first_free = 0;
-    for i in order {
-        let (w, h) = spans[i];
-        let fits = |col: u32, row: u32, used: &[bool]| {
-            col + w <= side && row + h <= side && (row..row + h).all(|r| (col..col + w).all(|c| !used[(r * side + c) as usize]))
-        };
-        let start = if (w, h) == (1, 1) { first_free } else { 0 };
-        let cell = (start..side * side).find(|&cell| fits(cell % side, cell / side, &used))?;
-        let (col, row) = (cell % side, cell / side);
-        for r in row..row + h {
-            for c in col..col + w {
-                used[(r * side + c) as usize] = true;
-            }
-        }
-        if (w, h) == (1, 1) {
-            first_free = cell + 1;
-        }
-        positions[i] = (col, row);
-    }
-    Some(positions)
 }
 fn animated_tile(
     sheet: &RgbaImage,
@@ -2591,8 +2453,8 @@ mod tests {
             minecraftoss_player::inventory::ItemStack::new("minecraft:stone", 1),
             glam::DVec3::new(0.5, 1.0, 0.5),
         );
-        let casters = item_shadow_casters(&items, glam::DVec3::new(0.5, 2.62, 2.5), 1.0);
-        let shadow_mesh = entity_shadows(&casters, &scene, &atlas, &|_| 15, 0.0).unwrap();
+        let shadow_mesh =
+            item_shadows(&items, &scene, &atlas, Vec3::new(0.5, 2.62, 2.5), 1.0).unwrap();
         assert!(shadow_mesh.faces >= 1);
         assert!(shadow_mesh
             .vertices
@@ -2639,7 +2501,6 @@ mod tests {
                     }],
                 },
                 ground: Mat4::IDENTITY,
-                right_hand: Mat4::IDENTITY,
                 min_y: 0.0,
                 tints: vec![[0.3, 0.6, 0.2]],
                 flat: false,

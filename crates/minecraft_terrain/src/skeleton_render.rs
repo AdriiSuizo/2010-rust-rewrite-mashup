@@ -5,6 +5,7 @@
 //! and bogged's outer layers, `LayerDefinitions` inflating the humanoid mesh
 //! by 0.25 and 0.2), and each renderer's textures.
 use crate::{
+    client_mobs::ClientMobs,
     cow_render::cube_tinted_pose_mirror,
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
@@ -86,49 +87,93 @@ fn texture(path: &str) -> ResourceId {
     ResourceId::parse(&format!("minecraft:entity/skeleton/{path}")).unwrap()
 }
 
+/// The right arm, left arm, right leg and left leg (x, y, z rotations):
+/// `HumanoidModel.setupAnim` with a skeleton's arm poses (`BOW_AND_ARROW`
+/// while aggressive with a bow, else `EMPTY`), the arm bob, then
+/// `SkeletonModel.setupAnim`'s raised arms for an aggressive skeleton
+/// without a bow (its attack swing not yet tracked).
+pub fn limb_rotations(walk_position: f32, walk_speed: f32, age: f32, head_yaw: f32, head_pitch: f32, aggressive: bool, holding_bow: bool) -> [Vec3; 4] {
+    use crate::client_mobs::mth_cos;
+    let pi = std::f32::consts::PI;
+    let swing = walk_position * 0.6662;
+    let mut right_arm = Vec3::new(mth_cos(swing + pi) * 2.0 * walk_speed * 0.5, 0.0, 0.0);
+    let mut left_arm = Vec3::new(mth_cos(swing) * 2.0 * walk_speed * 0.5, 0.0, 0.0);
+    let right_leg = Vec3::new(mth_cos(swing) * 1.4 * walk_speed, 0.005, 0.005);
+    let left_leg = Vec3::new(mth_cos(swing + pi) * 1.4 * walk_speed, -0.005, -0.005);
+    if aggressive && holding_bow {
+        right_arm.y = -0.1 + head_yaw;
+        left_arm.y = 0.1 + head_yaw + 0.4;
+        right_arm.x = -pi / 2.0 + head_pitch;
+        left_arm.x = -pi / 2.0 + head_pitch;
+    }
+    let bob = |arm: &mut Vec3, scale: f32| {
+        arm.z += scale * (mth_cos(age * 0.09) * 0.05 + 0.05);
+        arm.x += scale * (minecraftoss_player::mth::sin(f64::from(age * 0.067)) * 0.05);
+    };
+    bob(&mut right_arm, 1.0);
+    bob(&mut left_arm, -1.0);
+    if aggressive && !holding_bow {
+        right_arm = Vec3::new(-pi / 2.0, -0.1, 0.0);
+        left_arm = Vec3::new(-pi / 2.0, 0.1, 0.0);
+        // `bobArms` bobs each arm twice.
+        for _ in 0..2 {
+            bob(&mut right_arm, 1.0);
+            bob(&mut left_arm, -1.0);
+        }
+    }
+    [right_arm, left_arm, right_leg, left_leg]
+}
+
+/// Appends the skeletons and returns their held bows: each hand's pose,
+/// where it is lit, and the item.
 pub fn append_skeletons<'a>(
     mesh: &mut ChunkMesh,
     skeletons: impl IntoIterator<Item = &'a SkeletonEntity>,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
-) {
+) -> Vec<crate::mesh::HeldItem> {
+    let mut held = Vec::new();
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in skeletons {
-        if entity.skeleton.health <= 0.0 {
-            continue;
-        }
         let kind = entity.skeleton.kind;
-        let feet = entity.previous_position.lerp(
-            entity.skeleton.body.position,
-            partial.clamp(0.0, 1.0) as f64,
-        );
-        let sample = (
-            feet.x.floor() as i32,
-            (feet.y + f64::from(entity.skeleton.eye_height())).floor() as i32,
-            feet.z.floor() as i32,
-        );
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let sample = mob.light_block();
         let sky = light.get(sample) as f32;
         let block = light.get_block(sample) as f32;
-        let body_yaw = entity.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(std::f32::consts::PI - body_yaw.to_radians());
-        let head_yaw = (entity.look_control.head_yaw - body_yaw).to_radians();
-        let head_pitch = entity.look_control.pitch.to_radians();
+        let rotation = mob.body_rotation(90.0);
+        // `state.yRot * (PI / 180)` as a float.
+        let head_yaw = mob.head_yaw * (std::f32::consts::PI / 180.0);
+        let head_pitch = mob.head_pitch * (std::f32::consts::PI / 180.0);
         let head = Quat::from_euler(EulerRot::ZYX, 0.0, head_yaw, head_pitch);
-        // `HumanoidModel.poseRightArm`'s bow pose while aggressive, else the
-        // skeleton's resting right arm.
-        let pose_of = |pose: u8| match pose {
+        let holding_bow = entity.skeleton.holds_bow;
+        let limbs = limb_rotations(mob.walk_position, mob.walk_speed, mob.age_in_ticks, head_yaw, head_pitch, entity.bow.aggressive, holding_bow);
+        let part = |r: Vec3| Quat::from_euler(EulerRot::ZYX, r.z, r.y, r.x);
+        // Legs share a pose code; the pivot tells right from left.
+        let pose_of = |pose: u8, pivot_x: f32| match pose {
             1 => head,
-            2 if entity.bow.aggressive => Quat::from_euler(EulerRot::ZYX, 0.0, -0.1 + head_yaw, -std::f32::consts::FRAC_PI_2 + head_pitch),
-            3 if entity.bow.aggressive => Quat::from_euler(EulerRot::ZYX, 0.0, 0.5 + head_yaw, -std::f32::consts::FRAC_PI_2 + head_pitch),
-            2 => Quat::from_rotation_x(-std::f32::consts::PI / 10.0),
+            2 => part(limbs[0]),
+            3 => part(limbs[1]),
+            4 if pivot_x < 0.0 => part(limbs[2]),
+            4 => part(limbs[3]),
             _ => Quat::IDENTITY,
         };
         let mut draw = |parts: &[Part], id: &ResourceId, size: [f32; 2]| {
             let region = atlas.entity_region(id);
             for (from, to, uv, pivot, mirror, uv_size, pose) in parts {
-                cube_tinted_pose_mirror(mesh, feet, rotation, 1.0, region, sky, block, *from, *to, *uv, *pivot, pose_of(*pose), [1.0; 3], size, *uv_size, *mirror);
+                cube_tinted_pose_mirror(mesh, feet, rotation, 1.0, region, sky, block, *from, *to, *uv, *pivot, pose_of(*pose, pivot[0]), [1.0; 3], size, *uv_size, *mirror);
             }
         };
+        // `SkeletonModel.translateToHand`: the arm a pixel further out.
+        if holding_bow {
+            let pivot = if kind == SkeletonKind::Parched { -5.5 } else { -5.0 } + 1.0;
+            let hand = crate::cow_render::right_hand_pose(feet, rotation, Vec3::new(pivot, 2.0, 0.0), part(limbs[0]), false);
+            held.push(crate::mesh::HeldItem { pose: hand, light: mob.light_probe.as_vec3(), id: "minecraft:bow".to_owned(), display: crate::mesh::HeldDisplay::RightHand, first_tint: None });
+        }
         match kind {
             SkeletonKind::Parched => draw(&PARCHED, &texture("parched"), [64., 64.]),
             SkeletonKind::Skeleton => draw(&SKELETON, &texture("skeleton"), [64., 32.]),
@@ -141,6 +186,20 @@ pub fn append_skeletons<'a>(
                 draw(&clothing(0.2), &texture("bogged_overlay"), [64., 32.]);
             }
         }
+        // `HumanoidArmorLayer` on the humanoid armour meshes (legs at
+        // ±1.9; armour takes no hurt overlay).
+        if entity.skeleton.armor.iter().any(Option::is_some) {
+            marks.push((mesh.vertices.len(), 1.0));
+            let arm_x = if kind == SkeletonKind::Parched { 5.5 } else { 5.0 };
+            let armor_parts = crate::armor_render::HumanoidParts {
+                head: (Vec3::ZERO, head),
+                body: (Vec3::ZERO, Quat::IDENTITY),
+                arms: [(Vec3::new(-arm_x, 2.0, 0.0), part(limbs[0])), (Vec3::new(arm_x, 2.0, 0.0), part(limbs[1]))],
+                legs: [(Vec3::new(-1.9, 12.0, 0.0), part(limbs[2])), (Vec3::new(1.9, 12.0, 0.0), part(limbs[3]))],
+            };
+            crate::armor_render::append_humanoid_armor(mesh, atlas, feet, rotation, 1.0, &armor_parts, &entity.skeleton.armor, sky, block);
+            marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        }
         // `BoggedModel.setupAnim`: the mushrooms show until sheared.
         if kind == SkeletonKind::Bogged && !entity.skeleton.sheared {
             let region = atlas.entity_region(&texture("bogged"));
@@ -151,4 +210,6 @@ pub fn append_skeletons<'a>(
             }
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
+    held
 }

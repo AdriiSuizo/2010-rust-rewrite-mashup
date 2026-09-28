@@ -6,11 +6,11 @@
 //! swing with the walk.
 //! Villager type/profession state is still pending.
 use crate::{
-    cow_render::cube_tinted_pose,
+    cow_render::cube_tinted_pose_mirror,
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{EulerRot, Quat, Vec3};
 use minecraftoss_entities::world::VillagerEntity;
@@ -130,32 +130,28 @@ fn hat_of_profession(profession: &str) -> Hat {
 pub fn append_villagers<'a>(
     mesh: &mut ChunkMesh,
     villagers: impl IntoIterator<Item = &'a VillagerEntity>,
-    walks: &WalkAnimations,
+    poses: &ClientMobs,
     bed_facing: &dyn Fn((i32, i32, i32)) -> Option<String>,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
-) {
+) -> Vec<crate::mesh::HeldItem> {
+    let mut held = Vec::new();
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in villagers {
         let villager = &entity.villager;
-        if villager.health <= 0.0 {
-            continue;
-        }
         let baby = villager.age.baby();
-        let mut feet = entity
-            .previous_position
-            .lerp(villager.body.position, partial.clamp(0.0, 1.0) as f64);
-        let sample = (
-            feet.x.floor() as i32,
-            (feet.y + f64::from(entity.eye_height())).floor() as i32,
-            feet.z.floor() as i32,
-        );
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let mut feet = mob.feet;
+        let sample = mob.light_block();
         let sky = light.get(sample) as f32;
         let block = light.get_block(sample) as f32;
         // `VillagerModel.setupAnim`: the head's turn from the body and its
         // pitch; each leg `cos(walk * 0.6662 (+ pi)) * 1.4 * speed * 0.5`.
-        let (body_yaw, head_yaw, pitch) = entity.ai.as_deref().map_or((0.0, 0.0, 0.0), |ai| (ai.body_rotation.body_yaw, ai.look_control.head_yaw, ai.look_control.pitch));
-        let mut rotation = Quat::from_rotation_y(PI - body_yaw.to_radians());
+        let (body_yaw, turn, pitch) = (mob.body_rot, mob.head_yaw, mob.head_pitch);
+        let mut rotation = mob.body_rotation(90.0);
         // `LivingEntityRenderer`: a sleeper lies along its bed
         // (`sleepDirectionToRotation`, flipped 90 on Z, then 270 on Y), its
         // head a tenth of a block towards the pillow.
@@ -172,15 +168,12 @@ pub fn append_villagers<'a>(
             let offset = f64::from(entity.eye_height() - 0.1);
             feet -= glam::DVec3::new(step.0 * offset, 0.0, step.1 * offset);
         }
-        let turn = (head_yaw - body_yaw + 180.0).rem_euclid(360.0) - 180.0;
-        let walk = walks.get(entity.id);
-        let t = partial.clamp(0.0, 1.0);
-        let (walk_position, walk_speed) = (walk.position(t), walk.speed(t));
+        let (walk_position, walk_speed) = (mob.walk_position, mob.walk_speed);
         let swing = walk_position * 0.6662;
         let (right, left) = (swing.cos() * 1.4 * walk_speed * 0.5, (swing + PI).cos() * 1.4 * walk_speed * 0.5);
         // An unhappy villager (a refused trade) tips its head and shakes it.
         let (head_pitch, head_roll) = if entity.unhappy > 0 {
-            let age = entity.tick_count as f32 + t;
+            let age = mob.age_in_ticks;
             (0.4, 0.3 * (0.45 * age).sin())
         } else {
             (pitch.to_radians(), 0.0)
@@ -214,6 +207,28 @@ pub fn append_villagers<'a>(
                     layers.push((texture, true));
                 }
             }
+        }
+        // `CrossedArmsItemLayer`: the held item in the crossed arms (the
+        // adult's root carries the villagers' 0.9375 scale), shown as on
+        // the ground.
+        if let Some(item) = &entity.held_item {
+            use glam::Mat4;
+            // The baby's `arms` is the group its hands hang from: moved,
+            // not turned.
+            let arms = if baby { Pose::ROOT.child([0.0, 17.5, 0.0], 0.0, 0.0, 0.0) } else { Pose::ROOT.child([0.0, 3.0, -1.0], -0.75, 0.0, 0.0) };
+            let root = if baby { Mat4::IDENTITY } else { Mat4::from_translation(Vec3::new(0.0, 24.016 * (1.0 - 0.9375) / 16.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.9375)) };
+            let pose = Mat4::from_translation(feet.as_vec3())
+                * Mat4::from_quat(rotation)
+                * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+                * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0))
+                * root
+                * Mat4::from_translation(arms.origin / 16.0)
+                * Mat4::from_quat(arms.rotation)
+                * Mat4::from_rotation_x(0.75)
+                * Mat4::from_scale(Vec3::splat(1.07))
+                * Mat4::from_translation(Vec3::new(0.0, 0.13, -0.34))
+                * Mat4::from_rotation_x(PI);
+            held.push(crate::mesh::HeldItem { pose, light: mob.light_probe.as_vec3(), id: item.id.clone(), display: crate::mesh::HeldDisplay::Ground, first_tint: None });
         }
         for (texture, hat_visible) in layers {
             let region = atlas.entity_region(&texture);
@@ -252,7 +267,8 @@ pub fn append_villagers<'a>(
                     _ => Pose::ROOT.child(pivot, 0.0, 0.0, 0.0),
                 };
                 let (pivot, part_rotation) = (pose.origin.to_array(), pose.rotation);
-                cube_tinted_pose(
+                // VillagerModel mirrors the adult's left leg.
+                cube_tinted_pose_mirror(
                     mesh,
                     feet,
                     rotation,
@@ -268,8 +284,11 @@ pub fn append_villagers<'a>(
                     [1.0; 3],
                     [64., 64.],
                     uv_dimensions,
+                    !baby && index == 10,
                 );
             }
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
+    held
 }

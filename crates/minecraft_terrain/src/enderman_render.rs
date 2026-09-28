@@ -11,7 +11,7 @@ use crate::{
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{DVec3, EulerRot, Mat4, Quat, Vec3};
 use minecraftoss_entities::world::EndermanEntity;
@@ -33,24 +33,60 @@ const PARTS: [Part; 7] = [
     ([-1., 0., -1.], [1., 30., 1.], [56., 0.], [2., -5., 0.], true, None, 5),
 ];
 
-/// The limbs' pitch and roll: `HumanoidModel.setupAnim`'s swing and bob
-/// (`AnimationUtils.bobModelPart`), then `EndermanModel`'s halving and
+/// An enderman's pose: the body's twist, the arms' pivots (x, z in
+/// pixels, which an attack moves) and the right arm, left arm, right leg
+/// and left leg rotations (x, y, z).
+pub struct EndermanLimbs {
+    pub body_yaw: f32,
+    pub arm_pivots: [(f32, f32); 2],
+    pub limbs: [Vec3; 4],
+}
+
+/// `HumanoidModel.setupAnim` for an enderman: the walk swing (legs with
+/// their touch of yaw and roll), the `EMPTY` arm poses, `setupAttackAnimation`
+/// (a right-handed `WHACK`: the body twists, the arms' pivots follow, the
+/// right arm strikes), the arm bob, then `EndermanModel`'s halving and
 /// ±0.4 clamp, or the arms held out for a block.
-pub fn limb_angles(walk_position: f32, walk_speed: f32, age: f32, carrying: bool) -> [(f32, f32); 4] {
+pub fn limb_angles(walk_position: f32, walk_speed: f32, age: f32, carrying: bool, swing: Option<f32>, head_pitch: f32) -> EndermanLimbs {
+    use crate::client_mobs::mth_cos;
+    let sin = |x: f32| minecraftoss_player::mth::sin(f64::from(x));
     let p = walk_position * 0.6662;
-    let bob_z = (age * 0.09).cos() * 0.05 + 0.05;
-    let bob_x = (age * 0.067).sin() * 0.05;
-    let right_arm = (((p + PI).cos() * 2.0 * walk_speed * 0.5) + bob_x, bob_z);
-    let left_arm = ((p.cos() * 2.0 * walk_speed * 0.5) - bob_x, -bob_z);
-    let right_leg = (p.cos() * 1.4 * walk_speed, 0.0);
-    let left_leg = ((p + PI).cos() * 1.4 * walk_speed, 0.0);
-    let limit = |(x, z): (f32, f32)| ((x * 0.5).clamp(-0.4, 0.4), z);
-    let (mut right_arm, mut left_arm) = (limit(right_arm), limit(left_arm));
-    if carrying {
-        right_arm = (-0.5, 0.05);
-        left_arm = (-0.5, -0.05);
+    let mut right_arm = Vec3::new(mth_cos(p + PI) * 2.0 * walk_speed * 0.5, 0.0, 0.0);
+    let mut left_arm = Vec3::new(mth_cos(p) * 2.0 * walk_speed * 0.5, 0.0, 0.0);
+    let mut right_leg = Vec3::new(mth_cos(p) * 1.4 * walk_speed, 0.005, 0.005);
+    let mut left_leg = Vec3::new(mth_cos(p + PI) * 1.4 * walk_speed, -0.005, -0.005);
+    let (mut body_yaw, mut arm_pivots) = (0.0, [(-5.0, 0.0), (5.0, 0.0)]);
+    if let Some(s) = swing.filter(|&s| s > 0.0) {
+        body_yaw = sin(s.sqrt() * (PI * 2.0)) * 0.2;
+        let (bs, bc) = (sin(body_yaw), mth_cos(body_yaw));
+        arm_pivots = [(-bc * 5.0, bs * 5.0), (bc * 5.0, -bs * 5.0)];
+        right_arm.y += body_yaw;
+        left_arm.y += body_yaw;
+        left_arm.x += body_yaw;
+        // `Ease.outQuart`.
+        let eased = 1.0 - ((1.0 - s) * (1.0 - s)) * ((1.0 - s) * (1.0 - s));
+        let aa = sin(eased * PI);
+        let bb = sin(s * PI) * -(head_pitch - 0.7) * 0.75;
+        right_arm.x -= aa * 1.2 + bb;
+        right_arm.y += body_yaw * 2.0;
+        right_arm.z += sin(s * PI) * -0.4;
     }
-    [right_arm, left_arm, limit(right_leg), limit(left_leg)]
+    let bob_z = mth_cos(age * 0.09) * 0.05 + 0.05;
+    let bob_x = sin(age * 0.067) * 0.05;
+    right_arm.z += bob_z;
+    right_arm.x += bob_x;
+    left_arm.z -= bob_z;
+    left_arm.x -= bob_x;
+    for limb in [&mut right_arm, &mut left_arm, &mut right_leg, &mut left_leg] {
+        limb.x = (limb.x * 0.5).clamp(-0.4, 0.4);
+    }
+    if carrying {
+        right_arm.x = -0.5;
+        left_arm.x = -0.5;
+        right_arm.z = 0.05;
+        left_arm.z = -0.05;
+    }
+    EndermanLimbs { body_yaw, arm_pivots, limbs: [right_arm, left_arm, right_leg, left_leg] }
 }
 
 /// `CarriedBlockLayer`'s pose for a block model in `[0, 1]³`, in the
@@ -70,7 +106,7 @@ fn carried_block_pose() -> Mat4 {
 pub fn append_endermen<'a>(
     mesh: &mut ChunkMesh,
     endermen: impl IntoIterator<Item = &'a EndermanEntity>,
-    walks: &WalkAnimations,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
@@ -81,27 +117,27 @@ pub fn append_endermen<'a>(
     let eyes = atlas.contains(&eyes_id).then(|| atlas.entity_region(&eyes_id));
     let partial = partial.clamp(0.0, 1.0);
     let mut carried = Vec::new();
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in endermen {
-        if entity.enderman.health <= 0.0 {
-            continue;
-        }
-        let mut feet = entity.previous_position.lerp(entity.enderman.body.position, f64::from(partial));
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let mut feet = mob.feet;
         let creepy = entity.creepy();
         if creepy {
             // `getRenderOffset`: a gaussian shake of 0.02 a side.
             let (dx, dz) = shake(entity.id, frame);
             feet += DVec3::new(dx * 0.02, 0.0, dz * 0.02);
         }
-        let eye = feet + DVec3::new(0.0, f64::from(minecraftoss_entities::enderman::EYE_HEIGHT), 0.0);
+        let eye = mob.light_probe;
         let sample = (eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32);
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let body_yaw = entity.ai.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(PI - body_yaw.to_radians());
-        let look = &entity.ai.state.look_control;
-        let head = Quat::from_euler(EulerRot::ZYX, 0.0, (look.head_yaw - body_yaw).to_radians(), look.pitch.to_radians());
-        let walk = walks.get(entity.id);
-        let age = entity.tick_count as f32 + partial;
-        let limbs = limb_angles(walk.position(partial), walk.speed(partial), age, entity.carried().is_some());
+        let rotation = mob.body_rotation(90.0);
+        let head = Quat::from_euler(EulerRot::ZYX, 0.0, mob.head_yaw.to_radians(), mob.head_pitch.to_radians());
+        // `ageInTicks`: the client entity's own tick count.
+        let age = mob.age_in_ticks;
+        let head_pitch = mob.head_pitch * (PI / 180.0);
+        let pose_limbs = limb_angles(mob.walk_position, mob.walk_speed, age, entity.carried().is_some(), mob.swing, head_pitch);
         // Creepy: the head rises five pixels, the hat (its jaw) stays.
         let head_pivot = Vec3::new(0.0, if creepy { -18.0 } else { -13.0 }, 0.0);
         let hat_pivot = head_pivot + head * Vec3::new(0.0, if creepy { 5.0 } else { 0.0 }, 0.0);
@@ -109,10 +145,17 @@ pub fn append_endermen<'a>(
             match pose {
                 1 => (head, Some(head_pivot)),
                 6 => (head, Some(hat_pivot)),
-                2..=5 => {
-                    let (x, z) = limbs[usize::from(pose - 2)];
-                    (Quat::from_euler(EulerRot::ZYX, z, 0.0, x), None)
+                // The arms' pivots follow an attack's twist.
+                2 | 3 => {
+                    let r = pose_limbs.limbs[usize::from(pose - 2)];
+                    let (x, z) = pose_limbs.arm_pivots[usize::from(pose - 2)];
+                    (Quat::from_euler(EulerRot::ZYX, r.z, r.y, r.x), Some(Vec3::new(x, -12.0, z)))
                 }
+                4 | 5 => {
+                    let r = pose_limbs.limbs[usize::from(pose - 2)];
+                    (Quat::from_euler(EulerRot::ZYX, r.z, r.y, r.x), None)
+                }
+                0 => (Quat::from_rotation_y(pose_limbs.body_yaw), None),
                 _ => (Quat::IDENTITY, None),
             }
         };
@@ -135,6 +178,7 @@ pub fn append_endermen<'a>(
             carried.push((world, eye.as_vec3(), held.id.clone()));
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
     carried
 }
 
@@ -152,4 +196,22 @@ fn shake(id: u64, frame: u64) -> (f64, f64) {
     let (u, v) = (uniform().max(1e-12), uniform());
     let r = (-2.0 * u.ln()).sqrt();
     (r * (std::f64::consts::TAU * v).cos(), r * (std::f64::consts::TAU * v).sin())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limbs_swing_within_a_small_arc_and_hold_out_a_block() {
+        for step in 0..40 {
+            for swing in [None, Some(step as f32 / 40.0)] {
+                for limb in limb_angles(step as f32 * 0.37, 1.0, step as f32, false, swing, 0.0).limbs {
+                    assert!(limb.x.abs() <= 0.4);
+                }
+            }
+        }
+        let held = limb_angles(1.0, 1.0, 5.0, true, None, 0.0).limbs;
+        assert_eq!((held[0].x, held[0].z, held[1].x, held[1].z), (-0.5, 0.05, -0.5, -0.05));
+    }
 }

@@ -12,7 +12,7 @@ use crate::{
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use minecraftoss_entities::world::IronGolemEntity;
@@ -81,7 +81,7 @@ fn pose(offset: [f32; 3], x: f32, y: f32, z: f32) -> ([f32; 3], Quat) {
 /// Appends the living iron golems and returns the poppies held out, as
 /// posed block models (world space, for a block model in `[0, 1]³`), where
 /// each is lit, and the block.
-pub fn append_iron_golems<'a>(mesh: &mut ChunkMesh, golems: impl IntoIterator<Item = &'a IronGolemEntity>, walks: &WalkAnimations, atlas: &Atlas, light: &SkyLight, partial: f32) -> Vec<(Mat4, Vec3, String)> {
+pub fn append_iron_golems<'a>(mesh: &mut ChunkMesh, golems: impl IntoIterator<Item = &'a IronGolemEntity>, poses: &ClientMobs, atlas: &Atlas, light: &SkyLight, partial: f32) -> Vec<(Mat4, Vec3, String)> {
     let mut poppies = Vec::new();
     let Ok(skin_id) = ResourceId::parse("minecraft:entity/iron_golem/iron_golem") else { return poppies };
     if !atlas.contains(&skin_id) {
@@ -89,25 +89,23 @@ pub fn append_iron_golems<'a>(mesh: &mut ChunkMesh, golems: impl IntoIterator<It
     }
     let skin = atlas.entity_region(&skin_id);
     let partial = partial.clamp(0.0, 1.0);
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in golems {
-        if entity.golem.health <= 0.0 {
-            continue;
-        }
-        let feet = entity.previous_position.lerp(entity.golem.body.position, f64::from(partial));
-        let eye = feet + glam::DVec3::new(0.0, f64::from(minecraftoss_entities::iron_golem::EYE_HEIGHT), 0.0);
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let eye = mob.light_probe;
         let sample = (eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32);
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let body_yaw = entity.ai.body_rotation.body_yaw;
-        let walk = walks.get(entity.id);
-        let (walk_position, walk_speed) = (walk.position(partial), walk.speed(partial));
-        let rotation = Quat::from_rotation_y(PI - body_yaw.to_radians()) * Quat::from_rotation_z(body_rock(walk_position, walk_speed).to_radians());
-        let look = &entity.ai.state.look_control;
+        let (walk_position, walk_speed) = (mob.walk_position, mob.walk_speed);
+        let rotation = mob.body_rotation(90.0) * Quat::from_rotation_z(body_rock(walk_position, walk_speed).to_radians());
         let attack = entity.golem.attack_animation_tick;
         let attack_ticks = if attack > 0 { attack as f32 - partial } else { 0.0 };
         let offer = entity.offer_flower_tick();
         let (right_arm_x, left_arm_x) = arm_pitches(attack_ticks, offer, walk_position, walk_speed);
         let leg = 1.5 * triangle_wave(walk_position, 13.0) * walk_speed;
-        let head = pose([0.0, -7.0, -2.0], look.pitch.to_radians(), (look.head_yaw - body_yaw).to_radians(), 0.0);
+        let head = pose([0.0, -7.0, -2.0], mob.head_pitch.to_radians(), mob.head_yaw.to_radians(), 0.0);
         let body = pose([0.0, -7.0, 0.0], 0.0, 0.0, 0.0);
         let right_arm = pose([0.0, -7.0, 0.0], right_arm_x, 0.0, 0.0);
         let left_arm = pose([0.0, -7.0, 0.0], left_arm_x, 0.0, 0.0);
@@ -151,5 +149,26 @@ pub fn append_iron_golems<'a>(mesh: &mut ChunkMesh, golems: impl IntoIterator<It
             poppies.push((world, eye.as_vec3(), "minecraft:poppy".to_owned()));
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
     poppies
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arms_swing_up_after_a_hit_and_hold_out_a_poppy() {
+        // Ten ticks after a hit both arms are raised high.
+        let (right, left) = arm_pitches(10.0, 0, 0.0, 0.0);
+        assert_eq!(right, left);
+        assert!((right - (-2.0 + 1.5 * triangle_wave(10.0, 10.0))).abs() < 1e-6);
+        // Offering, the right arm reaches forward, the left hangs.
+        let (right, left) = arm_pitches(0.0, 400, 0.0, 0.0);
+        assert!(right < -0.7 && left == 0.0);
+        // Standing still, the arms hang straight.
+        assert_eq!(arm_pitches(0.0, 0, 3.0, 0.0), (0.0, 0.0));
+        assert_eq!(body_rock(3.0, 0.0), 0.0);
+        assert!(body_rock(0.0, 1.0).abs() <= 6.5);
+    }
 }

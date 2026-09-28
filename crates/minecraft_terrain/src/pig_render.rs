@@ -1,7 +1,8 @@
 //! Pinned 26.3 PigModel/BabyPigModel cuboids with pack-resolved textures.
 //! Active gait and view-dependent pose remain separate.
 use crate::{
-    cow_render::cube_tinted,
+    client_mobs::ClientMobs,
+    cow_render::{cube_tinted_pose, cube_tinted_pose_mirror},
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
@@ -149,29 +150,57 @@ pub fn texture_id(variant: PigVariant, baby: bool) -> ResourceId {
     .unwrap()
 }
 
-pub fn append_pigs<'a>(mesh: &mut ChunkMesh, pigs: impl IntoIterator<Item = &'a PigEntity>, atlas: &Atlas, light: &SkyLight) {
+/// Each part's pose (`QuadrupedModel.setupAnim`): the head (and snout)
+/// looks, the adult body lies along the pig, and the legs swing.
+fn part_pose(index: usize, baby: bool, head: Quat, legs: [f32; 4]) -> Quat {
+    let [right_hind, left_hind, right_front, left_front] = legs;
+    let leg = |angle: f32| Quat::from_rotation_x(angle);
+    if baby {
+        match index {
+            1 | 2 => head,
+            3 => leg(left_front),
+            4 => leg(right_front),
+            5 => leg(left_hind),
+            6 => leg(right_hind),
+            _ => Quat::IDENTITY,
+        }
+    } else {
+        match index {
+            0 | 1 => head,
+            2 => Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            3 => leg(right_hind),
+            4 => leg(left_hind),
+            5 => leg(right_front),
+            6 => leg(left_front),
+            _ => Quat::IDENTITY,
+        }
+    }
+}
+
+pub fn append_pigs<'a>(mesh: &mut ChunkMesh, pigs: impl IntoIterator<Item = &'a PigEntity>, poses: &ClientMobs, atlas: &Atlas, light: &SkyLight, partial: f32) {
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in pigs {
         let pig = &entity.pig;
-        if pig.health <= 0.0 {
-            continue;
-        }
-        let feet = pig.body.position;
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
         let baby = pig.age.baby();
         let region = atlas.entity_region(&texture_id(pig.variant, baby));
-        let position = (
-            feet.x.floor() as i32,
-            (feet.y + 0.5).floor() as i32,
-            feet.z.floor() as i32,
-        );
+        let position = mob.light_block();
         let sky = light.get(position) as f32;
         let block = light.get_block(position) as f32;
-        for &(from, to, uv, pivot, rotate_body, dimensions) in
-            if baby { &BABY[..] } else { &ADULT[..] }
+        let rotation = mob.body_rotation(90.0);
+        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, mob.head_yaw.to_radians(), mob.head_pitch.to_radians());
+        let legs = crate::client_mobs::quadruped_legs(mob.walk_position, mob.walk_speed);
+        for (index, &(from, to, uv, pivot, _, dimensions)) in
+            (if baby { &BABY[..] } else { &ADULT[..] }).iter().enumerate()
         {
-            cube_tinted(
+            // PigModel mirrors the adult's left legs.
+            cube_tinted_pose_mirror(
                 mesh,
                 feet,
-                Quat::from_rotation_y(std::f32::consts::PI),
+                rotation,
                 1.0,
                 region,
                 sky,
@@ -180,18 +209,19 @@ pub fn append_pigs<'a>(mesh: &mut ChunkMesh, pigs: impl IntoIterator<Item = &'a 
                 to,
                 uv,
                 pivot,
-                rotate_body,
+                part_pose(index, baby, head, legs),
                 [1.0; 3],
                 if baby { [32., 32.] } else { [64., 64.] },
                 dimensions,
+                !baby && matches!(index, 4 | 6),
             );
         }
         if pig.variant == PigVariant::Cold && !baby {
             // ColdPigModel adds a half-pixel body coat over the base body.
-            cube_tinted(
+            cube_tinted_pose(
                 mesh,
                 feet,
-                Quat::from_rotation_y(std::f32::consts::PI),
+                rotation,
                 1.0,
                 region,
                 sky,
@@ -200,7 +230,7 @@ pub fn append_pigs<'a>(mesh: &mut ChunkMesh, pigs: impl IntoIterator<Item = &'a 
                 [5.5, 6.5, 1.5],
                 [28., 32.],
                 [0., 11., 2.],
-                true,
+                part_pose(2, false, head, legs),
                 [1.0; 3],
                 [64., 64.],
                 Some([10., 16., 8.]),
@@ -211,14 +241,14 @@ pub fn append_pigs<'a>(mesh: &mut ChunkMesh, pigs: impl IntoIterator<Item = &'a 
             let saddle = atlas.entity_region(
                 &ResourceId::parse("minecraft:entity/equipment/pig_saddle/saddle").unwrap(),
             );
-            for &(from, to, uv, pivot, rotate_body, _) in &ADULT {
+            for (index, &(from, to, uv, pivot, _, _)) in ADULT.iter().enumerate() {
                 let dimensions = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
                 let inflated_from = [from[0] - 0.5, from[1] - 0.5, from[2] - 0.5];
                 let inflated_to = [to[0] + 0.5, to[1] + 0.5, to[2] + 0.5];
-                cube_tinted(
+                cube_tinted_pose_mirror(
                     mesh,
                     feet,
-                    Quat::from_rotation_y(std::f32::consts::PI),
+                    rotation,
                     1.0,
                     saddle,
                     sky,
@@ -227,12 +257,14 @@ pub fn append_pigs<'a>(mesh: &mut ChunkMesh, pigs: impl IntoIterator<Item = &'a 
                     inflated_to,
                     uv,
                     pivot,
-                    rotate_body,
+                    part_pose(index, false, head, legs),
                     [1.0; 3],
                     [64., 64.],
                     Some(dimensions),
+                    matches!(index, 4 | 6),
                 );
             }
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
 }

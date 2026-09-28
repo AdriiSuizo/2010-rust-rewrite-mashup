@@ -26,6 +26,23 @@ impl WalkAnimation {
         self.position_scale = if baby { 3.0 } else { 1.0 };
     }
 
+    /// `WalkAnimationState.stop`.
+    pub fn stop(&mut self) {
+        self.speed_old = 0.0;
+        self.speed = 0.0;
+        self.position = 0.0;
+    }
+
+    /// `WalkAnimationState.speed()`: the current speed, unclamped.
+    pub fn raw_speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// `WalkAnimationState.setSpeed`.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
+    }
+
     /// `WalkAnimationState.position(partialTicks)`.
     pub fn position(&self, partial: f32) -> f32 {
         (self.position - self.speed * (1.0 - partial)) * self.position_scale
@@ -57,5 +74,25 @@ impl WalkAnimations {
 
     pub fn get(&self, id: u64) -> WalkAnimation {
         self.0.get(&id).copied().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walking_winds_the_swing_up_and_standing_winds_it_down() {
+        let mut walk = WalkAnimation::default();
+        for _ in 0..20 {
+            walk.update(0.2, false);
+        }
+        assert!((walk.speed(1.0) - 0.8).abs() < 1.0e-3);
+        let moved = walk.position(1.0);
+        for _ in 0..20 {
+            walk.update(0.0, false);
+        }
+        assert!(walk.speed(1.0) < 1.0e-3);
+        assert!(walk.position(1.0) > moved);
     }
 }

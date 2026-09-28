@@ -12,7 +12,7 @@ use crate::{
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh, Vertex},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use minecraftoss_entities::world::{PotionEntity, WitchEntity};
@@ -90,28 +90,28 @@ pub fn nose_pose(entity_id: u64, age: f32, holding: bool) -> ([f32; 3], f32, f32
 }
 
 /// Appends the living witches.
-pub fn append_witches<'a>(mesh: &mut ChunkMesh, witches: impl IntoIterator<Item = &'a WitchEntity>, walks: &WalkAnimations, atlas: &Atlas, light: &SkyLight, partial: f32) {
+pub fn append_witches<'a>(mesh: &mut ChunkMesh, witches: impl IntoIterator<Item = &'a WitchEntity>, poses: &ClientMobs, atlas: &Atlas, light: &SkyLight, partial: f32) -> Vec<crate::mesh::HeldItem> {
     let skin_id = ResourceId::parse("minecraft:entity/witch/witch").unwrap();
     if !atlas.contains(&skin_id) {
-        return;
+        return Vec::new();
     }
     let skin = atlas.entity_region(&skin_id);
     let partial = partial.clamp(0.0, 1.0);
+    let mut held = Vec::new();
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in witches {
-        if entity.witch.health <= 0.0 {
-            continue;
-        }
-        let feet = entity.previous_position.lerp(entity.witch.body.position, f64::from(partial));
-        let eye = feet + glam::DVec3::new(0.0, f64::from(minecraftoss_entities::witch::EYE_HEIGHT), 0.0);
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let eye = mob.light_probe;
         let sample = (eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32);
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let body_yaw = entity.ai.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(PI - body_yaw.to_radians());
-        let look = &entity.ai.state.look_control;
-        let walk = walks.get(entity.id);
-        let (walk_position, walk_speed) = (walk.position(partial), walk.speed(partial));
-        let age = entity.tick_count as f32 + partial;
-        let head = Pose::ROOT.child([0.0; 3], look.pitch.to_radians(), (look.head_yaw - body_yaw).to_radians(), 0.0);
+        let rotation = mob.body_rotation(90.0);
+        let (walk_position, walk_speed) = (mob.walk_position, mob.walk_speed);
+        // `ageInTicks`: the client entity's own tick count.
+        let age = mob.age_in_ticks;
+        let head = Pose::ROOT.child([0.0; 3], mob.head_pitch.to_radians(), mob.head_yaw.to_radians(), 0.0);
         let hat = head.child([-5.0, -10.03125, -5.0], 0.0, 0.0, 0.0);
         let hat2 = hat.child([1.75, -4.0, 2.0], -0.05235988, 0.0, 0.02617994);
         let hat3 = hat2.child([1.75, -4.0, 2.0], -0.10471976, 0.0, 0.05235988);
@@ -119,6 +119,28 @@ pub fn append_witches<'a>(mesh: &mut ChunkMesh, witches: impl IntoIterator<Item 
         let (nose_offset, nose_x, nose_z) = nose_pose(entity.id, age, entity.witch.drinking.is_some());
         let nose = head.child(nose_offset, nose_x, 0.0, nose_z);
         let mole = nose.child([0.0, -2.0, 0.0], 0.0, 0.0, 0.0);
+        // `WitchItemLayer`: the potion it drinks, held at its nose (under
+        // the root's 0.9375 scale), shown as on the ground in its colour.
+        if let Some(potion) = &entity.witch.drinking {
+            use glam::Mat4;
+            let deg = |d: f32| d.to_radians();
+            let pose = Mat4::from_translation(feet.as_vec3())
+                * Mat4::from_quat(rotation)
+                * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+                * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0))
+                * Mat4::from_translation(Vec3::new(0.0, 24.016 * (1.0 - 0.9375) / 16.0, 0.0))
+                * Mat4::from_scale(Vec3::splat(0.9375))
+                * Mat4::from_translation(nose.origin / 16.0)
+                * Mat4::from_quat(nose.rotation)
+                * Mat4::from_translation(Vec3::new(0.0625, 0.25, 0.0))
+                * Mat4::from_rotation_z(deg(180.0))
+                * Mat4::from_rotation_x(deg(140.0))
+                * Mat4::from_rotation_z(deg(10.0))
+                * Mat4::from_rotation_x(deg(180.0));
+            let rgb = potion.color();
+            let color = [((rgb >> 16) & 255) as f32 / 255.0, ((rgb >> 8) & 255) as f32 / 255.0, (rgb & 255) as f32 / 255.0];
+            held.push(crate::mesh::HeldItem { pose, light: mob.light_probe.as_vec3(), id: "minecraft:potion".to_owned(), display: crate::mesh::HeldDisplay::Ground, first_tint: Some(color) });
+        }
         let swing = walk_position * 0.6662;
         let right_leg = Pose::ROOT.child([-2.0, 12.0, 0.0], swing.cos() * 1.4 * walk_speed * 0.5, 0.0, 0.0);
         let left_leg = Pose::ROOT.child([2.0, 12.0, 0.0], (swing + PI).cos() * 1.4 * walk_speed * 0.5, 0.0, 0.0);
@@ -137,9 +159,13 @@ pub fn append_witches<'a>(mesh: &mut ChunkMesh, witches: impl IntoIterator<Item 
                 Part::RightLeg => right_leg,
                 Part::LeftLeg => left_leg,
             };
-            cube_tinted_pose_mirror(mesh, feet, rotation, 1.0, skin, sky, block, from, to, uv, pose.origin.to_array(), pose.rotation, [1.0; 3], [64., 128.], uv_size, mirror);
+            // `LayerDefinitions`: the witch layer takes the villagers'
+            // 0.9375 scale.
+            cube_tinted_pose_mirror(mesh, feet, rotation, 0.9375, skin, sky, block, from, to, uv, pose.origin.to_array(), pose.rotation, [1.0; 3], [64., 128.], uv_size, mirror);
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
+    held
 }
 
 /// Appends each splash potion in flight as its item facing the camera
@@ -170,5 +196,30 @@ pub fn append_potions<'a>(mesh: &mut ChunkMesh, potions: impl IntoIterator<Item 
             mesh.indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
             mesh.faces += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_potion_raises_the_nose() {
+        let (offset, pitch, _) = nose_pose(7, 12.0, true);
+        assert_eq!(offset, [0.0, 1.0, -1.5]);
+        assert_eq!(pitch, -0.9);
+        let (offset, pitch, _) = nose_pose(10, 12.0, false);
+        // An ID ending in 0 keeps the nose still.
+        assert_eq!((offset, pitch), ([0.0, -2.0, 0.0], 0.0));
+    }
+
+    #[test]
+    fn the_hat_climbs_in_crooked_steps() {
+        let head = Pose::ROOT;
+        let hat = head.child([-5.0, -10.03125, -5.0], 0.0, 0.0, 0.0);
+        let hat2 = hat.child([1.75, -4.0, 2.0], -0.05235988, 0.0, 0.02617994);
+        assert_eq!(hat2.origin, Vec3::new(-3.25, -14.03125, -3.0));
+        let hat3 = hat2.child([1.75, -4.0, 2.0], -0.10471976, 0.0, 0.05235988);
+        assert!(hat3.origin.y < hat2.origin.y);
     }
 }

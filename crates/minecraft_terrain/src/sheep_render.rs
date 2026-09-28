@@ -1,7 +1,8 @@
 //! Source-informed pinned 26.3 sheep model layers with pack-resolved textures.
 //! The authored NoAI sheep uses a fixed pose until its active animation lands.
 use crate::{
-    cow_render::cube_tinted,
+    client_mobs::ClientMobs,
+    cow_render::cube_tinted_pose_mirror,
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
@@ -166,19 +167,34 @@ const BABY_BODY: [BoxPart; 6] = [
     ),
 ];
 
-pub fn append_sheep<'a>(mesh: &mut ChunkMesh, sheep: impl IntoIterator<Item = &'a SheepEntity>, atlas: &Atlas, light: &SkyLight) {
+pub fn append_sheep<'a>(mesh: &mut ChunkMesh, sheep: impl IntoIterator<Item = &'a SheepEntity>, poses: &ClientMobs, atlas: &Atlas, light: &SkyLight, partial: f32) {
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in sheep {
-        if entity.health <= 0.0 {
-            continue;
-        }
         let baby = entity.sheep.age.baby();
-        let feet = entity.body.position;
-        let rotation = Quat::from_rotation_y(std::f32::consts::PI);
-        let pos = (
-            feet.x.floor() as i32,
-            (feet.y + 0.7).floor() as i32,
-            feet.z.floor() as i32,
-        );
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let rotation = mob.body_rotation(90.0);
+        // SheepModel.setupAnim: QuadrupedModel's head and legs, then the
+        // grazing head drop and pitch (the look pitch when not grazing).
+        let t = partial.clamp(0.0, 1.0);
+        let head_pitch = if entity.eat_animation_ticks > 0 { entity.eat_head_angle_scale(t) } else { mob.head_pitch.to_radians() };
+        let head_drop = entity.eat_head_position_scale(t) * 9.0 * if baby { 0.5 } else { 1.0 };
+        let [right_hind, left_hind, right_front, left_front] = crate::client_mobs::quadruped_legs(mob.walk_position, mob.walk_speed);
+        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, mob.head_yaw.to_radians(), head_pitch);
+        let leg = Quat::from_rotation_x;
+        let body = if baby { Quat::IDENTITY } else { Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) };
+        let pose = Pose {
+            parts: if baby {
+                [body, head, leg(right_hind), leg(left_hind), leg(right_front), leg(left_front)]
+            } else {
+                [head, body, leg(right_hind), leg(left_hind), leg(right_front), leg(left_front)]
+            },
+            head: if baby { 1 } else { 0 },
+            head_drop,
+        };
+        let pos = mob.light_block();
         let sky = light.get(pos) as f32;
         let block = light.get_block(pos) as f32;
         let base = if baby {
@@ -197,6 +213,9 @@ pub fn append_sheep<'a>(mesh: &mut ChunkMesh, sheep: impl IntoIterator<Item = &'
             if baby { &BABY_BODY } else { &ADULT_BODY },
             [1.0; 3],
             false,
+            &pose,
+            // SheepModel's body mesh mirrors the right legs.
+            !baby,
         );
         let color = (entity.sheep.wool.data() & 15) as usize;
         let tint = wool_tint(color);
@@ -209,8 +228,11 @@ pub fn append_sheep<'a>(mesh: &mut ChunkMesh, sheep: impl IntoIterator<Item = &'
                 rotation,
                 sky,
                 block,
-                &ADULT_FUR,
+                // `LayerDefinitions`: the undercoat is the body model.
+                &ADULT_BODY,
                 tint,
+                false,
+                &pose,
                 true,
             );
         }
@@ -231,9 +253,21 @@ pub fn append_sheep<'a>(mesh: &mut ChunkMesh, sheep: impl IntoIterator<Item = &'
                 if baby { &BABY_BODY } else { &ADULT_FUR },
                 tint,
                 !baby,
+                &pose,
+                false,
             );
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
+}
+
+#[allow(clippy::too_many_arguments)]
+/// The six parts' rotations, which part is the head, and how far the head
+/// drops while grazing.
+struct Pose {
+    parts: [Quat; 6],
+    head: usize,
+    head_drop: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -248,9 +282,14 @@ fn append_layer(
     parts: &[BoxPart],
     tint: [f32; 3],
     fur: bool,
+    pose: &Pose,
+    mirror_right_legs: bool,
 ) {
     let region = atlas.entity_region(&ResourceId::parse(texture).unwrap());
-    for (index, &(from, to, uv, pivot, rotate_body)) in parts.iter().enumerate() {
+    for (index, &(from, to, uv, mut pivot, _)) in parts.iter().enumerate() {
+        if index == pose.head {
+            pivot[1] += pose.head_drop;
+        }
         let uv_dimensions = if fur {
             Some(if index == 0 {
                 [6.0, 6.0, 6.0]
@@ -262,7 +301,7 @@ fn append_layer(
         } else {
             None
         };
-        cube_tinted(
+        cube_tinted_pose_mirror(
             mesh,
             feet,
             rotation,
@@ -274,10 +313,11 @@ fn append_layer(
             to,
             uv,
             pivot,
-            rotate_body,
+            pose.parts[index],
             tint,
             [64.0, 32.0],
             uv_dimensions,
+            mirror_right_legs && matches!(index, 2 | 4),
         );
     }
 }

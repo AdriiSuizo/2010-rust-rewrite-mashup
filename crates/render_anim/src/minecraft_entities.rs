@@ -12,7 +12,11 @@ use minecraft_terrain::mesh::{Atlas, ChunkMesh};
 use minecraft_terrain::scene::{Block, HandcraftedScene, Scene};
 use minecraft_terrain::server::{PlayerEdit, ServerHandle, ServerSim, TickInput};
 use minecraft_terrain::terrain::TerrainStream;
-use minecraft_terrain::walk_animation::WalkAnimations;
+use minecraft_terrain::client_mobs::{ClientMobs, server_mobs};
+use minecraft_terrain::mesh::ItemVisuals;
+use minecraft_terrain::pack::PackStack;
+use minecraft_terrain::poof_particles::PoofParticles;
+use minecraft_terrain::portal_particles::PortalParticles;
 use minecraftoss_entities::tempt::PlayerCandidate;
 use minecraftoss_entities::world::{EntityWorld, MobHit, PlayerHitKind};
 
@@ -28,9 +32,25 @@ pub(crate) struct Entities {
     server: ServerHandle,
     /// The mobs the player tracks, as of the last server tick.
     world: EntityWorld,
-    walk: WalkAnimations,
+    /// The client's copies of them: tracked, interpolated, animated.
+    client: ClientMobs,
+    poof: PoofParticles,
+    portal: PortalParticles,
+    items: ItemVisuals,
     clock: f64,
     ticks: u64,
+}
+
+/// The mobs drawn this frame: entity models (cut out, back-face culled,
+/// translucent) and their shadows, in `mesh::Vertex`s; and what goes with
+/// the particles (held items, puffs, flames, potions).
+#[derive(Default)]
+pub(crate) struct MobMeshes {
+    pub models: ChunkMesh,
+    pub culled: ChunkMesh,
+    pub translucent: ChunkMesh,
+    pub shadows: ChunkMesh,
+    pub items: ChunkMesh,
 }
 
 /// The player as the mobs see it this frame.
@@ -44,12 +64,20 @@ pub(crate) struct PlayerView {
 }
 
 impl Entities {
-    pub(crate) fn new(stream: &TerrainStream) -> Self {
+    pub(crate) fn new(stream: &TerrainStream, seed: i64) -> Self {
         let sim = ServerSim::new(stream.world_gen(), stream.states.clone(), "minecraft:overworld");
+        let mut server = ServerHandle::spawn(sim);
+        // Mob loot, from the game's data JAR when MinecraftOSS has one.
+        if let Some(jar) = data_jar() {
+            server.load_loot(jar, seed as u64);
+        }
         Self {
-            server: ServerHandle::spawn(sim),
+            server,
             world: EntityWorld::default(),
-            walk: WalkAnimations::default(),
+            client: ClientMobs::default(),
+            poof: PoofParticles::default(),
+            portal: PortalParticles::default(),
+            items: ItemVisuals::default(),
             clock: 0.0,
             ticks: 0,
         }
@@ -61,6 +89,11 @@ impl Entities {
 
     pub(crate) fn unload_chunk(&mut self, pos: minecraftoss_core::ChunkPos) {
         self.server.unload_chunk(pos);
+    }
+
+    /// Client ticks run so far.
+    pub(crate) fn client_ticks(&self) -> u64 {
+        self.ticks
     }
 
     /// Blocks the player's weapons broke, for the level the mobs walk in.
@@ -103,6 +136,14 @@ impl Entities {
         if self.clock >= TICK_SECONDS {
             self.clock = (self.clock - TICK_SECONDS).min(TICK_SECONDS);
             self.ticks += 1;
+            // Packets first, then the client level's entity ticks.
+            self.client.tick();
+            for enderman in self.world.endermen() {
+                if let Some(mob) = self.client.get(enderman.id) {
+                    self.portal.emit_enderman(mob.position, 0.6, 2.9);
+                }
+            }
+            self.portal.tick();
             if self.ticks % 600 == 0 {
                 diag::info!(World, "Minecraft mobs: {} tracked", self.boxes().len());
             }
@@ -122,6 +163,8 @@ impl Entities {
                 offhand_carrot_on_a_stick: false,
                 main_hand_wolf_interest: false,
                 offhand_wolf_interest: false,
+                main_hand_horse_tempt: false,
+                offhand_horse_tempt: false,
                 alive: player.alive,
                 spectator: !player.alive,
                 attackable: player.alive,
@@ -161,22 +204,9 @@ impl Entities {
             changes.extend(output.changes);
             if let Some(mobs) = output.mobs {
                 self.world = *mobs;
-                let w = &self.world;
-                self.walk.tick(
-                    w.creepers()
-                        .iter()
-                        .map(|e| (e.id, e.previous_position, e.creeper.body.position, false))
-                        .chain(w.spiders().iter().map(|e| (e.id, e.previous_position, e.spider.body.position, false)))
-                        .chain(w.endermen().iter().map(|e| (e.id, e.previous_position, e.enderman.body.position, false)))
-                        .chain(w.witches().iter().map(|e| (e.id, e.previous_position, e.witch.body.position, false)))
-                        .chain(w.iron_golems().iter().map(|e| (e.id, e.previous_position, e.golem.body.position, false)))
-                        .chain(w.wolves().iter().map(|e| (e.id, e.previous_position, e.wolf.body.position, e.wolf.baby())))
-                        .chain(
-                            w.villagers()
-                                .iter()
-                                .map(|e| (e.id, e.previous_position, e.villager.body.position, e.villager.age.baby())),
-                        ),
-                );
+                for (feet, width, height) in self.client.receive(server_mobs(&self.world)) {
+                    self.poof.spawn(feet, width, height);
+                }
             }
             for hit in output.player_hits.into_iter().filter(|h| h.player_id == PLAYER) {
                 let from = match hit.kind {
@@ -250,44 +280,66 @@ impl Entities {
         out
     }
 
-    /// The mobs, drawn with the viewer's renderers into block-space meshes.
-    pub(crate) fn append_mesh(
-        &self,
-        mesh: &mut ChunkMesh,
+    /// Steps the client-side puffs, which settle on the scene's blocks.
+    pub(crate) fn tick_scene(&mut self, scene: &HandcraftedScene, ticks: u32) {
+        for _ in 0..ticks {
+            self.poof.tick(scene);
+        }
+    }
+
+    /// The mobs this frame, drawn with the viewer's renderers.
+    pub(crate) fn meshes(
+        &mut self,
         scene: &HandcraftedScene,
+        packs: &PackStack,
         atlas: &Atlas,
         light: &SkyLight,
         forward: Vec3,
-    ) {
+        camera: DVec3,
+        sky_darken: u8,
+    ) -> MobMeshes {
         use minecraft_terrain::*;
+        // Mobs appear on the client once their trackers start.
+        self.client.spawn_missing(&server_mobs(&self.world));
         let w = &self.world;
+        let poses = &self.client;
         let partial = (self.clock / TICK_SECONDS).clamp(0.0, 1.0) as f32;
-        cow_render::append_cows(mesh, w.cows().iter(), atlas, light, partial);
-        sheep_render::append_sheep(mesh, w.sheep().iter(), atlas, light);
-        pig_render::append_pigs(mesh, w.pigs().iter(), atlas, light);
-        chicken_render::append_chickens(mesh, w.chickens().iter(), atlas, light, partial);
-        bat_render::append_bats(mesh, w.bats().iter(), atlas, light, partial);
-        zombie_render::append_zombies(mesh, w.zombies().iter(), atlas, light, partial);
-        creeper_render::append_creepers(mesh, w.creepers().iter(), &self.walk, atlas, light, partial);
-        spider_render::append_spiders(mesh, w.spiders().iter(), &self.walk, atlas, light, partial);
-        skeleton_render::append_skeletons(mesh, w.skeletons().iter(), atlas, light, partial);
-        villager_render::append_villagers(
-            mesh,
+        let mut out = MobMeshes::default();
+        cow_render::append_cows(&mut out.models, w.cows().iter(), poses, atlas, light, partial);
+        sheep_render::append_sheep(&mut out.models, w.sheep().iter(), poses, atlas, light, partial);
+        pig_render::append_pigs(&mut out.models, w.pigs().iter(), poses, atlas, light, partial);
+        chicken_render::append_chickens(&mut out.models, w.chickens().iter(), poses, atlas, light, partial);
+        bat_render::append_bats(&mut out.culled, w.bats().iter(), poses, atlas, light, partial);
+        let zombie_items = zombie_render::append_zombies(&mut out.models, w.zombies().iter(), poses, atlas, light, partial);
+        creeper_render::append_creepers(&mut out.models, w.creepers().iter(), poses, atlas, light, partial);
+        spider_render::append_spiders(&mut out.models, w.spiders().iter(), poses, atlas, light, partial);
+        let skeleton_items =
+            skeleton_render::append_skeletons(&mut out.models, w.skeletons().iter(), poses, atlas, light, partial);
+        let villager_items = villager_render::append_villagers(
+            &mut out.models,
             w.villagers().iter(),
-            &self.walk,
+            poses,
             &|pos| Scene::block(scene, pos).and_then(|b| b.properties.get("facing").cloned()),
             atlas,
             light,
             partial,
         );
-        let mut translucent = ChunkMesh::default();
-        slime_render::append_slimes(mesh, &mut translucent, w.slimes().iter(), atlas, light, partial);
-        let _ = enderman_render::append_endermen(mesh, w.endermen().iter(), &self.walk, atlas, light, partial, 0);
-        witch_render::append_witches(mesh, w.witches().iter(), &self.walk, atlas, light, partial);
-        let _ = golem_render::append_iron_golems(mesh, w.iron_golems().iter(), &self.walk, atlas, light, partial);
-        wolf_render::append_wolves(mesh, w.wolves().iter(), &self.walk, atlas, light, partial, w.game_time());
+        horse_render::append_horses(&mut out.models, &mut out.translucent, w.cows().iter(), poses, atlas, light, partial);
+        slime_render::append_slimes(&mut out.models, &mut out.translucent, w.slimes().iter(), poses, atlas, light, partial);
+        let carried = enderman_render::append_endermen(
+            &mut out.models,
+            w.endermen().iter(),
+            poses,
+            atlas,
+            light,
+            partial,
+            self.ticks.rotate_left(32) ^ (partial.to_bits() as u64),
+        );
+        let witch_items = witch_render::append_witches(&mut out.models, w.witches().iter(), poses, atlas, light, partial);
+        let poppies = golem_render::append_iron_golems(&mut out.models, w.iron_golems().iter(), poses, atlas, light, partial);
+        wolf_render::append_wolves(&mut out.models, w.wolves().iter(), poses, atlas, light, partial, w.game_time());
         flame_render::append_flames(
-            mesh,
+            &mut out.items,
             w.burning()
                 .into_iter()
                 .map(|(previous, now, width, height)| (previous.lerp(now, f64::from(partial)), width, height)),
@@ -296,7 +348,7 @@ impl Entities {
             light,
         );
         witch_render::append_potions(
-            mesh,
+            &mut out.items,
             w.potions()
                 .iter()
                 .filter(|p| p.potion.alive)
@@ -305,7 +357,38 @@ impl Entities {
             forward,
             light,
         );
+        self.poof.append_mesh(&mut out.items, atlas, forward, partial, light);
+        self.portal.append_mesh(&mut out.items, atlas, forward, partial, light);
+        let held: Vec<_> =
+            skeleton_items.into_iter().chain(zombie_items).chain(villager_items).chain(witch_items).collect();
+        let _ = self.items.append_held_items(&mut out.items, &held, packs, atlas, light);
+        let carried: Vec<_> = carried.into_iter().chain(poppies).collect();
+        let _ = self.items.append_posed_blocks(&mut out.items, &carried, packs, atlas, light);
+        // Their shadows, at `getMaxLocalRawBrightness`.
+        let casters = client_mobs::shadow_casters(w, poses, camera, partial);
+        let raw = |pos: (i32, i32, i32)| light.get(pos).saturating_sub(sky_darken).max(light.get_block(pos));
+        if let Ok(shadows) = mesh::entity_shadows(&casters, scene, atlas, &raw, 0.0) {
+            out.shadows = shadows;
+        }
+        out
     }
+}
+
+/// The game's data JAR the MinecraftOSS harness downloaded (loot tables,
+/// recipes), as the viewer finds it.
+pub(crate) fn data_jar() -> Option<std::path::PathBuf> {
+    let root = assets::minecraft_map::root()?.join("harness/.gradle/loom-cache/minecraftMaven/net/minecraft");
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("minecraft-common-") {
+            continue;
+        }
+        for jar in std::fs::read_dir(entry.path().join("26.3")).ok()?.flatten() {
+            if jar.path().extension().is_some_and(|ext| ext == "jar") {
+                return Some(jar.path());
+            }
+        }
+    }
+    None
 }
 
 /// A mob hit as one number: the kind in the top byte, the id below.

@@ -80,6 +80,9 @@ pub struct MinecraftWorldFrame {
     pub cracks: (Vec<[f32; 5]>, Vec<u32>),
     /// The ten destroy stages side by side.
     pub crack_texture: Option<Arc<MinecraftAtlasImage>>,
+    /// Mob models (cut out, back-face culled, translucent) and entity
+    /// shadows: MinecraftOSS `Vertex` bytes (44 each) and indices.
+    pub entity_meshes: [(Vec<u8>, Vec<u32>); 4],
 }
 
 #[repr(C)]
@@ -97,6 +100,8 @@ struct TerrainView {
 const VIEW_SIZE: u64 = std::mem::size_of::<TerrainView>() as u64;
 const CLOUD_VERTEX_BYTES: u64 = 28;
 const CRACK_VERTEX_BYTES: u64 = 20;
+/// MinecraftOSS's full `Vertex`: position, uv, colour, sky and block light.
+const ENTITY_VERTEX_BYTES: u64 = 44;
 
 struct SectionGpu {
     vertices: Buffer,
@@ -116,11 +121,13 @@ struct TerrainGpu {
     /// This frame's particles and cracks: vertices, indices, index count.
     particles: Option<(Buffer, Buffer, u32)>,
     cracks: Option<(Buffer, Buffer, u32)>,
+    /// This frame's entity meshes, in `MinecraftWorldFrame::entity_meshes` order.
+    entities: [Option<(Buffer, Buffer, u32)>; 4],
     sampler: Option<Sampler>,
     bind: Option<BindGroup>,
     sections: HashMap<[i32; 3], SectionGpu>,
     visible: Vec<[i32; 3]>,
-    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 5]>,
+    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 9]>,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -235,6 +242,24 @@ fn prepare_terrain(
             particle_indices.len() as u32,
         )
     });
+    let meshes = std::mem::take(&mut frame.entity_meshes);
+    for (slot, (vertices, indices)) in gpu.entities.iter_mut().zip(meshes) {
+        *slot = (!indices.is_empty()).then(|| {
+            (
+                device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("iw4l_minecraft_entity_vertices"),
+                    contents: &vertices,
+                    usage: BufferUsages::VERTEX,
+                }),
+                device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("iw4l_minecraft_entity_indices"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: BufferUsages::INDEX,
+                }),
+                indices.len() as u32,
+            )
+        });
+    }
     let (crack_vertices, crack_indices) = std::mem::take(&mut frame.cracks);
     gpu.cracks = (!crack_indices.is_empty()).then(|| {
         (
@@ -442,7 +467,7 @@ fn draw_terrain(
     let (target, depth, extracted_view, msaa) = view.into_inner();
     let format = target.main_texture_format();
     let samples = msaa.map_or(1, Msaa::samples);
-    let [sky, opaque, translucent, clouds, crack] = gpu
+    let [sky, opaque, translucent, clouds, crack, entity, entity_culled, entity_translucent, shadow] = gpu
         .pipelines
         .entry((format, samples))
         .or_insert_with(|| pipelines(&device, &registry, format, samples))
@@ -478,6 +503,15 @@ fn draw_terrain(
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..*count, 0, 0..1);
     }
+    // Mobs, then their shadows on what is drawn so far.
+    for (pipeline, mesh) in [(&entity, &gpu.entities[0]), (&entity_culled, &gpu.entities[1]), (&shadow, &gpu.entities[3])] {
+        if let Some((vertices, indices, count)) = mesh.as_ref() {
+            pass.set_render_pipeline(pipeline);
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+            pass.draw_indexed(0..*count, 0, 0..1);
+        }
+    }
     // Sky wherever nothing has been drawn yet: a full-screen triangle at the
     // cleared depth.
     pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, 0.0, 0.0);
@@ -495,6 +529,12 @@ fn draw_terrain(
         pass.set_vertex_buffer(0, section.vertices.slice(..));
         pass.set_index_buffer(section.indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(section.transparent_start..section.count, 0, 0..1);
+    }
+    if let Some((vertices, indices, count)) = gpu.entities[2].as_ref() {
+        pass.set_render_pipeline(&entity_translucent);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(0..*count, 0, 0..1);
     }
     if let Some((vertices, indices, count)) = gpu.cracks.as_ref() {
         pass.set_render_pipeline(&crack);
@@ -740,6 +780,63 @@ fn cloud_fragment(in: CloudOut) -> @location(0) vec4<f32> {
     return vec4<f32>(view.environment.cloud.rgb * in.colour.rgb, alpha);
 }
 
+// Mobs: shader.wgsl `vs_main` with `fs_entity` (the entity overlay rides in
+// vertex alpha: negative for the hurt flash's red, else the white's alpha)
+// and `fs_entity_translucent`; entity textures have no mipmaps.
+struct EntityOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) colour: vec4<f32>,
+    @location(2) world_pos: vec3<f32>,
+    @location(3) light: vec3<f32>,
+}
+
+@vertex
+fn entity_vertex(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) colour: vec4<f32>,
+    @location(3) sky_light: f32,
+    @location(4) block_light: f32,
+) -> EntityOut {
+    var out: EntityOut;
+    out.clip = view.clip_from_rel * vec4<f32>(rel_from_block(position), 1.0);
+    out.uv = uv;
+    let light = lightmap(sky_light, block_light);
+    out.colour = vec4<f32>(colour.rgb * light, colour.a);
+    out.world_pos = position;
+    out.light = light;
+    return out;
+}
+
+@fragment
+fn entity_fragment(in: EntityOut) -> @location(0) vec4<f32> {
+    let texel = textureSampleLevel(atlas, atlas_sampler, in.uv, 0.0);
+    if texel.a < 0.1 {
+        discard;
+    }
+    let keep = abs(in.colour.a);
+    let overlay = select(vec3<f32>(1.0), vec3<f32>(1.0, 0.0, 0.0), in.colour.a < 0.0);
+    let lit = texel.rgb * in.colour.rgb * keep + overlay * (1.0 - keep) * in.light;
+    return vec4<f32>(mix(lit, view.environment.fog.rgb, fog_value(in.world_pos)), 1.0);
+}
+
+@fragment
+fn entity_translucent_fragment(in: EntityOut) -> @location(0) vec4<f32> {
+    let texel = textureSampleLevel(atlas, atlas_sampler, in.uv, 0.0);
+    if texel.a < 0.1 {
+        discard;
+    }
+    let lit = texel.rgb * in.colour.rgb;
+    return vec4<f32>(mix(lit, view.environment.fog.rgb, fog_value(in.world_pos)), texel.a * in.colour.a);
+}
+
+// shadow.wgsl: black, as dark as the shadow sprite and the vertex alpha.
+@fragment
+fn shadow_fragment(in: EntityOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, textureSample(atlas, atlas_sampler, in.uv).a * in.colour.a);
+}
+
 // viewer/src/block_overlay.wgsl `fs_crack`, blended as the crumbling render
 // type: source times destination, twice.
 struct CrackOut {
@@ -770,7 +867,7 @@ fn pipelines(
     registry: &ExactPipelineRegistry,
     format: TextureFormat,
     samples: u32,
-) -> [RenderPipeline; 5] {
+) -> [RenderPipeline; 9] {
     let shader = unsafe {
         device.create_shader_module(ShaderModuleDescriptor {
             label: Some("iw4l_minecraft_terrain"),
@@ -848,6 +945,38 @@ fn pipelines(
         step_mode: VertexStepMode::Vertex,
         attributes: &crack_attributes,
     }];
+    let entity_attributes = [
+        VertexAttribute {
+            format: VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        VertexAttribute {
+            format: VertexFormat::Float32x2,
+            offset: 12,
+            shader_location: 1,
+        },
+        VertexAttribute {
+            format: VertexFormat::Float32x4,
+            offset: 20,
+            shader_location: 2,
+        },
+        VertexAttribute {
+            format: VertexFormat::Float32,
+            offset: 36,
+            shader_location: 3,
+        },
+        VertexAttribute {
+            format: VertexFormat::Float32,
+            offset: 40,
+            shader_location: 4,
+        },
+    ];
+    let entity_buffers = [RawVertexBufferLayout {
+        array_stride: ENTITY_VERTEX_BYTES,
+        step_mode: VertexStepMode::Vertex,
+        attributes: &entity_attributes,
+    }];
     let crumbling = BlendState {
         color: bevy::render::render_resource::BlendComponent {
             src_factor: bevy::render::render_resource::BlendFactor::Dst,
@@ -860,7 +989,7 @@ fn pipelines(
             operation: bevy::render::render_resource::BlendOperation::Add,
         },
     };
-    let make = |vertex: &str, fragment: &str, buffers: &[RawVertexBufferLayout], depth_write: bool, compare: CompareFunction, blend: Option<BlendState>| {
+    let make = |vertex: &str, fragment: &str, buffers: &[RawVertexBufferLayout], depth_write: bool, compare: CompareFunction, blend: Option<BlendState>, cull: Option<bevy::render::render_resource::Face>| {
         device.create_render_pipeline(&RawRenderPipelineDescriptor {
             label: Some("iw4l_minecraft_terrain"),
             layout: Some(&pipeline_layout),
@@ -881,7 +1010,7 @@ fn pipelines(
                 compilation_options: options.clone(),
             }),
             primitive: PrimitiveState {
-                cull_mode: None,
+                cull_mode: cull,
                 ..default()
             },
             depth_stencil: Some(DepthStencilState {
@@ -900,8 +1029,8 @@ fn pipelines(
         })
     };
     [
-        make("sky_vertex", "sky_fragment", &[], false, CompareFunction::Equal, None),
-        make("vertex", "opaque", &buffers, true, CompareFunction::GreaterEqual, None),
+        make("sky_vertex", "sky_fragment", &[], false, CompareFunction::Equal, None, None),
+        make("vertex", "opaque", &buffers, true, CompareFunction::GreaterEqual, None, None),
         make(
             "vertex",
             "translucent",
@@ -909,6 +1038,7 @@ fn pipelines(
             false,
             CompareFunction::GreaterEqual,
             Some(BlendState::ALPHA_BLENDING),
+            None,
         ),
         make(
             "cloud_vertex",
@@ -917,6 +1047,7 @@ fn pipelines(
             false,
             CompareFunction::GreaterEqual,
             Some(BlendState::ALPHA_BLENDING),
+            None,
         ),
         make(
             "crack_vertex",
@@ -925,6 +1056,35 @@ fn pipelines(
             false,
             CompareFunction::GreaterEqual,
             Some(crumbling),
+            None,
+        ),
+        make("entity_vertex", "entity_fragment", &entity_buffers, true, CompareFunction::GreaterEqual, None, None),
+        make(
+            "entity_vertex",
+            "entity_fragment",
+            &entity_buffers,
+            true,
+            CompareFunction::GreaterEqual,
+            None,
+            Some(bevy::render::render_resource::Face::Back),
+        ),
+        make(
+            "entity_vertex",
+            "entity_translucent_fragment",
+            &entity_buffers,
+            false,
+            CompareFunction::GreaterEqual,
+            Some(BlendState::ALPHA_BLENDING),
+            None,
+        ),
+        make(
+            "entity_vertex",
+            "shadow_fragment",
+            &entity_buffers,
+            false,
+            CompareFunction::GreaterEqual,
+            Some(BlendState::ALPHA_BLENDING),
+            None,
         ),
     ]
 }

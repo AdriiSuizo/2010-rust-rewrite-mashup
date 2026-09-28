@@ -9,7 +9,7 @@ use crate::{
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{Quat, Vec3};
 use minecraftoss_entities::world::SpiderEntity;
@@ -49,7 +49,7 @@ pub fn leg_motion(position: f32, speed: f32) -> [(f32, f32); 4] {
 pub fn append_spiders<'a>(
     mesh: &mut ChunkMesh,
     spiders: impl IntoIterator<Item = &'a SpiderEntity>,
-    walks: &WalkAnimations,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
@@ -58,20 +58,17 @@ pub fn append_spiders<'a>(
     let eyes_id = ResourceId::parse("minecraft:entity/spider/spider_eyes").unwrap();
     let eyes = atlas.contains(&eyes_id).then(|| atlas.entity_region(&eyes_id));
     let partial = partial.clamp(0.0, 1.0);
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in spiders {
-        let spider = &entity.spider;
-        if spider.health <= 0.0 {
-            continue;
-        }
-        let feet = entity.previous_position.lerp(spider.body.position, f64::from(partial));
-        let sample = (feet.x.floor() as i32, (feet.y + f64::from(spider.eye_height())).floor() as i32, feet.z.floor() as i32);
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let sample = mob.light_block();
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let body_yaw = entity.ai.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(PI - body_yaw.to_radians());
-        let look = &entity.ai.state.look_control;
-        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, (look.head_yaw - body_yaw).to_radians(), look.pitch.to_radians());
-        let walk = walks.get(entity.id);
-        let motion = leg_motion(walk.position(partial), walk.speed(partial));
+        let rotation = mob.body_rotation(180.0);
+        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, mob.head_yaw.to_radians(), mob.head_pitch.to_radians());
+        let motion = leg_motion(mob.walk_position, mob.walk_speed);
         let mut parts: Vec<(Part, Quat, bool)> = vec![(HEAD, head, false), (BODY_0, Quat::IDENTITY, false), (BODY_1, Quat::IDENTITY, false)];
         for (pivot, yaw, roll, phase) in LEGS {
             let left = pivot[0] > 0.0;
@@ -87,5 +84,19 @@ pub fn append_spiders<'a>(
             let ((from, to, uv, pivot), pose, _) = parts[0];
             cube_scaled(mesh, feet, rotation, Vec3::ONE, eyes, 15.0, 15.0, from, to, uv, pivot, pose, [1.0; 3], [64., 32.], None, false);
         }
+    }
+    crate::cow_render::apply_overlays(mesh, &marks);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn still_legs_rest_and_walking_legs_move_in_four_phases() {
+        assert!(leg_motion(3.0, 0.0).iter().all(|&(swing, step)| swing == 0.0 && step == 0.0));
+        let walking = leg_motion(1.0, 1.0);
+        assert!(walking.iter().all(|&(_, step)| step >= 0.0));
+        assert_ne!(walking[0], walking[1]);
     }
 }

@@ -425,6 +425,37 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
             world.cow_mut(id)?.random = random;
             id
         }
+        "minecraft:horse" | "minecraft:donkey" => {
+            use minecraftoss_entities::horse::{HorseKind, HorseState};
+            let mut cow = Cow::new(pos);
+            cow.yaw = yaw;
+            cow.age.set(age);
+            cow.persistence_required = persistent;
+            if let Some(health) = health {
+                cow.health = health;
+            }
+            // `AbstractHorse.readAdditionalSaveData` (and `Horse`'s variant,
+            // `AbstractChestedHorse`'s chest); its attributes as saved.
+            let mut horse = HorseState::new(if kind == "minecraft:horse" { HorseKind::Horse } else { HorseKind::Donkey });
+            horse.variant = int(tag, "Variant").unwrap_or(0);
+            horse.chest = int(tag, "ChestedHorse").unwrap_or(0) != 0;
+            horse.tame = int(tag, "Tame").unwrap_or(0) != 0;
+            horse.bred = int(tag, "Bred").unwrap_or(0) != 0;
+            horse.temper = int(tag, "Temper").unwrap_or(0);
+            horse.eating = int(tag, "EatingHaystack").unwrap_or(0) != 0;
+            if let Some(max_health) = attribute_base(tag, "minecraft:max_health") {
+                horse.max_health = max_health as f32;
+            }
+            if let Some(speed) = attribute_base(tag, "minecraft:movement_speed") {
+                horse.movement_speed = speed;
+            }
+            if let Some(jump) = attribute_base(tag, "minecraft:jump_strength") {
+                horse.jump_strength = jump;
+            }
+            let id = world.spawn_horse(cow, horse, no_ai);
+            world.cow_mut(id)?.random = random;
+            id
+        }
         "minecraft:pig" => {
             let mut pig = Pig::new(pos);
             pig.yaw = yaw;
@@ -479,8 +510,11 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
             let id = world.spawn_sheep(sheep, pos, no_ai);
             let entity = world.sheep_mut(id)?;
             entity.random = random;
+            // `Entity.load`: the head and body face the saved yaw too.
             entity.yaw = yaw;
             entity.previous_yaw = yaw;
+            entity.look_control.head_yaw = yaw;
+            entity.body_rotation.body_yaw = yaw;
             if let Some(health) = health {
                 entity.health = health;
             }
@@ -502,6 +536,7 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
             }
             zombie.head_item = head_item(tag);
             zombie.main_hand = tag.get("equipment").and_then(|e| e.get("mainhand")).and_then(|i| i.get("id")).and_then(Tag::as_str).map(str::to_owned);
+            zombie.armor = armor_slots(tag);
             zombie.set_baby(int(tag, "IsBaby").unwrap_or(0) != 0);
             zombie.can_break_doors = int(tag, "CanBreakDoors").unwrap_or(0) != 0;
             zombie.persistence_required = persistent;
@@ -532,6 +567,10 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
             // `Bogged.readAdditionalSaveData`.
             skeleton.sheared = int(tag, "sheared").unwrap_or(0) != 0;
             skeleton.head_item = head_item(tag);
+            // Its bow is the main hand's (a summoned skeleton has none; a
+            // natural spawn's `finalizeSpawn` gave it one).
+            skeleton.holds_bow = tag.get("equipment").and_then(|e| e.get("mainhand")).and_then(|i| i.get("id")).and_then(Tag::as_str) == Some("minecraft:bow");
+            skeleton.armor = armor_slots(tag);
             skeleton.persistence_required = persistent;
             if let Some(health) = health {
                 skeleton.health = health;
@@ -730,6 +769,8 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
             let entity = world.bat_mut(id)?;
             entity.random = random;
             entity.yaw = yaw;
+            entity.look_control.head_yaw = yaw;
+            entity.body_rotation.body_yaw = yaw;
             id
         }
         "minecraft:villager" => {
@@ -756,6 +797,7 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
             let maxes: Vec<u8> = tag.get("Inventory").and_then(Tag::as_list).into_iter().flatten().map(|s| world.item_max_stack(text(s, "id").unwrap_or("")).clamp(1, 99) as u8).collect();
             let entity = world.villager_mut(id)?;
             entity.random = random;
+            entity.yaw = yaw;
             // `AbstractVillager.readAdditionalSaveData`: the offers it had
             // made (none are made until needed), and `Villager`'s restock
             // clock.
@@ -770,6 +812,12 @@ pub fn spawn_saved(world: &mut EntityWorld, tag: &Tag) -> Option<u64> {
                 }
             }
             entity.food_level = int(tag, "FoodLevel").unwrap_or(0);
+            // What it holds is its main hand.
+            entity.held_item = tag.get("equipment").and_then(|e| e.get("mainhand")).and_then(|item| {
+                let id = text(item, "id")?.to_owned();
+                let components = item.get("components").map(tag_json).and_then(|v| v.as_object().cloned()).unwrap_or_default();
+                Some(minecraftoss_entities::trading::TradeItem { id, count: int(item, "count").unwrap_or(1), components })
+            });
             // `Mob.readAdditionalSaveData`: false unless saved (village
             // templates save true).
             entity.can_pick_up_loot = int(tag, "CanPickUpLoot").is_some_and(|b| b != 0);
@@ -1065,13 +1113,34 @@ pub fn mob_tags(world: &EntityWorld, keep: impl Fn(DVec3) -> bool, originals: &s
         data.insert("level".to_owned(), Tag::Int(v.level));
         fields.push(("VillagerData", Tag::Compound(data)));
         fields.push(("Xp", Tag::Int(v.xp)));
-        add(e.id, "minecraft:villager", &v.body, e.ai.as_deref().map_or(0.0, |ai| ai.yaw), v.health, v.persistence_required, fields);
+        if let Some(item) = &e.held_item {
+            let mut stack: std::collections::BTreeMap<String, Tag> = [("id".to_owned(), text_tag(&item.id)), ("count".to_owned(), Tag::Int(item.count))].into_iter().collect();
+            if !item.components.is_empty() {
+                stack.insert("components".to_owned(), json_tag(&serde_json::Value::Object(item.components.clone())));
+            }
+            fields.push(("equipment", Tag::Compound([("mainhand".to_owned(), Tag::Compound(stack))].into_iter().collect())));
+        }
+        add(e.id, "minecraft:villager", &v.body, e.ai.as_deref().map_or(e.yaw, |ai| ai.yaw), v.health, v.persistence_required, fields);
     }
     for e in world.cows() {
         let cow = &e.cow;
         let mut fields = age(&cow.age);
         fields.push(("variant", text_tag(match cow.variant { CowVariant::Warm => "minecraft:warm", CowVariant::Cold => "minecraft:cold", CowVariant::Temperate => "minecraft:temperate" })));
         fields.push(("sound_variant", text_tag(match cow.sound_variant { CowSoundVariant::Moody => "minecraft:moody", CowSoundVariant::Classic => "minecraft:classic" })));
+        if let Some(horse) = &e.horse {
+            use minecraftoss_entities::horse::HorseKind;
+            let mut fields = age(&cow.age);
+            fields.push(("EatingHaystack", Tag::Byte(i8::from(horse.eating))));
+            fields.push(("Bred", Tag::Byte(i8::from(horse.bred))));
+            fields.push(("Temper", Tag::Int(horse.temper)));
+            fields.push(("Tame", Tag::Byte(i8::from(horse.tame))));
+            match horse.kind {
+                HorseKind::Horse => fields.push(("Variant", Tag::Int(horse.variant))),
+                HorseKind::Donkey => fields.push(("ChestedHorse", Tag::Byte(i8::from(horse.chest)))),
+            }
+            add(e.id, horse.kind.type_id(), &cow.body, cow.yaw, cow.health, cow.persistence_required, fields);
+            continue;
+        }
         let kind = match &e.mooshroom {
             Some(state) => {
                 fields.push(("Type", text_tag(if state.variant == MushroomVariant::Brown { "brown" } else { "red" })));
@@ -1303,6 +1372,11 @@ fn attribute_value(tag: &Tag, id: &str) -> Option<f64> {
 
 /// The head slot's item, when there is one: whether it can be damaged
 /// (armor can; pumpkins and heads cannot).
+/// The head, chest, legs and feet slots' item IDs from `equipment`.
+fn armor_slots(tag: &Tag) -> [Option<String>; 4] {
+    ["head", "chest", "legs", "feet"].map(|slot| tag.get("equipment")?.get(slot)?.get("id")?.as_str().map(str::to_owned))
+}
+
 fn head_item(tag: &Tag) -> Option<bool> {
     let id = tag.get("equipment")?.get("head")?.get("id")?.as_str()?;
     Some(id.ends_with("_helmet"))

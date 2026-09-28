@@ -6,6 +6,7 @@
 //! slight downscale: squashed wide on landing, stretched tall on take-off.
 //! The death tip-over and hurt tint are not drawn.
 use crate::{
+    client_mobs::ClientMobs,
     cow_render::cube_scaled,
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
@@ -13,7 +14,6 @@ use crate::{
 };
 use glam::{Quat, Vec3};
 use minecraftoss_entities::world::SlimeEntity;
-use std::f32::consts::PI;
 
 type Part = ([f32; 3], [f32; 3], [f32; 2]);
 
@@ -39,21 +39,23 @@ pub fn append_slimes<'a>(
     mesh: &mut ChunkMesh,
     translucent: &mut ChunkMesh,
     slimes: impl IntoIterator<Item = &'a SlimeEntity>,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
 ) {
     let region = atlas.entity_region(&ResourceId::parse("minecraft:entity/slime/slime").unwrap());
     let partial = partial.clamp(0.0, 1.0);
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in slimes {
         let slime = &entity.slime;
-        if slime.health <= 0.0 {
-            continue;
-        }
-        let feet = entity.previous_position.lerp(slime.body.position, f64::from(partial));
-        let sample = (feet.x.floor() as i32, (feet.y + f64::from(slime.eye_height())).floor() as i32, feet.z.floor() as i32);
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let sample = mob.light_block();
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let rotation = Quat::from_rotation_y(PI - entity.ai.body_rotation.body_yaw.to_radians());
+        let rotation = mob.body_rotation(90.0);
         // `extractRenderState`: the squash between ticks.
         let squish = slime.previous_squish + (slime.squish - slime.previous_squish) * partial;
         let scale = size_and_squish(slime.size, squish);
@@ -62,5 +64,25 @@ pub fn append_slimes<'a>(
         }
         let (from, to, uv) = OUTER;
         cube_scaled(translucent, feet, rotation, scale, region, sky, block, from, to, uv, [0.0; 3], Quat::IDENTITY, [1.0; 3], [64., 32.], None, false);
+    }
+    crate::cow_render::apply_overlays(mesh, &marks);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn landing_squashes_and_leaping_stretches() {
+        let rest = size_and_squish(2, 0.0);
+        assert!((rest - Vec3::splat(2.0 * 0.999)).length() < 1e-6);
+        // `targetSquish` -0.5 on landing: wider and flatter.
+        let landed = size_and_squish(2, -0.5);
+        assert!(landed.x > rest.x && landed.y < rest.y, "{landed:?}");
+        // 1 on take-off: narrower and taller.
+        let leaping = size_and_squish(2, 1.0);
+        assert!(leaping.x < rest.x && leaping.y > rest.y, "{leaping:?}");
+        // Bigger slimes squash less.
+        assert!(size_and_squish(4, 1.0).y / 4.0 < leaping.y / 2.0);
     }
 }

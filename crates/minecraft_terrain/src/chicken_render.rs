@@ -1,7 +1,8 @@
 //! Pinned 26.3 AdultChickenModel, BabyChickenModel and ColdChickenModel cuboids.
 //! Textures resolve through the selected resource-pack atlas.
 use crate::{
-    cow_render::cube_tinted,
+    client_mobs::ClientMobs,
+    cow_render::cube_tinted_pose,
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
@@ -133,32 +134,55 @@ pub fn texture_id(variant: ChickenVariant, baby: bool) -> ResourceId {
 pub fn append_chickens<'a>(
     mesh: &mut ChunkMesh,
     chickens: impl IntoIterator<Item = &'a ChickenEntity>,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
 ) {
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in chickens {
         let chicken = &entity.chicken;
-        if chicken.health <= 0.0 {
-            continue;
-        }
-        let feet = entity
-            .previous_position
-            .lerp(chicken.body.position, partial.clamp(0.0, 1.0) as f64);
-        let yaw_delta = (chicken.yaw - entity.previous_yaw + 180.0).rem_euclid(360.0) - 180.0;
-        let yaw = entity.previous_yaw + yaw_delta * partial.clamp(0.0, 1.0);
-        let rotation = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians());
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let rotation = mob.body_rotation(90.0);
         let baby = chicken.age.baby();
         let region = atlas.entity_region(&texture_id(chicken.variant, baby));
-        let pos = (
-            feet.x.floor() as i32,
-            (feet.y + 0.35).floor() as i32,
-            feet.z.floor() as i32,
-        );
+        // ChickenModel.setupAnim (and AdultChickenModel's looking head):
+        // legs swing, wings flap by `(sin(flap) + 1) * flapSpeed`.
+        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, mob.head_yaw.to_radians(), mob.head_pitch.to_radians());
+        let flap = (minecraftoss_player::mth::sin(f64::from(mob.flap)) + 1.0) * mob.flap_speed;
+        let swing = crate::client_mobs::mth_cos(mob.walk_position * 0.6662) * 1.4 * mob.walk_speed;
+        let swing_back = crate::client_mobs::mth_cos(mob.walk_position * 0.6662 + std::f32::consts::PI) * 1.4 * mob.walk_speed;
+        let (right_leg, left_leg) = (Quat::from_rotation_x(swing), Quat::from_rotation_x(swing_back));
+        let (right_wing, left_wing) = (Quat::from_rotation_z(flap), Quat::from_rotation_z(-flap));
+        let part = |index: usize| -> Quat {
+            if baby {
+                match index {
+                    2 | 3 => left_leg,
+                    4 | 5 => right_leg,
+                    6 => right_wing,
+                    7 => left_wing,
+                    _ => Quat::IDENTITY,
+                }
+            } else {
+                match index {
+                    0..=2 => head,
+                    3 => Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                    4 => right_leg,
+                    5 => left_leg,
+                    6 => right_wing,
+                    7 => left_wing,
+                    _ => Quat::IDENTITY,
+                }
+            }
+        };
+        let pos = mob.light_block();
         let sky = light.get(pos) as f32;
         let block = light.get_block(pos) as f32;
-        for &(from, to, uv, pivot, rotate_body) in if baby { &BABY[..] } else { &ADULT[..] } {
-            cube_tinted(
+        for (index, &(from, to, uv, pivot, _)) in (if baby { &BABY[..] } else { &ADULT[..] }).iter().enumerate() {
+            cube_tinted_pose(
                 mesh,
                 feet,
                 rotation,
@@ -170,14 +194,14 @@ pub fn append_chickens<'a>(
                 to,
                 uv,
                 pivot,
-                rotate_body,
+                part(index),
                 [1.0; 3],
                 if baby { [16., 16.] } else { [64., 32.] },
                 None,
             );
         }
         if chicken.variant == ChickenVariant::Cold && !baby {
-            for (from, to, uv, pivot, rotate_body) in [
+            for (index, (from, to, uv, pivot, _)) in [
                 ([0., 3., -1.], [0., 6., 4.], [38., 9.], [0., 16., 0.], true),
                 (
                     [-3., -7., -2.015],
@@ -186,8 +210,12 @@ pub fn append_chickens<'a>(
                     [0., 15., -4.],
                     false,
                 ),
-            ] {
-                cube_tinted(
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // The cold coat's body piece, then its head piece.
+                cube_tinted_pose(
                     mesh,
                     feet,
                     rotation,
@@ -199,7 +227,7 @@ pub fn append_chickens<'a>(
                     to,
                     uv,
                     pivot,
-                    rotate_body,
+                    if index == 0 { part(3) } else { head },
                     [1.0; 3],
                     [64., 32.],
                     None,
@@ -207,4 +235,5 @@ pub fn append_chickens<'a>(
             }
         }
     }
+    crate::cow_render::apply_overlays(mesh, &marks);
 }

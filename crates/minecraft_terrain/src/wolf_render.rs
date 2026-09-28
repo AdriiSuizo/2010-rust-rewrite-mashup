@@ -12,7 +12,7 @@ use crate::{
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{EulerRot, Quat, Vec3};
 use minecraftoss_entities::world::WolfEntity;
@@ -102,7 +102,7 @@ impl Pose {
 
 /// `WolfModel.setupAnim` and its model's overrides: each part's pose.
 #[allow(clippy::too_many_arguments)]
-fn poses(baby: bool, walk_position: f32, walk_speed: f32, angry: bool, sitting: bool, shake: f32, head_roll: f32, head: (f32, f32), tail_angle: f32) -> [Pose; 9] {
+fn part_poses(baby: bool, walk_position: f32, walk_speed: f32, angry: bool, sitting: bool, shake: f32, head_roll: f32, head: (f32, f32), tail_angle: f32) -> [Pose; 9] {
     let mut p = if baby {
         [
             Pose::at([0., 18.25, -4.], 0.),
@@ -180,41 +180,39 @@ fn poses(baby: bool, walk_position: f32, walk_speed: f32, angry: bool, sitting: 
 }
 
 /// Appends the living wolves.
-pub fn append_wolves<'a>(mesh: &mut ChunkMesh, wolves: impl IntoIterator<Item = &'a WolfEntity>, walks: &WalkAnimations, atlas: &Atlas, light: &SkyLight, partial: f32, game_time: i64) {
+pub fn append_wolves<'a>(mesh: &mut ChunkMesh, wolves: impl IntoIterator<Item = &'a WolfEntity>, poses: &ClientMobs, atlas: &Atlas, light: &SkyLight, partial: f32, game_time: i64) {
     let partial = partial.clamp(0.0, 1.0);
     let collar_ids = (ResourceId::parse("minecraft:entity/wolf/wolf_collar"), ResourceId::parse("minecraft:entity/wolf/wolf_collar_baby"));
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in wolves {
         let wolf = &entity.wolf;
-        if wolf.health <= 0.0 {
-            continue;
-        }
         let baby = wolf.baby();
         let angry = entity.angry(game_time);
         let Ok(skin_id) = ResourceId::parse(&wolf.texture(angry)) else { continue };
         if !atlas.contains(&skin_id) {
             continue;
         }
-        let feet = entity.previous_position.lerp(wolf.body.position, f64::from(partial));
-        let eye = feet + glam::DVec3::new(0.0, f64::from(wolf.eye_height()), 0.0);
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), mob.overlay(0.0)));
+        let feet = mob.feet;
+        let eye = mob.light_probe;
         let sample = (eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32);
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let body_yaw = entity.ai.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(PI - body_yaw.to_radians());
-        let walk = walks.get(entity.id);
-        let look = &entity.ai.state.look_control;
+        let rotation = mob.body_rotation(90.0);
         let shake = wolf.shake_anim_o + (wolf.shake_anim - wolf.shake_anim_o) * partial;
         let head_roll = (wolf.interested_angle_o + (wolf.interested_angle - wolf.interested_angle_o) * partial) * 0.15 * PI;
         // `getWetShade` darkens the whole model while it is wet.
         let wet = if wolf.wet { (0.75 + shake / 2.0 * 0.25).min(1.0) } else { 1.0 };
-        let pose = poses(
+        let pose = part_poses(
             baby,
-            walk.position(partial),
-            walk.speed(partial),
+            mob.walk_position,
+            mob.walk_speed,
             angry,
             wolf.sitting,
             shake,
             head_roll,
-            (look.pitch.to_radians(), (look.head_yaw - body_yaw).to_radians()),
+            (mob.head_pitch.to_radians(), mob.head_yaw.to_radians()),
             wolf.tail_angle(angry),
         );
         let (cubes, texture_size): (&[Cube], [f32; 2]) = if baby { (&BABY, [32., 32.]) } else { (&ADULT, [64., 32.]) };
@@ -255,5 +253,27 @@ pub fn append_wolves<'a>(mesh: &mut ChunkMesh, wolves: impl IntoIterator<Item = 
                 cube_tinted_pose_mirror(mesh, feet, rotation, 1.0, region, sky, block, from, to, uv, pivot.to_array(), parent_rotation * child, tint, texture_size, uv_size, mirror);
             }
         }
+    }
+    crate::cow_render::apply_overlays(mesh, &marks);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shake_rolls_the_body_and_the_tail_follows_its_angle() {
+        assert_eq!(body_roll(0.0, -0.16), 0.0);
+        assert!(body_roll(0.9, 0.0).abs() <= 0.15 * PI + 1e-6);
+        assert!(body_roll(2.0, 0.0).abs() < 1e-5);
+        // Standing still, an adult's legs hang straight and its tail takes
+        // the angle given.
+        let p = part_poses(false, 0.0, 0.0, false, false, 0.0, 0.0, (0.0, 0.0), 0.7);
+        assert_eq!(p[4].x, 0.0);
+        assert_eq!(p[8].x, 0.7);
+        // Sitting, the hind legs fold under it.
+        let p = part_poses(false, 0.0, 0.0, false, true, 0.0, 0.0, (0.0, 0.0), 0.7);
+        assert_eq!(p[4].x, PI * 3.0 / 2.0);
+        assert_eq!(p[2].offset, [0., 18., 0.]);
     }
 }

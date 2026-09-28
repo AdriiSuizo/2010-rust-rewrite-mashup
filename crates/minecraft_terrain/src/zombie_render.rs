@@ -7,7 +7,8 @@
 //! The body faces its body yaw and the head its look. Walk/swing
 //! animation, mirrored UVs and equipment overlays remain open.
 use crate::{
-    cow_render::cube_tinted_pose,
+    client_mobs::{ClientMobs, MobPose},
+    cow_render::cube_tinted_pose_mirror,
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
@@ -51,20 +52,21 @@ const BABY: [Part; 7] = [
 pub fn append_zombies<'a>(
     mesh: &mut ChunkMesh,
     zombies: impl IntoIterator<Item = &'a ZombieEntity>,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
-) {
+) -> Vec<crate::mesh::HeldItem> {
+    let mut held = Vec::new();
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in zombies {
-        if entity.zombie.health <= 0.0 {
-            continue;
-        }
         let zombie = &entity.zombie;
-        let feet = entity
-            .previous_position
-            .lerp(zombie.body.position, partial.clamp(0.0, 1.0) as f64);
+        let Some(pose) = poses.pose(entity.id, partial) else { continue };
+        marks.push((mesh.vertices.len(), pose.overlay(0.0)));
+        let feet = pose.feet;
         if zombie.kind == ZombieKind::ZombieVillager {
-            append_zombie_villager(mesh, entity, feet, atlas, light);
+            append_zombie_villager(mesh, entity, &pose, atlas, light);
             continue;
         }
         let id = ResourceId::parse(match (zombie.kind, zombie.baby) {
@@ -78,44 +80,59 @@ pub fn append_zombies<'a>(
         })
         .unwrap();
         let region = atlas.entity_region(&id);
-        let sample = (
-            feet.x.floor() as i32,
-            (feet.y + f64::from(zombie.eye_height())).floor() as i32,
-            feet.z.floor() as i32,
-        );
+        let sample = pose.light_block();
         let sky = light.get(sample) as f32;
         let block = light.get_block(sample) as f32;
-        let body_yaw = entity.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(std::f32::consts::PI - body_yaw.to_radians());
-        let head = Quat::from_euler(EulerRot::ZYX, 0.0, (entity.look_control.head_yaw - body_yaw).to_radians(), entity.look_control.pitch.to_radians());
-        for (index, (from, to, uv, pivot)) in (if zombie.baby { &BABY } else { &ADULT })
-            .iter()
-            .enumerate()
-        {
-            // AnimationUtils.animateZombieArms gives the idle zombie its
-            // characteristic raised arms even before a target is acquired.
-            // Swing animation is not yet represented in the viewer state.
-            let part_rotation = if index == 3 || index == 4 {
-                let x = -std::f32::consts::PI / if entity.aggressive { 1.5 } else { 2.25 };
-                let y = if index == 3 { -0.1 } else { 0.1 };
-                Quat::from_euler(EulerRot::ZYX, 0.0, y, x)
-            } else if index <= 1 {
-                head
-            } else {
-                Quat::IDENTITY
+        let rotation = pose.body_rotation(90.0);
+        let head = Quat::from_euler(EulerRot::ZYX, 0.0, pose.head_yaw.to_radians(), pose.head_pitch.to_radians());
+        let parts = if zombie.baby { &BABY } else { &ADULT };
+        let rest = [(parts[3].3[0], parts[3].3[2]), (parts[4].3[0], parts[4].3[2])];
+        let pose_limbs = limb_rotations(pose.walk_position, pose.walk_speed, pose.age_in_ticks, entity.aggressive, pose.swing, if zombie.baby { 0.5 } else { 1.0 }, rest);
+        let limbs = pose_limbs.limbs;
+        let arm_pivot = |arm: usize| {
+            let (x, z) = pose_limbs.arm_pivots[arm];
+            [x, parts[3 + arm].3[1], z]
+        };
+        // `ItemInHandLayer`: the main hand's item in the right hand.
+        if let Some(item) = &zombie.main_hand {
+            let pivot = glam::Vec3::from_array(arm_pivot(0));
+            held.push(crate::mesh::HeldItem { pose: crate::cow_render::right_hand_pose(feet, pose.body_rotation(90.0), pivot, limbs[0], zombie.baby), light: pose.light_probe.as_vec3(), id: item.clone(), display: crate::mesh::HeldDisplay::RightHand, first_tint: None });
+        }
+        // `LayerDefinitions`: the adult husk is scaled up by 1.0625.
+        let scale = if zombie.kind == ZombieKind::Husk && !zombie.baby { 1.0625 } else { 1.0 };
+        for (index, &(from, to, uv, pivot)) in (if zombie.baby { &BABY } else { &ADULT }).iter().enumerate() {
+            let mut uv = uv;
+            // DrownedModel gives its left limbs their own skin, unmirrored;
+            // HumanoidModel mirrors the adult's left arm and leg.
+            let drowned = zombie.kind == ZombieKind::Drowned && !zombie.baby;
+            if drowned && index == 4 {
+                uv = [32., 48.];
+            } else if drowned && index == 6 {
+                uv = [16., 48.];
+            }
+            let mirror = !zombie.baby && !drowned && matches!(index, 4 | 6);
+            let part_rotation = match index {
+                0 | 1 => head,
+                2 => Quat::from_rotation_y(pose_limbs.body_yaw),
+                3..=6 => limbs[index - 3],
+                _ => Quat::IDENTITY,
             };
-            cube_tinted_pose(
+            let pivot = match index {
+                3 | 4 => arm_pivot(index - 3),
+                _ => pivot,
+            };
+            cube_tinted_pose_mirror(
                 mesh,
                 feet,
                 rotation,
-                1.0,
+                scale,
                 region,
                 sky,
                 block,
-                *from,
-                *to,
-                *uv,
-                *pivot,
+                from,
+                to,
+                uv,
+                pivot,
                 part_rotation,
                 [1.0; 3],
                 [64., 64.],
@@ -130,8 +147,73 @@ pub fn append_zombies<'a>(
                 } else {
                     None
                 },
+                mirror,
             );
         }
+        // `HumanoidArmorLayer` (adults; armour takes no hurt overlay).
+        if !zombie.baby && zombie.armor.iter().any(Option::is_some) {
+            marks.push((mesh.vertices.len(), 1.0));
+            let at = |i: usize| glam::Vec3::from_array(parts[i].3);
+            let armor_parts = crate::armor_render::HumanoidParts {
+                head: (glam::Vec3::ZERO, head),
+                body: (glam::Vec3::ZERO, Quat::from_rotation_y(pose_limbs.body_yaw)),
+                arms: [(glam::Vec3::from_array(arm_pivot(0)), limbs[0]), (glam::Vec3::from_array(arm_pivot(1)), limbs[1])],
+                legs: [(at(5), limbs[2]), (at(6), limbs[3])],
+            };
+            crate::armor_render::append_humanoid_armor(mesh, atlas, feet, rotation, scale, &armor_parts, &zombie.armor, sky, block);
+        }
+    }
+    crate::cow_render::apply_overlays(mesh, &marks);
+    held
+}
+
+/// A humanoid zombie's pose: the body's twist, the arms' pivots (x, z in
+/// pixels, where an attack moves them) and the right arm, left arm, right
+/// leg and left leg rotations.
+pub struct ZombieLimbs {
+    pub body_yaw: f32,
+    pub arm_pivots: [(f32, f32); 2],
+    pub limbs: [Quat; 4],
+}
+
+/// `HumanoidModel.setupAnim` for a zombie:
+/// - the leg swing, with a touch of yaw and roll each way;
+/// - `setupAttackAnimation`, whose swing (a right-handed one) twists the
+///   body and moves the arms' pivots with it, scaled by the age;
+/// - the arms `AnimationUtils.animateZombieArms` raises there, with the
+///   swing's reach;
+/// - `bobModelPart` on each arm.
+pub fn limb_rotations(walk_position: f32, walk_speed: f32, age: f32, aggressive: bool, swing: Option<f32>, age_scale: f32, rest_pivots: [(f32, f32); 2]) -> ZombieLimbs {
+    use minecraftoss_player::mth;
+    let pi = std::f32::consts::PI;
+    let walk = walk_position * 0.6662;
+    let right_leg = mth::cos(f64::from(walk)) * 1.4 * walk_speed;
+    let left_leg = mth::cos(f64::from(walk + pi)) * 1.4 * walk_speed;
+    let (mut body_yaw, mut arm_pivots) = (0.0, rest_pivots);
+    let attack = swing.filter(|&s| s > 0.0);
+    if let Some(s) = attack {
+        body_yaw = mth::sin(f64::from(s.sqrt() * (pi * 2.0))) * 0.2;
+        let (sin, cos) = (mth::sin(f64::from(body_yaw)), mth::cos(f64::from(body_yaw)));
+        arm_pivots = [(-cos * 5.0 * age_scale, sin * 5.0 * age_scale), (cos * 5.0 * age_scale, -sin * 5.0 * age_scale)];
+    }
+    let s = attack.unwrap_or(0.0);
+    let arm_drop = -pi / if aggressive { 1.5 } else { 2.25 };
+    let attack_y = mth::sin(f64::from(s * pi));
+    let attack_x = mth::sin(f64::from((1.0 - (1.0 - s) * (1.0 - s)) * pi));
+    let arm_x = arm_drop + attack_y * 1.2 - attack_x * 0.4;
+    let arm_y = 0.1 - attack_y * 0.6;
+    let bob_z = mth::cos(f64::from(age * 0.09)) * 0.05 + 0.05;
+    let bob_x = mth::sin(f64::from(age * 0.067)) * 0.05;
+    let part = |x: f32, y: f32, z: f32| Quat::from_euler(EulerRot::ZYX, z, y, x);
+    ZombieLimbs {
+        body_yaw,
+        arm_pivots,
+        limbs: [
+            part(arm_x + bob_x, -arm_y, bob_z),
+            part(arm_x - bob_x, arm_y, -bob_z),
+            part(right_leg, 0.005, 0.005),
+            part(left_leg, -0.005, -0.005),
+        ],
     }
 }
 
@@ -177,13 +259,13 @@ fn path_of(id: &str) -> &str {
 
 /// A zombie villager: its base skin, then its villager type's overlay and,
 /// for adults, its profession's, on the same model.
-fn append_zombie_villager(mesh: &mut ChunkMesh, entity: &ZombieEntity, feet: glam::DVec3, atlas: &Atlas, light: &SkyLight) {
+fn append_zombie_villager(mesh: &mut ChunkMesh, entity: &ZombieEntity, pose: &MobPose, atlas: &Atlas, light: &SkyLight) {
     let zombie = &entity.zombie;
-    let sample = (feet.x.floor() as i32, (feet.y + f64::from(zombie.eye_height())).floor() as i32, feet.z.floor() as i32);
+    let feet = pose.feet;
+    let sample = pose.light_block();
     let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-    let body_yaw = entity.body_rotation.body_yaw;
-    let rotation = Quat::from_rotation_y(std::f32::consts::PI - body_yaw.to_radians());
-    let head = Quat::from_euler(EulerRot::ZYX, 0.0, (entity.look_control.head_yaw - body_yaw).to_radians(), entity.look_control.pitch.to_radians());
+    let rotation = pose.body_rotation(90.0);
+    let head = Quat::from_euler(EulerRot::ZYX, 0.0, pose.head_yaw.to_radians(), pose.head_pitch.to_radians());
     // `AnimationUtils.animateZombieArms` without a swing: raised arms,
     // higher when aggressive.
     let arm_x = -std::f32::consts::PI / if entity.aggressive { 1.5 } else { 2.25 };

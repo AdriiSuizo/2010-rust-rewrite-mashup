@@ -54,6 +54,9 @@ pub struct MinecraftWorldView {
     pub cracks: (Vec<[f32; 5]>, Vec<u32>),
     /// The ten destroy stages side by side.
     pub crack_texture: Option<Arc<image::RgbaImage>>,
+    /// Mob models (cut out, back-face culled, translucent) and entity
+    /// shadows, as `mesh::Vertex` bytes and indices.
+    pub entity_meshes: [(Vec<u8>, Vec<u32>); 4],
 }
 
 struct Loaded {
@@ -222,7 +225,7 @@ fn update(
                 view.celestial = Some(world.celestial.clone());
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
-                runtime.entities = Some(crate::minecraft_entities::Entities::new(&world.stream));
+                runtime.entities = Some(crate::minecraft_entities::Entities::new(&world.stream, world.seed));
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -427,7 +430,9 @@ fn update(
             pitch: ps.viewangles[0],
         };
         let bright_outside = world.environment.sky_light_level() > 11.0;
+        let ticks_before = entities.client_ticks();
         let (changes, hits) = entities.tick(dt, day.ticks as i64, bright_outside, &player);
+        let mob_ticks = (entities.client_ticks() - ticks_before) as u32;
         if !changes.is_empty() {
             let blocks = &world.registries.blocks;
             let mut positions = Vec::with_capacity(changes.len());
@@ -459,8 +464,27 @@ fn update(
             sim::voxel::push_player_damage(local.0.0, amount, from.map(|b| sim::voxel::to_map(origin, b)));
         }
         sim::voxel::set_mob_boxes(entities.boxes());
-        let mut mesh = minecraft_terrain::mesh::ChunkMesh::default();
-        entities.append_mesh(&mut mesh, &world.scene, &world.atlas, light, forward);
+        entities.tick_scene(&world.scene, mob_ticks);
+        let sky_darken = (15.0 - world.environment.sky_light_level()).clamp(0.0, 15.0) as u8;
+        let meshes = entities.meshes(
+            &world.scene,
+            &world.packs,
+            &world.atlas,
+            light,
+            forward,
+            glam::DVec3::from_array(eye),
+            sky_darken,
+        );
+        let raw = |mesh: &minecraft_terrain::mesh::ChunkMesh| {
+            (bytemuck::cast_slice::<_, u8>(&mesh.vertices).to_vec(), mesh.indices.clone())
+        };
+        view.entity_meshes = [
+            raw(&meshes.models),
+            raw(&meshes.culled),
+            raw(&meshes.translucent),
+            raw(&meshes.shadows),
+        ];
+        let mesh = meshes.items;
         let (bytes, indices) = &mut view.particles;
         let base = (bytes.len() / std::mem::size_of::<minecraft_terrain::mesh::SectionVertex>()) as u32;
         let vertices: Vec<minecraft_terrain::mesh::SectionVertex> =
@@ -621,6 +645,7 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
         view.celestial = None;
         view.crack_texture = None;
         view.particles = Default::default();
+        view.entity_meshes = Default::default();
         view.cracks = Default::default();
         view.clouds = None;
         view.light_volume = None;

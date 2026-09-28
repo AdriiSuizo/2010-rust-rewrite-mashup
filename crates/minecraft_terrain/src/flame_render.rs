@@ -58,3 +58,20 @@ pub fn append_flames(mesh: &mut ChunkMesh, burning: impl IntoIterator<Item = (DV
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_zombie_burns_in_six_quads() {
+        // A zombie is 0.6 by 1.95: 1.95 / 0.84 is about 2.32 scaled units,
+        // a quad for each 0.45 begun.
+        let (scale, mut h) = (0.6_f32 * 1.4, 1.95_f32 / (0.6 * 1.4));
+        assert!((scale - 0.84).abs() < 1e-6);
+        let mut quads = 0;
+        while h > 0.0 {
+            h -= 0.45;
+            quads += 1;
+        }
+        assert_eq!(quads, 6);
+    }
+}

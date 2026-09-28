@@ -10,7 +10,7 @@ use crate::{
     lighting::SkyLight,
     mesh::{Atlas, ChunkMesh},
     pack::ResourceId,
-    walk_animation::WalkAnimations,
+    client_mobs::ClientMobs,
 };
 use glam::{Quat, Vec3};
 use minecraftoss_entities::world::CreeperEntity;
@@ -53,7 +53,7 @@ pub fn white_overlay(swelling: f32) -> f32 {
 pub fn append_creepers<'a>(
     mesh: &mut ChunkMesh,
     creepers: impl IntoIterator<Item = &'a CreeperEntity>,
-    walks: &WalkAnimations,
+    poses: &ClientMobs,
     atlas: &Atlas,
     light: &SkyLight,
     partial: f32,
@@ -61,37 +61,51 @@ pub fn append_creepers<'a>(
     let texture = ResourceId::parse("minecraft:entity/creeper/creeper").unwrap();
     let region = atlas.entity_region(&texture);
     let partial = partial.clamp(0.0, 1.0);
+    // Each mob's first vertex and overlay (`getOverlayCoords`).
+    let mut marks = Vec::new();
     for entity in creepers {
         let creeper = &entity.creeper;
-        if creeper.health <= 0.0 || creeper.exploded {
+        if creeper.exploded {
             continue;
         }
-        let feet = entity.previous_position.lerp(creeper.body.position, f64::from(partial));
-        let eye_height = creeper.body.height * 0.85;
-        let sample = (feet.x.floor() as i32, (feet.y + f64::from(eye_height)).floor() as i32, feet.z.floor() as i32);
+        let Some(mob) = poses.pose(entity.id, partial) else { continue };
+        let feet = mob.feet;
+        let sample = mob.light_block();
         let (sky, block) = (light.get(sample) as f32, light.get_block(sample) as f32);
-        let body_yaw = entity.ai.body_rotation.body_yaw;
-        let rotation = Quat::from_rotation_y(std::f32::consts::PI - body_yaw.to_radians());
-        let look = &entity.ai.state.look_control;
-        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, (look.head_yaw - body_yaw).to_radians(), look.pitch.to_radians());
+        let rotation = mob.body_rotation(90.0);
+        let head = Quat::from_euler(glam::EulerRot::ZYX, 0.0, mob.head_yaw.to_radians(), mob.head_pitch.to_radians());
         // `Creeper.getSwelling`: the fuse between ticks over two short of
         // its length.
         let swell = creeper.old_swell as f32 + partial * (creeper.swell - creeper.old_swell) as f32;
         let swelling = swell / (creeper.max_swell - 2) as f32;
         let scale = swell_scale(swelling);
-        // The overlay's texture column (`OverlayTexture.u`) sets how much
-        // white shows: up to 75%.
-        let white = (white_overlay(swelling) * 15.0) as i32 as f32 / 15.0 * 0.75;
-        let tint = [1.0 + 4.0 * white; 3];
-        let walk = walks.get(entity.id);
-        let (swing, speed) = (walk.position(partial), walk.speed(partial));
+        // The fuse's white flash is the overlay's white rows.
+        marks.push((mesh.vertices.len(), mob.overlay(white_overlay(swelling))));
+        let tint = [1.0; 3];
+        let (swing, speed) = (mob.walk_position, mob.walk_speed);
         let mut parts: Vec<(Part, Quat)> = vec![(HEAD, head), (BODY, Quat::IDENTITY)];
         for (pivot, phase) in LEGS {
-            let angle = (swing * 0.6662 + phase).cos() * 1.4 * speed;
+            let angle = crate::client_mobs::mth_cos(swing * 0.6662 + phase) * 1.4 * speed;
             parts.push((([-2., 0., -2.], [2., 6., 2.], [0., 16.], pivot), Quat::from_rotation_x(angle)));
         }
         for ((from, to, uv, pivot), pose) in parts {
             cube_scaled(mesh, feet, rotation, scale, region, sky, block, from, to, uv, pivot, pose, tint, [64., 32.], None, false);
         }
+    }
+    crate::cow_render::apply_overlays(mesh, &marks);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fuse_swells_and_flashes() {
+        assert_eq!(swell_scale(0.0), Vec3::ONE);
+        let full = swell_scale(1.0);
+        assert!(full.x > 1.35 && full.y > 1.05, "{full:?}");
+        assert_eq!(white_overlay(0.05), 0.0);
+        assert_eq!(white_overlay(0.15), 0.5);
+        assert_eq!(white_overlay(0.95), 0.95);
     }
 }
