@@ -60,6 +60,8 @@ pub(crate) fn spawn_compass(root: &mut ChildSpawnerCommands) {
 
 /// The Minecraft world's minimap picture, as a map material.
 const MINECRAFT_MINIMAP: &str = "mc_minimap";
+/// The yaw of north on a Minecraft map: map +Y.
+const MINECRAFT_NORTH_YAW: f32 = 90.0;
 
 fn hide(pass: &mut HudTessPass) {
     pass.compass = TessJob::Hide;
@@ -148,11 +150,12 @@ pub(crate) fn update_compass(
         .and_then(|(image, a, b)| {
             let map_ns = hud_images.map_namespace();
             hud_images.insert_runtime_in(map_ns, MINECRAFT_MINIMAP, image);
+            // The picture has north (map +Y, Minecraft's -Z) up.
             Some(DrawableCompass {
                 image_name: MINECRAFT_MINIMAP.to_owned(),
-                bounds: compass_map_bounds_from_minimap_corners(a, b, 0.0)?,
+                bounds: compass_map_bounds_from_minimap_corners(a, b, MINECRAFT_NORTH_YAW)?,
                 max_range: COMPASS_MAX_RANGE_DEFAULT_MP,
-                north_yaw: 0.0,
+                north_yaw: MINECRAFT_NORTH_YAW,
             })
         });
     let Some(drawable) = block_world.or_else(|| resolve(compass.as_deref(), &mut hud_images, &mut gaps)) else {
