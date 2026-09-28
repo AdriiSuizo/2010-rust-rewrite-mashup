@@ -1130,7 +1130,7 @@ pub(crate) fn phase_trace(
                 && world.publishes_snapshot()
                 && crate::voxel::active()
             {
-                crate::voxel::push_shot(segment.end, segment.normal);
+                crate::voxel::push_shot(segment.end, segment.normal, scaled.max(0) as f32);
             }
             if bullet_process_on_hit(segment.collider) {
                 if let Some(world_event) = entity_iw4::bg_bullet_hit_event(facts.impact_type, false)

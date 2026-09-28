@@ -43,8 +43,9 @@ static WORLD: RwLock<Option<VoxelWorld>> = RwLock::new(None);
 /// world's owner to apply.
 #[derive(Clone, Copy, Debug)]
 pub enum VoxelEvent {
-    /// A bullet struck this block.
-    Shot { block: [i32; 3] },
+    /// A bullet struck this block, with the damage it would have done: the
+    /// weapon's, at that range, after penetration.
+    Shot { block: [i32; 3], damage: f32 },
     /// An explosion went off here, in blocks.
     Explosion { center: [f64; 3] },
 }
@@ -53,7 +54,7 @@ static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::ne
 
 /// A bullet impact at map point `end` on a surface facing `normal`: the
 /// block behind the surface.
-pub fn push_shot(end: [f32; 3], normal: [f32; 3]) {
+pub fn push_shot(end: [f32; 3], normal: [f32; 3], damage: f32) {
     let Ok(world) = WORLD.read() else {
         return;
     };
@@ -65,7 +66,7 @@ pub fn push_shot(end: [f32; 3], normal: [f32; 3]) {
     let n = [f64::from(normal[0]), f64::from(normal[2]), -f64::from(normal[1])];
     let block = std::array::from_fn(|k| (p[k] - n[k] * 0.05).floor() as i32);
     if let Ok(mut events) = EVENTS.lock() {
-        events.push(VoxelEvent::Shot { block });
+        events.push(VoxelEvent::Shot { block, damage });
     }
 }
 

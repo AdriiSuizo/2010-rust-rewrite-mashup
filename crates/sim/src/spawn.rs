@@ -490,6 +490,12 @@ pub(crate) fn ground_spawn(world: &FrameWorld, feet: [f32; 3]) -> Result<[f32; 3
     if !world.has_world_clip() {
         return Err(SpawnReject::UnsupportedCoverage);
     }
+    // A Minecraft world's spawn is at map origin; the stand-in map's own
+    // spawn points may be buried in its terrain.
+    if crate::voxel::active() {
+        let _ = feet;
+        return Ok([0.0, 0.0, 0.0]);
+    }
     let up_end = [feet[0], feet[1], feet[2] + PLACE_SPAWN_UP];
     let up = world.trace_clip(feet, up_end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID);
     let raised = lerp3(feet, up_end, up.fraction);

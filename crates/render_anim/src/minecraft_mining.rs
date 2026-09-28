@@ -1,6 +1,7 @@
 //! Breaking the Minecraft world with MW2 weapons. Bullets mine the block they
-//! strike the way a tool does in survival: each adds progress in inverse
-//! proportion to the block's hardness, the destroy stages show it, and at full
+//! strike the way a tool does in survival: each adds progress in proportion
+//! to the damage the bullet would do and in inverse proportion to the
+//! block's hardness, the destroy stages show it, and at full
 //! progress the block breaks with MinecraftOSS's break particles. Explosions
 //! are vanilla TNT: MinecraftOSS's `ServerExplosion` rays pick the blocks,
 //! stopped by each block's explosion resistance.
@@ -15,9 +16,9 @@ use minecraftoss_core::registries::Registries;
 
 type BlockPos = (i32, i32, i32);
 
-/// Mining progress one bullet adds to a block of hardness 1: dirt, of
-/// hardness 0.5, breaks on the second.
-const BULLET_POWER: f32 = 0.25;
+/// Bullet damage that mines a block of hardness 1 in four shots: a 40-damage
+/// bullet (an ACR up close) breaks dirt, of hardness 0.5, on the second.
+const DAMAGE_PER_HARDNESS: f32 = 160.0;
 /// TNT's explosion power.
 const TNT_POWER: f32 = 4.0;
 /// Progress on a block no longer being shot is forgotten after this long.
@@ -68,13 +69,13 @@ impl Mining {
         let mut broken = Vec::new();
         for event in events {
             match event {
-                sim::voxel::VoxelEvent::Shot { block } => {
+                sim::voxel::VoxelEvent::Shot { block, damage } => {
                     let pos = (block[0], block[1], block[2]);
                     let Some(hardness) = hardness(world, pos) else {
                         continue;
                     };
                     let entry = self.progress.entry(pos).or_insert((0.0, now));
-                    entry.0 += if hardness <= 0.0 { 1.0 } else { BULLET_POWER / hardness };
+                    entry.0 += if hardness <= 0.0 { 1.0 } else { damage / DAMAGE_PER_HARDNESS / hardness };
                     entry.1 = now;
                     if entry.0 >= 1.0 {
                         self.progress.remove(&pos);
