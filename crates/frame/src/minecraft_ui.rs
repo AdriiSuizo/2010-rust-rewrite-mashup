@@ -85,6 +85,10 @@ pub struct MinecraftUi {
     /// The selection is not a gun: the hand or a held item shows, and the
     /// gun neither fires nor aims.
     pub holding_item: bool,
+    /// The selected slot is empty: MW2's bare hands show, without the gun.
+    pub empty_hand: bool,
+    /// How far through its swing the hand is, 0 to 1.
+    pub hand_swing: f32,
     /// The minimap's picture of the world and the map points of its
     /// north-west and south-east corners.
     pub minimap: Option<(Handle<Image>, [f32; 2], [f32; 2])>,

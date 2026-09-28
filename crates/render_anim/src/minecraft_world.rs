@@ -91,6 +91,17 @@ struct HandState {
     place_delay: u32,
 }
 
+/// The player's walk, for vanilla's step and fall sounds.
+#[derive(Default)]
+struct StepState {
+    last: Option<[f64; 3]>,
+    /// `Entity.moveDist` and `nextStep`.
+    move_dist: f32,
+    next_step: f32,
+    /// The highest point since leaving the ground.
+    air_peak: Option<f64>,
+}
+
 #[derive(Default)]
 struct Runtime {
     loading: Option<mpsc::Receiver<Result<Loaded, String>>>,
@@ -105,6 +116,7 @@ struct Runtime {
     mining: crate::minecraft_mining::Mining,
     minimap: crate::minecraft_minimap::Minimap,
     hand: HandState,
+    steps: StepState,
     sounds: Option<crate::minecraft_sounds::Sounds>,
     inventory_ui: crate::minecraft_inventory::InventoryUi,
     entities: Option<crate::minecraft_entities::Entities>,
@@ -389,6 +401,7 @@ fn update(
         sounds,
         hand,
         minimap,
+        steps,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -478,6 +491,62 @@ fn update(
     // The hand, when no gun is selected: vanilla's left click mines by hand
     // (with the hand's break speed) or punches, its right click places the
     // held block (`Player.place_selected`, vanilla's placement states).
+    // Footsteps (`Entity.applyMovementEmissionAndPlaySound`): the walked
+    // distance grows by 0.6 of each horizontal move on the ground, and past
+    // the next step the block under the feet sounds its step at 0.15 of its
+    // volume. A fall of more than three blocks lands with the block's fall
+    // sound and the player's (`LivingEntity.causeFallDamage`).
+    let on_ground = alive && ps.ground_entity_num != playerstate_iw4::ENTITYNUM_NONE;
+    if let Some(last) = steps.last.filter(|_| alive) {
+        let horizontal = ((feet[0] - last[0]).hypot(feet[2] - last[2]) * 0.6) as f32;
+        let block_at = |dy: f64| {
+            let pos = (feet[0].floor() as i32, (feet[1] - dy).floor() as i32, feet[2].floor() as i32);
+            minecraft_terrain::scene::Scene::block(&world.scene, pos).cloned().map(|b| (pos, b))
+        };
+        let under = block_at(0.2);
+        let centre = |pos: (i32, i32, i32)| {
+            Vec3::from_array(sim::voxel::to_map(origin, [pos.0 as f64 + 0.5, pos.1 as f64 + 1.0, pos.2 as f64 + 0.5]))
+        };
+        if on_ground && horizontal < 2.0 {
+            steps.move_dist += horizontal;
+            if steps.move_dist > steps.next_step
+                && let Some((pos, block)) = under.as_ref()
+            {
+                steps.next_step = steps.move_dist as i32 as f32 + 1.0;
+                // Snow layers and carpets sound instead of what they lie on.
+                let inside = block_at(-0.01).filter(|(_, b)| {
+                    let p = b.id.path.as_str();
+                    p == "snow" || p.ends_with("_carpet") || p == "moss_carpet"
+                });
+                let (pos, block) = inside.as_ref().map_or((*pos, block), |(p, b)| (*p, b));
+                if let (Some(sounds), Some(kind)) = (sounds.as_mut(), world.scene.sound_type(block)) {
+                    sounds.play(&world.packs, &kind.step, Some(centre(pos)), kind.volume * 0.15, kind.pitch);
+                }
+            }
+        }
+        if on_ground {
+            if let Some(peak) = steps.air_peak.take() {
+                let fall = peak - feet[1];
+                if fall > 3.0
+                    && let Some(sounds) = sounds.as_mut()
+                {
+                    let event = if fall > 7.0 { "minecraft:entity.player.big_fall" } else { "minecraft:entity.player.small_fall" };
+                    sounds.play(&world.packs, event, None, 1.0, 1.0);
+                    if let Some((pos, block)) = under.as_ref()
+                        && let Some(kind) = world.scene.sound_type(block)
+                    {
+                        sounds.play(&world.packs, &kind.fall, Some(centre(*pos)), kind.volume * 0.5, kind.pitch * 0.75);
+                    }
+                }
+            }
+        } else {
+            steps.air_peak = Some(steps.air_peak.map_or(feet[1], |p| p.max(feet[1])));
+        }
+    } else {
+        steps.air_peak = None;
+    }
+    steps.last = alive.then_some(feet);
+
     let dt_hand = time.delta_secs_f64();
     if let Some(ticks) = hand.swing.as_mut() {
         *ticks += (dt_hand * 20.0) as f32;
@@ -489,6 +558,8 @@ fn update(
         e.inventory.slots[e.selected].as_ref().is_none_or(|s| crate::minecraft_inventory::weapon_of(s).is_none())
     });
     ui.holding_item = alive && holding;
+    ui.empty_hand = ui.holding_item
+        && entities.as_ref().is_some_and(|e| e.inventory.slots[e.selected].is_none());
     hand.clock += dt_hand;
     let hand_ticks = (hand.clock / TICK_SECONDS) as u32;
     hand.clock -= f64::from(hand_ticks) * TICK_SECONDS;
@@ -617,7 +688,7 @@ fn update(
                     let pitch = (1.0 + (sounds.random() - sounds.random()) * 0.2) * 0.7;
                     sounds.play(&world.packs, "minecraft:entity.generic.explode", Some(at(center)), 4.0, pitch);
                 }
-                sim::voxel::VoxelEvent::MobShot { .. } => {}
+                sim::voxel::VoxelEvent::MobShot { .. } | sim::voxel::VoxelEvent::Ray { .. } => {}
             }
         }
     }
@@ -771,29 +842,21 @@ fn update(
                 sounds.play(&world.packs, &event, Some(at(position.to_array())), volume, pitch);
             }
         }
-        // The hand or held item in view.
+        // The held item in view; an empty hand is MW2's own hands.
         view.hand = Default::default();
-        if ui.holding_item && !puppet.active {
-            let swing = hand.swing.map_or(0.0, |t| (t / crate::minecraft_hand::SWING_TICKS).clamp(0.0, 1.0));
+        let swing = hand.swing.map_or(0.0, |t| (t / crate::minecraft_hand::SWING_TICKS).clamp(0.0, 1.0));
+        ui.hand_swing = swing;
+        if ui.holding_item
+            && !puppet.active
+            && let Some(stack) = entities.inventory.slots[entities.selected].clone()
+        {
             let eye_light_at = glam::Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32);
-            let held = entities.inventory.slots[entities.selected].clone();
-            let mesh = match held {
-                Some(stack) => {
-                    let display = minecraft_terrain::pack::ResourceId::parse(&stack.id)
-                        .ok()
-                        .and_then(|id| minecraft_terrain::model::item_first_person_transform(&world.packs, &id).ok())
-                        .unwrap_or(glam::Mat4::IDENTITY);
-                    let pose = crate::minecraft_hand::item_pose(display, swing, 0.0);
-                    entities.held_item_mesh(&stack.id, pose, eye_light_at, &world.packs, &world.atlas, light)
-                }
-                None => crate::minecraft_hand::empty_hand_mesh(
-                    &world.atlas,
-                    swing,
-                    0.0,
-                    view.eye_light[0],
-                    view.eye_light[1],
-                ),
-            };
+            let display = minecraft_terrain::pack::ResourceId::parse(&stack.id)
+                .ok()
+                .and_then(|id| minecraft_terrain::model::item_first_person_transform(&world.packs, &id).ok())
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let pose = crate::minecraft_hand::item_pose(display, swing, 0.0);
+            let mesh = entities.held_item_mesh(&stack.id, pose, eye_light_at, &world.packs, &world.atlas, light);
             let vertices: Vec<minecraft_terrain::mesh::SectionVertex> =
                 mesh.vertices.iter().map(minecraft_terrain::mesh::SectionVertex::from_vertex).collect();
             view.hand = (bytemuck::cast_slice(&vertices).to_vec(), mesh.indices);

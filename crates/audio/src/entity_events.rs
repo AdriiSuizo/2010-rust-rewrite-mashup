@@ -226,6 +226,9 @@ fn cg_movement_sound(
         );
         return;
     };
+    if sim::voxel::active() {
+        return;
+    }
     let player_view = identity.client() == Some(local.0);
     let quieter = identity
         .client()

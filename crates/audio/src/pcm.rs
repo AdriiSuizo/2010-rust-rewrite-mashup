@@ -108,6 +108,17 @@ impl PcmAudio {
         self.live_pan.as_ref()
     }
 
+    /// Its format and loudness, for the diagnostics.
+    pub fn describe(&self) -> String {
+        let peak = self.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        format!(
+            "{} ch, {} Hz, {} samples, peak {peak:.3}",
+            self.channels,
+            self.sample_rate,
+            self.samples.len()
+        )
+    }
+
     pub fn into_looping(self) -> LoopingPcmAudio {
         LoopingPcmAudio(self)
     }

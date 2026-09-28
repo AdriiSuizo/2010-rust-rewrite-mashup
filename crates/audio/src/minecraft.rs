@@ -25,6 +25,9 @@ pub struct McSoundRequest {
     pub block: f32,
 }
 
+/// Minecraft's sounds against MW2's much hotter mix.
+const MIX_GAIN: f32 = 2.5;
+
 #[derive(Resource, Default)]
 pub struct McSoundQueue(pub Vec<McSoundRequest>);
 
@@ -42,7 +45,6 @@ fn play_minecraft_sounds(
     mut cache: ResMut<McSoundCache>,
     mut commands: Commands,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
-    settings: Res<frame::GameSettings>,
     listeners: Query<&Transform, With<AmbientListener>>,
 ) {
     if queue.0.is_empty() {
@@ -50,10 +52,17 @@ fn play_minecraft_sounds(
     }
     let pose = listeners.iter().next().map(|t| (t.translation, t.rotation * Vec3::X));
     for request in std::mem::take(&mut queue.0) {
-        let pcm = cache
-            .0
-            .entry(request.key.clone())
-            .or_insert_with(|| crate::pcm::decode_audio_bytes(&request.bytes));
+        let pcm = cache.0.entry(request.key.clone()).or_insert_with(|| {
+            let decoded = crate::pcm::decode_audio_bytes(&request.bytes);
+            diag::info!(
+                Audio,
+                "minecraft sound `{}`: {} bytes, {}",
+                request.key,
+                request.bytes.len(),
+                decoded.as_ref().map_or("did not decode".to_owned(), crate::pcm::PcmAudio::describe)
+            );
+            decoded
+        });
         let Some(pcm) = pcm.as_ref() else {
             continue;
         };
@@ -77,7 +86,7 @@ fn play_minecraft_sounds(
         commands.spawn((
             AudioPlayer(pcm_assets.add(live)),
             PlaybackSettings::DESPAWN
-                .with_volume(Volume::Linear((gain * settings.master_volume).max(0.0)))
+                .with_volume(Volume::Linear((gain * MIX_GAIN).max(0.0)))
                 .with_speed(request.pitch.clamp(0.5, 2.0)),
         ));
     }

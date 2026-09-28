@@ -445,6 +445,11 @@ pub(crate) fn boot_map_ambient_once(
     if identity.zone.is_empty() {
         return;
     }
+    // A Minecraft world has no ambience of the map it stands in for.
+    if assets::minecraft_map::is_minecraft_load(&identity.zone) {
+        booted.0 = true;
+        return;
+    }
     let Some(namespace) = namespace.filter(|ns| ns.zone == identity.zone) else {
         return;
     };

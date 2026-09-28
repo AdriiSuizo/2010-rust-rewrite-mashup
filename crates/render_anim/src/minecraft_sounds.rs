@@ -20,6 +20,7 @@ pub(crate) struct Sounds {
     events: HashMap<String, Vec<Entry>>,
     files: HashMap<String, Option<Arc<[u8]>>>,
     rng: u64,
+    unresolved: std::collections::HashSet<String>,
     /// Requests for the audio system this frame.
     pub(crate) queued: Vec<audio::McSoundRequest>,
 }
@@ -65,6 +66,7 @@ impl Sounds {
             events,
             files: HashMap::new(),
             rng: 0x9e37_79b9_7f4a_7c15,
+            unresolved: std::collections::HashSet::new(),
             queued: Vec::new(),
         }
     }
@@ -86,6 +88,9 @@ impl Sounds {
         let key = event.strip_prefix("minecraft:").unwrap_or(event);
         let total: u32 = self.events.get(key).map_or(0, |e| e.iter().map(|x| x.weight).sum());
         if total == 0 || depth > 4 {
+            if self.unresolved.insert(key.to_owned()) {
+                diag::info!(World, "Minecraft sound event `{event}` has no sounds");
+            }
             return;
         }
         let mut pick = (self.random() * total as f32) as u32;
@@ -114,7 +119,12 @@ impl Sounds {
                 packs.get(&id, &format!("sounds/{path}.ogg")).ok().flatten().map(Arc::from)
             })
             .clone();
-        let Some(bytes) = bytes else { return };
+        let Some(bytes) = bytes else {
+            if self.unresolved.insert(name.clone()) {
+                diag::info!(World, "Minecraft sound file `{name}` is not in the pack");
+            }
+            return;
+        };
         self.queued.push(audio::McSoundRequest {
             key: name,
             bytes,

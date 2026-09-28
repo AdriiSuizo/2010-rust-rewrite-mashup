@@ -73,10 +73,17 @@ impl Mining {
             self.particles = BlockParticles::new(world.packs).ok();
         }
         let mut broken: Vec<(BlockPos, bool)> = Vec::new();
+        // Blocks broken by this batch: the rest of a shotgun's pellets into
+        // one pass through, rather than starting a crack on a block that is
+        // about to go.
+        let mut gone = std::collections::HashSet::new();
         for event in events {
             match event {
                 sim::voxel::VoxelEvent::Shot { block, damage } => {
                     let pos = (block[0], block[1], block[2]);
+                    if gone.contains(&pos) {
+                        continue;
+                    }
                     let Some(hardness) = hardness(world, pos) else {
                         continue;
                     };
@@ -91,20 +98,47 @@ impl Mining {
                             let _ = particles.spawn(world.packs, &*world.scene, pos, &block, world.atlas);
                         }
                         broken.push((pos, false));
+                        gone.insert(pos);
                     }
                 }
                 sim::voxel::VoxelEvent::Explosion { center } => {
                     for pos in self.exploded_positions(world, center, TNT_POWER) {
-                        if hardness(world, pos).is_some() {
+                        if hardness(world, pos).is_some() && gone.insert(pos) {
                             self.progress.remove(&pos);
                             broken.push((pos, true));
+                        }
+                    }
+                }
+                sim::voxel::VoxelEvent::Ray { from, to, damage } => {
+                    // Blocks without collision the bullet passed through.
+                    for pos in blocks_on_segment(from, to) {
+                        if gone.contains(&pos) || !passable(world, pos) {
+                            continue;
+                        }
+                        let Some(hardness) = hardness(world, pos) else {
+                            continue;
+                        };
+                        let entry = self.progress.entry(pos).or_insert((0.0, now));
+                        entry.0 += if hardness <= 0.0 { 1.0 } else { damage / DAMAGE_PER_HARDNESS / hardness };
+                        entry.1 = now;
+                        if entry.0 >= 1.0 {
+                            self.progress.remove(&pos);
+                            if let Some(block) = Scene::block(&*world.scene, pos).cloned()
+                                && let Some(particles) = self.particles.as_mut()
+                            {
+                                let _ = particles.spawn(world.packs, &*world.scene, pos, &block, world.atlas);
+                            }
+                            broken.push((pos, false));
+                            gone.insert(pos);
                         }
                     }
                 }
                 sim::voxel::VoxelEvent::MobShot { .. } => {}
             }
         }
-        self.progress.retain(|_, (_, at)| now - *at < PROGRESS_SECONDS);
+        // No crack outlives its block, however it went.
+        self.progress
+            .retain(|pos, (_, at)| now - *at < PROGRESS_SECONDS && !gone.contains(pos) && Scene::block(&*world.scene, *pos).is_some());
         if broken.is_empty() {
             return Vec::new();
         }
@@ -231,6 +265,49 @@ impl Mining {
 
 /// The destroy speed of a breakable block, or `None` for air, fluids and
 /// unbreakable blocks.
+/// A block bullets pass through: one with no collision shape.
+fn passable(world: &WorldRefs<'_>, pos: BlockPos) -> bool {
+    Scene::block(&*world.scene, pos)
+        .and_then(|block| world.stream.states.state_of(block))
+        .is_some_and(|state| world.registries.blocks.collision_boxes(state).is_empty())
+}
+
+/// The blocks a segment passes through, in order (Amanatides–Woo).
+fn blocks_on_segment(from: [f64; 3], to: [f64; 3]) -> Vec<BlockPos> {
+    let d: [f64; 3] = std::array::from_fn(|k| to[k] - from[k]);
+    let mut cell: [i32; 3] = std::array::from_fn(|k| from[k].floor() as i32);
+    let end: [i32; 3] = std::array::from_fn(|k| to[k].floor() as i32);
+    let step: [i32; 3] = std::array::from_fn(|k| if d[k] > 0.0 { 1 } else { -1 });
+    let delta: [f64; 3] = std::array::from_fn(|k| if d[k] == 0.0 { f64::INFINITY } else { 1.0 / d[k].abs() });
+    let mut next: [f64; 3] = std::array::from_fn(|k| {
+        if d[k] == 0.0 {
+            f64::INFINITY
+        } else if d[k] > 0.0 {
+            (f64::from(cell[k]) + 1.0 - from[k]) * delta[k]
+        } else {
+            (from[k] - f64::from(cell[k])) * delta[k]
+        }
+    });
+    let mut out = vec![(cell[0], cell[1], cell[2])];
+    // A shot reaches a few hundred blocks at most.
+    while cell != end && out.len() < 512 {
+        let k = if next[0] <= next[1] && next[0] <= next[2] {
+            0
+        } else if next[1] <= next[2] {
+            1
+        } else {
+            2
+        };
+        if next[k] > 1.0 {
+            break;
+        }
+        cell[k] += step[k];
+        next[k] += delta[k];
+        out.push((cell[0], cell[1], cell[2]));
+    }
+    out
+}
+
 fn hardness(world: &WorldRefs<'_>, pos: BlockPos) -> Option<f32> {
     let block = Scene::block(&*world.scene, pos)?;
     if matches!(block.id.path.as_str(), "water" | "lava" | "air" | "cave_air" | "void_air") {

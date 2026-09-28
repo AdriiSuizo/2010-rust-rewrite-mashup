@@ -51,6 +51,9 @@ pub enum VoxelEvent {
     /// A bullet struck the mob with this key, with the damage it would have
     /// done at that range, from this block point.
     MobShot { key: u64, damage: f32, from: [f64; 3] },
+    /// A bullet's path through the air, in blocks, up to what stopped it:
+    /// blocks without collision on it (grass, flowers) take its damage.
+    Ray { from: [f64; 3], to: [f64; 3], damage: f32 },
 }
 
 static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::new());
@@ -97,16 +100,17 @@ pub fn set_mob_boxes(boxes: Vec<(u64, [f64; 6])>) {
     }
 }
 
-/// The nearest mob on the map-space segment `start`..`end`: its key and the
-/// distance to it in map units.
-pub(crate) fn mob_on_segment(start: [f32; 3], end: [f32; 3]) -> Option<(u64, f32)> {
+/// The nearest mob on the map-space segment `start`..`end`: its key, the
+/// distance to it in map units and how far up its box the bullet struck
+/// (0 at the feet, 1 at the top).
+pub(crate) fn mob_on_segment(start: [f32; 3], end: [f32; 3]) -> Option<(u64, f32, f32)> {
     let world = WORLD.read().ok()?;
     let origin = world.as_ref()?.origin;
     let a = to_block(origin, start);
     let b = to_block(origin, end);
     let d: [f64; 3] = std::array::from_fn(|k| b[k] - a[k]);
     let boxes = MOB_BOXES.read().ok()?;
-    let mut best: Option<(u64, f64)> = None;
+    let mut best: Option<(u64, f64, f64)> = None;
     for &(key, bb) in boxes.iter() {
         let (mut t0, mut t1) = (0.0f64, 1.0f64);
         let mut hit = true;
@@ -126,14 +130,43 @@ pub(crate) fn mob_on_segment(start: [f32; 3], end: [f32; 3]) -> Option<(u64, f32
                 break;
             }
         }
-        if hit && best.is_none_or(|(_, t)| t0 < t) {
-            best = Some((key, t0));
+        if hit && best.is_none_or(|(_, t, _)| t0 < t) {
+            let y = a[1] + d[1] * t0;
+            let up = ((y - bb[1]) / (bb[4] - bb[1]).max(1e-6)).clamp(0.0, 1.0);
+            best = Some((key, t0, up));
         }
     }
     let length = f64::from(
         ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2) + (end[2] - start[2]).powi(2)).sqrt(),
     );
-    best.map(|(key, t)| (key, (t * length) as f32))
+    best.map(|(key, t, up)| (key, (t * length) as f32, up as f32))
+}
+
+/// A bullet's path from map point `start` to `end`.
+pub(crate) fn push_ray(start: [f32; 3], end: [f32; 3], damage: f32) {
+    let Ok(world) = WORLD.read() else {
+        return;
+    };
+    let Some(world) = world.as_ref() else {
+        return;
+    };
+    let (from, to) = (to_block(world.origin, start), to_block(world.origin, end));
+    if let Ok(mut events) = EVENTS.lock() {
+        events.push(VoxelEvent::Ray { from, to, damage });
+    }
+}
+
+/// MW2's hit location for a strike this far up a mob's box, as a standing
+/// soldier's body divides: head, neck, upper and lower torso, legs.
+pub(crate) fn mob_hitloc(up: f32) -> u8 {
+    match up {
+        u if u > 0.87 => 2,
+        u if u > 0.8 => 3,
+        u if u > 0.62 => 4,
+        u if u > 0.45 => 5,
+        u if u > 0.22 => 12,
+        _ => 14,
+    }
 }
 
 pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3]) {
