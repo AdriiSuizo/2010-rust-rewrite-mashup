@@ -719,6 +719,7 @@ pub fn extract_postfx(
     film: Extract<Res<render_frontend::assemble::drawsurf::FilmVisionView>>,
     glow_dvars: Extract<Res<render_frontend::assemble::drawsurf::dof::GlowDvars>>,
     draw_method: Extract<Res<render_frontend::assemble::drawsurf::ColourDrawMethod>>,
+    minecraft: Extract<Option<Res<render_anim::minecraft_world::MinecraftWorldView>>>,
     mut extracted: ResMut<render_gpu::ExtractedPostFx>,
 ) {
     use render_frontend::assemble::drawsurf::postfx_plan::RuntimePostFxResources;
@@ -768,7 +769,13 @@ pub fn extract_postfx(
             texture_slots: blood.texture_slots.clone(),
         });
     }
-    extracted.vision = film.current;
+    // The Minecraft world is graded by its own lightmap and fog, not by the
+    // film tweaks and glow of the map it stands in for.
+    extracted.vision = if minecraft.as_ref().is_some_and(|view| view.active) {
+        None
+    } else {
+        film.current
+    };
     extracted.frame = render_gpu::DofFrame {
         dof: render_gpu::DepthOfField {
             view_model_start: frame.dof.view_model_start,
