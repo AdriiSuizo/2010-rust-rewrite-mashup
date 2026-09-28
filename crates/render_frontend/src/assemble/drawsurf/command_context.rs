@@ -571,28 +571,6 @@ pub fn produce_dir_primary_light(
     Ok(())
 }
 
-/// The map's sun made Minecraft's entity light: white at the sun's
-/// brightness, from Minecraft's first fixed light direction (0.2, 1, -0.7),
-/// here in map axes. Day and night come from the world's lightmap after.
-fn minecraft_entity_light(light: &MapDirPrimaryLight) -> MapDirPrimaryLight {
-    let grey3 = |c: [f32; 3]| {
-        let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-        [l, l, l]
-    };
-    let grey4 = |c: [f32; 4]| {
-        let [l, _, _] = grey3([c[0], c[1], c[2]]);
-        [l, l, l, c[3]]
-    };
-    let direction = Vec3::new(0.2, 0.7, 1.0).normalize();
-    MapDirPrimaryLight {
-        direction: direction.to_array(),
-        color: grey3(light.color),
-        t5_diffuse_color: light.t5_diffuse_color.map(grey4),
-        t5_specular_color: light.t5_specular_color.map(grey4),
-        ..*light
-    }
-}
-
 fn produce_leftover_t5_sun_constants(sources: &mut RuntimeCodeSources, light: &MapDirPrimaryLight) {
     sources.set_constant_rows(
         CODE_LEFTOVER_T5_SUN_POSITION,
@@ -963,12 +941,7 @@ pub(crate) fn update_command_context_code_sources(
         }
     }
     if let Some(light) = dir_light.as_deref() {
-        let light = if sim::voxel::active() {
-            minecraft_entity_light(light)
-        } else {
-            *light
-        };
-        let _ = produce_dir_primary_light(&mut mat_frame.code_sources, &light);
+        let _ = produce_dir_primary_light(&mut mat_frame.code_sources, light);
     }
     let hdr_exposure = t5_exposure
         .as_deref()

@@ -300,11 +300,37 @@ fn mc_fog(pos: vec3<f32>) -> f32 {
     );
 }
 
-fn mc_enter(h: vec4<f32>) -> vec3<f32> {
-    return mc_light.view_origin.xyz + h.xyz / h.w;
+struct McPixel {
+    p: vec3<f32>,
+    n: vec3<f32>,
 }
 
-fn mc_exit(p: vec3<f32>, colour: vec4<f32>) -> vec4<f32> {
+// Taken on entry, where derivatives are in uniform control flow: the pixel in
+// map space and its surface normal, facing the eye.
+fn mc_enter(h: vec4<f32>) -> McPixel {
+    let rel = h.xyz / h.w;
+    var n = cross(dpdx(rel), dpdy(rel));
+    if dot(n, rel) > 0.0 {
+        n = -n;
+    }
+    return McPixel(mc_light.view_origin.xyz + rel, n);
+}
+
+// Minecraft's entity lighting (entity.vsh minecraft_mix_light): ambient 0.4
+// and two fixed lights of 0.6, in block axes.
+fn mc_entity_shade(n_map: vec3<f32>) -> f32 {
+    let len = length(n_map);
+    if len < 1e-12 {
+        return 1.0;
+    }
+    let n = vec3<f32>(n_map.x, n_map.z, -n_map.y) / len;
+    let light0 = normalize(vec3<f32>(0.2, 1.0, -0.7));
+    let light1 = normalize(vec3<f32>(-0.2, 1.0, 0.7));
+    return min(1.0, 0.4 + 0.6 * (max(dot(n, light0), 0.0) + max(dot(n, light1), 0.0)));
+}
+
+fn mc_exit(px: McPixel, colour: vec4<f32>) -> vec4<f32> {
+    let p = px.p;
     let mode = mc_light.view_origin.w;
     if mode == 0.0 {
         return colour;
@@ -317,7 +343,7 @@ fn mc_exit(p: vec3<f32>, colour: vec4<f32>) -> vec4<f32> {
         let rel = (block - mc_light.volume.xyz) / mc_light.volume.w;
         level = textureSampleLevel(mc_volume, mc_volume_sampler, vec3<f32>(rel.x, rel.z, rel.y), 0.0).rg * 15.0;
     }
-    let lit = colour.rgb * mc_lightmap(level.x, level.y);
+    let lit = colour.rgb * mc_lightmap(level.x, level.y) * mc_entity_shade(px.n);
     let fogged = mix(lit, mc_light.environment[5].rgb, mc_fog(block - mc_light.environment[3].xyz));
     return vec4<f32>(fogged, colour.a);
 }
