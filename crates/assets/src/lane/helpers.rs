@@ -3,14 +3,15 @@ use std::collections::HashMap;
 use bevy::prelude::{Mat3, Quat, Transform, Vec3};
 use fastfile_iw4::{Ptr, ZoneStream};
 
-use crate::{
-    MapXModelAssetKey, MapXModelSceneAsset, MapXModelSceneCatalog, MaterialCatalog, ModelMesh,
-    PreparedMapModels, ScriptModelMetadata, ScriptModelPlacement, ScriptModelSceneInstance,
-    StaticModelDraw, StaticModelDrawError, StaticModelInstance, StaticModelPlacement,
+use asset_material::MaterialCatalog;
+use asset_world::{
+    MapXModelAssetKey, MapXModelSceneAsset, MapXModelSceneCatalog, ModelMesh, PreparedMapModels,
+    ScriptModelMetadata, ScriptModelPlacement, ScriptModelSceneInstance, StaticModelDraw,
+    StaticModelDrawError, StaticModelInstance, StaticModelPlacement,
     build_iw5_static_model_instances, build_iw5_xmodel_mesh, build_static_model_instances,
     build_t5_static_model_instances, build_t5_xmodel_mesh, build_xmodel_mesh, flag_descriptors,
     flag_descriptors_iw5, flag_descriptors_t5, map_script_structs, map_script_structs_iw5,
-    map_script_structs_t5, map_use_triggers, map_use_triggers_iw5, map_use_triggers_t5,
+    map_script_structs_t5, map_use_triggers_iw5, map_use_triggers_t5,
     script_brush_model_placements, script_brush_model_placements_iw5,
     script_brush_model_placements_t5, script_model_placements, script_model_placements_iw5,
     script_model_placements_t5,
@@ -46,7 +47,7 @@ impl MapXModelCatalog {
         Some(self.meshes.remove(index))
     }
 
-    pub(crate) fn set_capture_zone(&mut self, zone: crate::ZoneOwner) {
+    pub(crate) fn set_capture_zone(&mut self, zone: asset_core::ZoneOwner) {
         self.scene_assets.set_capture_zone(zone);
     }
 
@@ -57,7 +58,7 @@ impl MapXModelCatalog {
         slot: Ptr,
         insert_slot: Option<Ptr>,
         strings: &fastfile_iw4::ScriptStrings,
-        phys_presets: &crate::PhysPresetCatalog,
+        phys_presets: &asset_world::PhysPresetCatalog,
     ) {
         let Some(geometry) = stream.xmodel() else {
             self.failed += 1;
@@ -115,7 +116,7 @@ impl MapXModelCatalog {
             return;
         };
         let scene_key = MapXModelAssetKey(mesh.name.clone());
-        let scene_asset = crate::capture_xmodel_skel_t5(stream, strings, geometry, materials)
+        let scene_asset = asset_model::capture_xmodel_skel_t5(stream, strings, geometry, materials)
             .map(|skel| MapXModelSceneAsset::T5(std::sync::Arc::new(skel)))
             .unwrap_or(MapXModelSceneAsset::Unavailable {
                 reason: "T5 XModel scene skeleton capture failed",
@@ -144,7 +145,7 @@ impl MapXModelCatalog {
         stream: &fastfile_t5::ZoneStream<'_>,
         header: fastfile_t5::Ptr,
         strings: &fastfile_t5::ScriptStrings,
-        fx: &crate::FxCatalog,
+        fx: &asset_game::FxCatalog,
     ) -> fastfile_t5::Result<()> {
         use fastfile_t5::ZonePtr;
         let ZonePtr::Offset(name) = stream.ptr_at(header, 0)? else {
@@ -279,17 +280,27 @@ impl MapXModelCatalog {
             self.failed += 1;
             return;
         };
+        let Some(name) = geometry.name.and_then(|p| stream.cstr(p).ok()) else {
+            self.failed += 1;
+            return;
+        };
+        let scene_key = MapXModelAssetKey(name.to_owned());
+        let scene_asset = asset_model::capture_xmodel_skel_iw5_with_shared(
+            stream,
+            strings,
+            geometry,
+            materials,
+            &self.shared_surfaces,
+        )
+        .map(|skel| MapXModelSceneAsset::Iw5(std::sync::Arc::new(skel)))
+        .unwrap_or(MapXModelSceneAsset::Unavailable {
+            reason: "IW5 XModel scene skeleton capture failed",
+        });
+        self.scene_assets.insert(scene_key, scene_asset);
         let Ok(mesh) = build_iw5_xmodel_mesh(stream, geometry, Some(materials)) else {
             self.failed += 1;
             return;
         };
-        let scene_key = MapXModelAssetKey(mesh.name.clone());
-        let scene_asset = crate::capture_xmodel_skel_iw5(stream, strings, geometry, materials)
-            .map(|skel| MapXModelSceneAsset::Iw5(std::sync::Arc::new(skel)))
-            .unwrap_or(MapXModelSceneAsset::Unavailable {
-                reason: "IW5 XModel scene skeleton capture failed",
-            });
-        self.scene_assets.insert(scene_key, scene_asset);
         let index = self.meshes.len();
         self.meshes.push(mesh);
         let slot = Ptr {
@@ -332,9 +343,9 @@ impl MapXModelCatalog {
         &self,
         stream: &fastfile_t5::ZoneStream<'_>,
         geometry: fastfile_t5::ClipMapGeometry,
-        clip: &mut crate::ClipCollision,
-    ) -> Result<(), crate::ClipCollisionError> {
-        use crate::ClipCollisionError::{MissingTables, Truncated};
+        clip: &mut asset_world::ClipCollision,
+    ) -> Result<(), asset_world::ClipCollisionError> {
+        use asset_world::ClipCollisionError::{MissingTables, Truncated};
         let Some(rows) = geometry.static_models else {
             return if geometry.static_model_count == 0 {
                 Ok(())
@@ -396,7 +407,7 @@ impl MapXModelCatalog {
                     })
                     .collect(),
             };
-            clip.static_models.push(crate::ClipPlacedStaticModel {
+            clip.static_models.push(asset_world::ClipPlacedStaticModel {
                 index: index as u32,
                 name: name.to_owned(),
                 model: clipmap_iw4::ClipStaticModel {
@@ -444,7 +455,6 @@ pub(crate) fn build_static_model_draw(
     };
     let scripts = script_model_placements(stream);
     let brushes = script_brush_model_placements(stream);
-    let use_triggers = map_use_triggers(stream);
     let descriptors = flag_descriptors(stream);
     let structs = map_script_structs(stream);
     link_model_placements(
@@ -452,7 +462,6 @@ pub(crate) fn build_static_model_draw(
         static_error,
         &scripts,
         brushes,
-        use_triggers,
         descriptors,
         structs,
         catalog,
@@ -476,11 +485,10 @@ pub(crate) fn build_t5_static_model_draw(
     };
     let mut scripts = script_model_placements_t5(stream);
     let mut brushes = script_brush_model_placements_t5(stream);
-    let mut use_triggers = map_use_triggers_t5(stream);
     normalize_bomb_sites(
         &mut scripts,
         &mut brushes,
-        &mut use_triggers,
+        &map_use_triggers_t5(stream),
         "bombzone_dem",
     );
     let descriptors = flag_descriptors_t5(stream);
@@ -490,7 +498,6 @@ pub(crate) fn build_t5_static_model_draw(
         static_error,
         &scripts,
         brushes,
-        use_triggers,
         descriptors,
         structs,
         catalog,
@@ -514,8 +521,12 @@ pub(crate) fn build_iw5_static_model_draw(
     };
     let mut scripts = script_model_placements_iw5(stream);
     let mut brushes = script_brush_model_placements_iw5(stream);
-    let mut use_triggers = map_use_triggers_iw5(stream);
-    normalize_bomb_sites(&mut scripts, &mut brushes, &mut use_triggers, "dd_bombzone");
+    normalize_bomb_sites(
+        &mut scripts,
+        &mut brushes,
+        &map_use_triggers_iw5(stream),
+        "dd_bombzone",
+    );
     let descriptors = flag_descriptors_iw5(stream);
     let structs = map_script_structs_iw5(stream);
     link_model_placements(
@@ -523,7 +534,6 @@ pub(crate) fn build_iw5_static_model_draw(
         static_error,
         &scripts,
         brushes,
-        use_triggers,
         descriptors,
         structs,
         catalog,
@@ -532,9 +542,9 @@ pub(crate) fn build_iw5_static_model_draw(
 }
 
 fn normalize_bomb_sites(
-    scripts: &mut [crate::ScriptModelPlacement],
-    brushes: &mut [crate::ScriptBrushModelPlacement],
-    triggers: &mut [crate::MapUseTrigger],
+    scripts: &mut [asset_world::ScriptModelPlacement],
+    brushes: &mut [asset_world::ScriptBrushModelPlacement],
+    triggers: &[asset_world::MapUseTrigger],
     demolition_tag: &str,
 ) {
     let has_dedicated_sites = ["a", "b"].into_iter().all(|label| {
@@ -564,33 +574,15 @@ fn normalize_bomb_sites(
     for brush in brushes {
         normalize(&mut brush.gameobject);
     }
-    for trigger in triggers {
-        normalize(&mut trigger.gameobject);
-        if trigger.targetname == demolition_tag {
-            trigger.targetname = if trigger
-                .script_label
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case("c")
-            {
-                "dd_overtime_bombzone"
-            } else {
-                "bombzone"
-            }
-            .to_owned();
-        } else if trigger.targetname == "bombzone" && has_dedicated_sites {
-            trigger.targetname = "sd_bombzone".to_owned();
-        }
-    }
 }
 
 pub(crate) fn link_model_placements(
     placements: Vec<StaticModelInstance>,
     mut static_error: Option<StaticModelDrawError>,
     scripts: &[ScriptModelPlacement],
-    script_brush_models: Vec<crate::ScriptBrushModelPlacement>,
-    map_use_triggers: Vec<crate::MapUseTrigger>,
-    flag_descriptors: Vec<crate::FlagDescriptor>,
-    script_structs: Vec<crate::MapScriptStruct>,
+    script_brush_models: Vec<asset_world::ScriptBrushModelPlacement>,
+    flag_descriptors: Vec<asset_world::FlagDescriptor>,
+    script_structs: Vec<asset_world::MapScriptStruct>,
     mut catalog: MapXModelCatalog,
     smodel_count: usize,
 ) -> PreparedMapModels {
@@ -735,7 +727,6 @@ pub(crate) fn link_model_placements(
         scene_assets: catalog.scene_assets,
         script_instances,
         script_brush_models,
-        map_use_triggers,
         flag_descriptors,
         script_structs,
         script_gaps,

@@ -55,9 +55,11 @@ pub(super) async fn walk_prepared_match(
 
     let cloning = std::time::Instant::now();
     let CommonProducts {
+        scripts: iw4_scripts,
+        mut t5_scene_models,
         material_seed,
         shared_surfaces,
-        scene_models: common_scene_models,
+        scene_models: mut common_scene_models,
         light_defs: common_light_defs,
         pen_table: common_pen_table,
         pen_table_loaded: common_pen_loaded,
@@ -78,7 +80,10 @@ pub(super) async fn walk_prepared_match(
         impact_fx: common_impact,
         t5_xanims,
         t5_fx,
+        t5_impact_fx,
         iw5_materials,
+        mut iw5_scene_models,
+        iw5_shared_surfaces,
         strings,
         counts:
             CommonCounts {
@@ -125,6 +130,10 @@ pub(super) async fn walk_prepared_match(
     let (loaded, map_namespace) = match opened_map {
         Ok((path, image)) => {
             let game = image.game;
+            let shared_surfaces = match game {
+                asset_core::ZoneGame::Iw5 => iw5_shared_surfaces,
+                _ => shared_surfaces,
+            };
             (
                 lane(game).load_world(
                     &path,
@@ -134,7 +143,7 @@ pub(super) async fn walk_prepared_match(
                     material_seed,
                     &mut common_film_visions,
                 ),
-                Some(crate::AssetNamespace::from_zone_game(game)),
+                Some(asset_core::AssetNamespace::from_zone_game(game)),
             )
         }
         Err(gap) => {
@@ -152,6 +161,7 @@ pub(super) async fn walk_prepared_match(
     };
 
     let LoadedWorld {
+        scripts: map_scripts,
         mut world,
         mut materials,
         collision: clip,
@@ -165,9 +175,6 @@ pub(super) async fn walk_prepared_match(
         mut report,
         gaps,
     } = loaded;
-    world
-        .map_xmodel_scene_assets
-        .absorb_captured(common_scene_models);
     report.append(&mut common_report);
 
     if facts.team_settings.allies.is_none() && facts.team_settings.axis.is_none() {
@@ -187,6 +194,12 @@ pub(super) async fn walk_prepared_match(
             .defenders
             .or_else(|| facts.team_settings.defenders.clone());
     }
+    if map_namespace == Some(asset_core::AssetNamespace::T5) {
+        facts.objective_visuals = asset_game::ObjectiveVisuals::t5(
+            facts.team_settings.allies_charset.as_deref(),
+            facts.team_settings.axis_charset.as_deref(),
+        );
+    }
     match (
         facts.t5_teamset.as_deref(),
         facts.team_settings.allies.as_ref(),
@@ -203,6 +216,23 @@ pub(super) async fn walk_prepared_match(
         _ => {}
     }
 
+    let map_scripts = match map_namespace {
+        Some(asset_core::AssetNamespace::T5) => {
+            let scripts = t5_map_under_iw4_rules(&map_scripts, &zone_name, &facts);
+            report.push(format!(
+                "map script: maps/mp/{zone_name} written from the T5 map's declarations; T5 map scripts left out"
+            ));
+            scripts
+        }
+        _ => map_scripts,
+    };
+    let mut scripts = iw4_scripts;
+    scripts.overlay(map_scripts);
+    report.push(format!(
+        "GSC source assets: {} (map overrides common_mp)",
+        scripts.len()
+    ));
+
     report.push(format!(
         "map teams: allies={:?} axis={:?} attackers={:?} defenders={:?}",
         facts.team_settings.allies_name,
@@ -214,7 +244,7 @@ pub(super) async fn walk_prepared_match(
     report.push(format!(
         "s1 pool walked: common={s1_common_bytes} map={s1_map_bytes} total={} rss={}",
         s1_common_bytes.saturating_add(s1_map_bytes),
-        crate::process_resident_bytes().unwrap_or(0),
+        asset_transport::process_resident_bytes().unwrap_or(0),
     ));
 
     let common_xanim_count = xanims.len();
@@ -353,9 +383,28 @@ pub(super) async fn walk_prepared_match(
     let map_new = pool_mat.saturating_sub(seed_mat);
 
     let mut global = materials;
-    let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
-
     let iw5_linked = global.absorb_asset_population_host_materials_win(iw5_materials);
+    let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
+    if iw5_mat_n > 0 {
+        iw5_scene_models.remap_walk_materials(&iw5_linked);
+    }
+    let mut scene_names = scripts.asset_names();
+    scene_names.extend(facts.objective_visuals.model_names().map(str::to_owned));
+    common_scene_models.retain_names(&scene_names);
+    t5_scene_models.retain_names(&scene_names);
+    iw5_scene_models.retain_names(&scene_names);
+    match map_namespace {
+        Some(asset_core::AssetNamespace::T5) => world
+            .map_xmodel_scene_assets
+            .absorb_captured(t5_scene_models),
+        Some(asset_core::AssetNamespace::Iw5) => world
+            .map_xmodel_scene_assets
+            .absorb_captured(iw5_scene_models),
+        _ => {}
+    }
+    world
+        .map_xmodel_scene_assets
+        .absorb_captured(common_scene_models);
     report.push(format!(
         "iw5 leftover materials: donor={iw5_mat_n} linked={} pool={}",
         iw5_linked.len(),
@@ -464,7 +513,8 @@ pub(super) async fn walk_prepared_match(
     }
     if let Ok(path) = &zone_ff {
         let stage = progress.begin_scoped(StageId::Images, "merged", None);
-        let decoded = crate::decode_material_color_maps(path, &mut global, &stage, load_pool());
+        let decoded =
+            asset_material::decode_material_color_maps(path, &mut global, &stage, load_pool());
         stage.finish_from(&decoded);
         match decoded {
             Ok(stats) => report.push(format!(
@@ -475,15 +525,20 @@ pub(super) async fn walk_prepared_match(
         }
     }
     if let Some(draw) = world.draw.as_mut() {
-        crate::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
+        asset_world::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
         let dynamic_light_name =
-            (map_namespace == Some(crate::AssetNamespace::Iw4)).then_some("light_dynamic");
+            (map_namespace == Some(asset_core::AssetNamespace::Iw4)).then_some("light_dynamic");
         let dynamic_light = dynamic_light_name.and_then(|name| {
-            crate::resolve_named_light_def(name, &draw.light_defs, &common_light_defs, &global)
+            asset_world::resolve_named_light_def(
+                name,
+                &draw.light_defs,
+                &common_light_defs,
+                &global,
+            )
         });
-        let (ordinal, source) = crate::resolve_outdoor_image(
+        let (ordinal, source) = asset_world::resolve_outdoor_image(
             draw.outdoor_image_name.as_deref(),
-            map_namespace.unwrap_or(crate::AssetNamespace::Iw4),
+            map_namespace.unwrap_or(asset_core::AssetNamespace::Iw4),
             &global,
         );
         draw.outdoor_image = ordinal;
@@ -552,7 +607,7 @@ pub(super) async fn walk_prepared_match(
                 requested.iter().map(|(index, _)| *index).collect();
             let want = want.len();
             let stage = progress.begin_scoped(StageId::Images, "attenuation", None);
-            let decoded = crate::decode_catalog_images_from_iwd(
+            let decoded = asset_material::decode_catalog_images_from_iwd(
                 path,
                 &mut global,
                 requested,
@@ -562,15 +617,20 @@ pub(super) async fn walk_prepared_match(
             stage.finish_from(&decoded);
             match decoded {
                 Ok(n) => report.push(format!(
-                    "IWD light attenuation: decoded {n} of {want} GfxLightDef images (Image_LoadFromIwi; empty payload is not a host ramp)"
+                    "IWD light attenuation: decoded {n} of {want} GfxLightDef images (empty payload is not a host ramp)"
                 )),
                 Err(error) => report.push(format!("IWD light attenuation: {error}")),
             }
         }
 
-        crate::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
+        asset_world::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
         let resolved_dynamic = dynamic_light_name.and_then(|name| {
-            crate::resolve_named_light_def(name, &draw.light_defs, &common_light_defs, &global)
+            asset_world::resolve_named_light_def(
+                name,
+                &draw.light_defs,
+                &common_light_defs,
+                &global,
+            )
         });
         let dynamic_decoded = resolved_dynamic
             .and_then(|light| light.attenuation_image)
@@ -596,7 +656,7 @@ pub(super) async fn walk_prepared_match(
             );
         }
     }
-    let builtins = crate::decode_in_zone_builtin_images(&mut global);
+    let builtins = asset_material::decode_in_zone_builtin_images(&mut global);
     if builtins != 0 {
         report.push(format!(
             "in-zone builtin images: decoded {builtins} leftover $ 2D loadDefs after absorb"
@@ -604,7 +664,7 @@ pub(super) async fn walk_prepared_match(
     }
     if let Ok(path) = &zone_ff {
         let stage = progress.begin_scoped(StageId::Images, "tracers", None);
-        let decoded = crate::material_images::decode_color_or_2d_for_keys(
+        let decoded = asset_material::material_images::decode_color_or_2d_for_keys(
             path,
             &mut global,
             common_tracers.material_keys(),
@@ -624,7 +684,7 @@ pub(super) async fn walk_prepared_match(
         .map(str::to_owned)
         .collect();
     for name in &unique {
-        let bind = crate::fx_material_bind_name(name);
+        let bind = asset_game::material_bind_name(name);
         let twins: Vec<&str> = global
             .materials
             .iter()
@@ -731,12 +791,12 @@ pub(super) async fn walk_prepared_match(
         ));
         report.push(format!(
             "Material stamp: iw4={} t5={} iw5={} (name-link identity; colliding T5 names are the later-zone row)",
-            materials.namespace_count(crate::AssetNamespace::Iw4),
-            materials.namespace_count(crate::AssetNamespace::T5),
-            materials.namespace_count(crate::AssetNamespace::Iw5),
+            materials.namespace_count(asset_core::AssetNamespace::Iw4),
+            materials.namespace_count(asset_core::AssetNamespace::T5),
+            materials.namespace_count(asset_core::AssetNamespace::Iw5),
         ));
         report.push(format!(
-            "fx elem material edges after absorb: {} bound ({} unique), {} unresolved (temp={}, catalog_miss={}), {} absent of {} Material* visuals (FxElemDef+0xbc); {} decal mark arms ({} Bound slots, {} unresolved, {} temp, {} array-unpatched)",
+            "fx elem material edges after absorb: {} bound ({} unique), {} unresolved (temp={}, catalog_miss={}), {} absent of {} material visuals; {} decal mark arms ({} Bound slots, {} unresolved, {} temp, {} array-unpatched)",
             world.fx.material_visual_bound_count(),
             world.fx.material_visual_unique_bound_count(),
             world.fx.material_visual_unresolved_count(),
@@ -788,15 +848,15 @@ pub(super) async fn walk_prepared_match(
             .into(),
     );
     {
-        let missing: Vec<crate::MaterialKey> = world
+        let missing: Vec<asset_core::MaterialKey> = world
             .fx
             .unique_bound_hints()
             .into_iter()
             .chain(world.fx.unique_decal_mark_hints())
-            .filter(|(index, _)| !crate::fx_color_decoded_in_catalog(&global, *index))
+            .filter(|(index, _)| !asset_game::color_decoded_in_catalog(&global, *index))
             .filter_map(|(index, _)| {
                 let material = global.materials.get(index)?;
-                Some(crate::MaterialKey {
+                Some(asset_core::MaterialKey {
                     namespace: material.namespace,
                     name: material.name.as_str().to_owned(),
                 })
@@ -805,7 +865,7 @@ pub(super) async fn walk_prepared_match(
         if !missing.is_empty() {
             if let Ok(path) = &zone_ff {
                 let stage = progress.begin_scoped(StageId::Images, "fx_elem", None);
-                let decoded = crate::material_images::decode_color_or_2d_for_keys(
+                let decoded = asset_material::material_images::decode_color_or_2d_for_keys(
                     path,
                     &mut global,
                     missing,
@@ -825,7 +885,7 @@ pub(super) async fn walk_prepared_match(
             .fx
             .unique_bound_hints()
             .into_iter()
-            .filter(|(index, _)| !crate::fx_color_decoded_in_catalog(&global, *index))
+            .filter(|(index, _)| !asset_game::color_decoded_in_catalog(&global, *index))
             .map(|(index, hint)| (index, hint.to_owned()))
             .collect();
         if !nocolor.is_empty() {
@@ -872,7 +932,11 @@ pub(super) async fn walk_prepared_match(
         }
     }
     if world.impact_fx.is_none() {
-        world.impact_fx = common_impact;
+        world.impact_fx = if map_namespace == Some(asset_core::AssetNamespace::T5) {
+            t5_impact_fx.or(common_impact)
+        } else {
+            common_impact
+        };
     } else if let Some(common_table) = common_impact {
         report.push(format!(
             "impactfx: map table kept; common_mp table `{}` discarded",
@@ -881,7 +945,8 @@ pub(super) async fn walk_prepared_match(
     }
     if let Some(ref table) = world.impact_fx {
         report.push(format!(
-            "impactfx handoff: `{}` rows={} (fx catalog now {} defs)",
+            "impactfx handoff: {:?}:`{}` rows={} (fx catalog now {} defs)",
+            table.namespace(),
             table.name,
             table.row_count(),
             world.fx.len()
@@ -890,7 +955,7 @@ pub(super) async fn walk_prepared_match(
         report.push("impactfx handoff: missing — combat play_oriented will miss cells".into());
     }
     report.push(format!(
-        "tracer catalog handoff: {} named ({} bound, {} unresolved) (CG_SpawnTracer)",
+        "tracer catalog handoff: {} named ({} bound, {} unresolved)",
         common_tracers.len(),
         common_tracers.bound_count(),
         common_tracers.unresolved_count()
@@ -916,15 +981,15 @@ pub(super) async fn walk_prepared_match(
     }
 
     report.extend(localize_report);
-    let (directory_ms, opens, inflate_ms) = crate::iwd_read_cost();
+    let (directory_ms, opens, inflate_ms) = asset_material::iwd_read_cost();
     report.push(format!(
         "IWD read cost: central_dir={directory_ms:.0}ms over {opens} opens, inflate={inflate_ms:.0}ms (summed over worker threads, not wall)"
     ));
-    let (mip_hit, mip_miss, mip_io_ms) = crate::mip_cache_cost();
+    let (mip_hit, mip_miss, mip_io_ms) = asset_material::mip_cache_cost();
     report.push(format!(
         "mip cache: hit={mip_hit} miss={mip_miss} io={mip_io_ms:.0}ms"
     ));
-    let (payload_reads, header_reads) = crate::iwd_entry_reads();
+    let (payload_reads, header_reads) = asset_material::iwd_entry_reads();
     report.push(format!(
         "IWD entry reads: payload={payload_reads} header-only={header_reads} (a header answers whether an image is a cubemap; a payload read is the whole entry inflated)"
     ));
@@ -958,19 +1023,19 @@ pub(super) async fn walk_prepared_match(
                     .defs()
                     .filter_map(|def| def.material.bound_index()),
             );
-        let mut set = crate::material_images::census_image_working_set(
+        let mut set = asset_material::material_images::census_image_working_set(
             &global,
             world_mats,
             smodel_mats,
             fpv_mats,
             fx_mats,
         );
-        let (probe_n, probe_bytes) = crate::material_images::cpu_image_census(
+        let (probe_n, probe_bytes) = asset_material::material_images::cpu_image_census(
             world.reflection_probe_images.iter().flatten(),
         );
         let (lightmap_n, lightmap_bytes) = match &draw.lightmap {
-            Ok(pages) => {
-                crate::material_images::cpu_image_census(pages.iter().flatten().flat_map(|page| {
+            Ok(pages) => asset_material::material_images::cpu_image_census(
+                pages.iter().flatten().flat_map(|page| {
                     [
                         page.primary_image.as_ref(),
                         page.secondary_image.as_ref(),
@@ -980,15 +1045,15 @@ pub(super) async fn walk_prepared_match(
                     ]
                     .into_iter()
                     .flatten()
-                }))
-            }
+                }),
+            ),
             Err(_) => (0, 0),
         };
         set.probe_n = probe_n;
         set.probe_bytes = probe_bytes;
         set.lightmap_n = lightmap_n;
         set.lightmap_bytes = lightmap_bytes;
-        crate::material_images::store_image_working_set(set);
+        asset_material::material_images::store_image_working_set(set);
         report.push(format!(
             "image working set: decoded={} ({:.1}MiB) world-batch={} ({:.1}MiB) smodel={} ({:.1}MiB) fpv={} ({:.1}MiB) probe={} ({:.1}MiB) lightmap={} ({:.1}MiB) fx={} ({:.1}MiB); subsets, not a skipped load",
             set.decoded_n,
@@ -1008,7 +1073,7 @@ pub(super) async fn walk_prepared_match(
         ));
     }
     let mut fx = std::mem::take(&mut world.fx).publish();
-    fx.set_map_namespace(map_namespace.unwrap_or(crate::AssetNamespace::Iw4));
+    fx.set_map_namespace(map_namespace.unwrap_or(asset_core::AssetNamespace::Iw4));
     let xanims = xanims.publish();
     let destructible_death =
         crate::stamp_match_destructible_death(&xanims, &world.map_xmodel_scene_assets);
@@ -1021,6 +1086,7 @@ pub(super) async fn walk_prepared_match(
         ));
     }
     let prepared = PreparedMatch {
+        scripts,
         fx,
         world,
         materials: crate::MatchMaterials {
@@ -1049,4 +1115,39 @@ pub(super) async fn walk_prepared_match(
         sound,
     };
     (MatchLoadOutcome::Ready(prepared), Some(common))
+}
+
+fn t5_map_under_iw4_rules(
+    map_scripts: &crate::ScriptSources,
+    zone_name: &str,
+    facts: &crate::MapFacts,
+) -> crate::ScriptSources {
+    let module = format!("maps/mp/{zone_name}");
+    let main = map_scripts
+        .read(&module)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
+    let mut declarations = asset_world::MapDeclarations::from_t5_map_main(&main);
+    declarations.set_teams(
+        facts.script_sound.attackers.as_deref().unwrap_or("allies"),
+        facts.script_sound.defenders.as_deref().unwrap_or("axis"),
+    );
+    let entities = map_scripts
+        .entities()
+        .map(asset_world::t5_entities_for_iw4_rules)
+        .unwrap_or_default();
+    let mut scripts = crate::ScriptSources::default();
+    let mut map_main = declarations.map_script(&entities);
+    if zone_name == "mp_radiation" {
+        let end = map_main.rfind('}').expect("generated map main");
+        map_main.insert_str(end, "\tthread iw4l_maps\\radiation::main();\n");
+        scripts.insert_source(
+            "iw4l_maps/radiation",
+            crate::map_scripts::RADIATION.to_owned(),
+        );
+    }
+    scripts.insert_source(&module, map_main);
+    scripts.set_entities(entities);
+    scripts
 }

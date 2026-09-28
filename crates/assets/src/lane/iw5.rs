@@ -5,13 +5,16 @@ use super::{
     ZoneLane, ZoneWalkSink,
 };
 use crate::lane_capability::{LaneStatus, PreparedCapability};
-use crate::progress::{LoadProgress, StageId};
-use crate::session_load::{PreparedWorld, WorldDrawPolicy};
-use crate::{
-    BodyMeshBuild, Iw5ZoneMemory, MASK_PLAYER_SOLID, OwnedLightGrid, XAnimBuild, ZoneGame,
-    ZoneImage, attach_iw5_static_models, build_iw5_clip_collision, build_iw5_world_draw,
-    decode_reflection_probe_cubemap, dm_spawn_points_iw5, intermission_view_iw5,
-    minimap_corners_iw5,
+use crate::session_load::PreparedWorld;
+use asset_anim::XAnimBuild;
+use asset_core::ZoneGame;
+use asset_material::decode_reflection_probe_cubemap;
+use asset_model::{BodyMeshBuild, OwnedLightGrid};
+use asset_transport::progress::{LoadProgress, StageId};
+use asset_transport::{Iw5ZoneMemory, ZoneImage};
+use asset_world::{
+    MASK_PLAYER_SOLID, WorldDrawPolicy, attach_iw5_static_models, build_iw5_clip_collision,
+    build_iw5_world_draw, dm_spawn_points_iw5, intermission_view_iw5, minimap_corners_iw5,
 };
 
 pub struct Iw5Lane;
@@ -47,17 +50,29 @@ impl Iw5Lane {
         {
             return;
         }
-        match crate::find_zone_for_tree(path, "code_post_gfx_mp") {
+        match asset_transport::find_zone_for_tree(path, "code_post_gfx_mp") {
             Ok(found) => {
-                let (arena, table) = crate::load_iw5_team_sources(&found.path);
+                let (arena, table) = asset_game::load_iw5_team_sources(&found.path);
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if let Some(table) = table.as_ref() {
-                    loaded.facts.team_settings = crate::team_settings_for_zone(
+                    loaded.facts.team_settings = asset_game::team_settings_for_zone(
                         table,
-                        crate::AssetNamespace::Iw5,
+                        asset_core::AssetNamespace::Iw5,
                         arena.as_deref(),
                         stem,
                     );
+                    let settings = &loaded.facts.team_settings;
+                    loaded.facts.objective_visuals =
+                        asset_game::ObjectiveVisuals::from_faction_table(
+                            table,
+                            Some(
+                                settings
+                                    .allies_charset
+                                    .as_deref()
+                                    .unwrap_or(IW5_DEFAULT_ALLIES),
+                            ),
+                            Some(settings.axis_charset.as_deref().unwrap_or(IW5_DEFAULT_AXIS)),
+                        );
                 }
                 match (
                     loaded.facts.team_settings.allies.as_ref(),
@@ -77,8 +92,26 @@ impl Iw5Lane {
         }
     }
 
-    fn finish_loaded(path: &Path, mut loaded: LoadedWorld) -> LoadedWorld {
+    fn finish_loaded(
+        scripts: Option<&(String, Option<String>)>,
+        path: &Path,
+        mut loaded: LoadedWorld,
+    ) -> LoadedWorld {
         Self::stamp_map_tree_team_settings(path, &mut loaded);
+        if let Some((entities, stand_in)) = scripts {
+            loaded.scripts.set_entities(entities.clone());
+            let map = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase());
+            if let (Some(stand_in), Some(map)) = (stand_in, map) {
+                loaded
+                    .scripts
+                    .insert_source(&format!("maps/mp/{map}"), stand_in.clone());
+                loaded.report.push(format!(
+                    "map script: maps/mp/{map} written from the zone's declarations"
+                ));
+            }
+        }
         loaded
     }
 }
@@ -97,11 +130,11 @@ impl ZoneLane for Iw5Lane {
         path: &Path,
         image: &ZoneImage,
         progress: &LoadProgress,
-        _shared_surfaces: asset_model::SharedXModelSurfaces,
-        material_seed: crate::MaterialCatalog,
+        shared_surfaces: asset_model::SharedXModelSurfaces,
+        material_seed: asset_material::MaterialCatalog,
         _common_film_visions: &mut std::collections::BTreeMap<
             String,
-            Result<crate::FilmVision, crate::FilmVisionParseError>,
+            Result<asset_world::FilmVision, asset_world::FilmVisionParseError>,
         >,
     ) -> LoadedWorld {
         let mut report = vec![format!("game: IW5 ({})", path.display())];
@@ -114,6 +147,7 @@ impl ZoneLane for Iw5Lane {
             Err(e) => {
                 stage.fail();
                 return Self::finish_loaded(
+                    None,
                     path,
                     LoadedWorld::with_gap(
                         WorldDrawPolicy::iw5(),
@@ -126,7 +160,7 @@ impl ZoneLane for Iw5Lane {
         };
 
         let stage = progress.begin_scoped(StageId::MapAssets, "memory", None);
-        report.push(crate::zone::xfile_arena_row(
+        report.push(asset_transport::xfile_arena_row(
             "zone arenas map",
             &header.block_size,
             fastfile_iw5::XFILE_BLOCK_TEMP,
@@ -141,6 +175,7 @@ impl ZoneLane for Iw5Lane {
             Err(e) => {
                 stage.fail();
                 return Self::finish_loaded(
+                    None,
                     path,
                     LoadedWorld::with_gap(
                         WorldDrawPolicy::iw5(),
@@ -156,8 +191,9 @@ impl ZoneLane for Iw5Lane {
         let mut sink = ZoneWalkSink::default();
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
-        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(crate::AssetNamespace::Iw5);
+        sink.map_xmodels.shared_surfaces = shared_surfaces;
+        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(asset_core::AssetNamespace::Iw5);
         sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
             path,
             asset_audio::ZoneGame::Iw5,
@@ -179,6 +215,13 @@ impl ZoneLane for Iw5Lane {
         let exp_fog = sink.exp_fog.take();
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let createart_name = sink.createart_name.take();
+        let scripts = asset_world::map_ents_entity_string_iw5(&stream)
+            .map(asset_world::iw5_entity_string_named)
+            .map(|entities| {
+                let stand_in =
+                    (!sink.iw5_map.is_empty()).then(|| sink.iw5_map.map_script(&entities));
+                (entities, stand_in)
+            });
         report.push(match &exp_fog {
             Some(fog) => format!(
                 "createart fog: READY start={:.3} half={:.3} maxOpacity={:.3} sun={} name={}",
@@ -242,6 +285,12 @@ impl ZoneLane for Iw5Lane {
             match build_iw5_clip_collision(&stream, geometry) {
                 Ok(mut clip) => {
                     attach_iw5_static_models(&stream, geometry, &sink.xmodel_coll, &mut clip);
+                    clip.trigger_models = asset_world::trigger_models_iw5(&stream);
+                    report.push(format!(
+                        "trigger models: {} ({} with hulls)",
+                        clip.trigger_models.len(),
+                        clip.trigger_models.iter().filter(|h| !h.is_empty()).count()
+                    ));
                     let solid = clip
                         .brushes
                         .iter()
@@ -282,6 +331,7 @@ impl ZoneLane for Iw5Lane {
             report.push("bodies: empty (no GfxWorld; XModel bone capture not reached)".into());
             let dm_spawns = dm_spawn_points_iw5(&stream);
             return Self::finish_loaded(
+                scripts.as_ref(),
                 path,
                 LoadedWorld {
                     sound: map_sound,
@@ -349,9 +399,9 @@ impl ZoneLane for Iw5Lane {
                     "script_brushmodel: {} *N placements (SP_script_brushmodel, not DrawInst)",
                     map_models.script_brush_models.len()
                 ));
-                let crate::PreparedMapModels {
+                let asset_world::PreparedMapModels {
                     static_draw:
-                        crate::StaticModelDraw {
+                        asset_world::StaticModelDraw {
                             meshes: static_model_meshes,
                             placements: static_model_instances,
                             ..
@@ -359,14 +409,14 @@ impl ZoneLane for Iw5Lane {
                     scene_assets: map_xmodel_scene_assets,
                     script_instances: script_model_instances,
                     script_brush_models,
-                    map_use_triggers,
                     flag_descriptors,
                     script_structs,
                     ..
                 } = map_models;
                 let intermission_view = intermission_view_iw5(&stream);
                 let minimap_corners = minimap_corners_iw5(&stream);
-                let north_yaw = crate::worldspawn_north_yaw_iw5(&stream);
+                let north_yaw = asset_world::worldspawn_north_yaw_iw5(&stream);
+                let airstrike_height = asset_world::airstrike_height_iw5(&stream);
                 let dm_spawns = dm_spawn_points_iw5(&stream);
                 report.push(format!(
                     "ffa spawns: {} mp_dm_spawn* ({} start)",
@@ -485,7 +535,7 @@ impl ZoneLane for Iw5Lane {
                     )),
                 }
                 let smodel_lighting_samples = {
-                    use crate::model_lighting::{
+                    use asset_model::model_lighting::{
                         build_smodel_lighting_samples_with_sight, census_lit_fragment_tiles,
                         collect_iw5_smodel_lighting_origins,
                     };
@@ -583,6 +633,7 @@ impl ZoneLane for Iw5Lane {
                 }
                 report.push(format!("map xanims: {}", map_xanims.len()));
                 Self::finish_loaded(
+                    scripts.as_ref(),
                     path,
                     LoadedWorld {
                         sound: map_sound,
@@ -596,7 +647,6 @@ impl ZoneLane for Iw5Lane {
                             map_xmodel_scene_assets,
                             script_model_instances,
                             script_brush_models,
-                            map_use_triggers,
                             flag_descriptors,
                             script_structs,
                             intermission_view,
@@ -617,6 +667,7 @@ impl ZoneLane for Iw5Lane {
                             script_sound: script_sound.clone(),
                             minimap_corners,
                             north_yaw,
+                            airstrike_height,
                             compass,
                             ..Default::default()
                         },
@@ -629,6 +680,7 @@ impl ZoneLane for Iw5Lane {
                 report.push(format!("world draw: {e}"));
                 let dm_spawns = dm_spawn_points_iw5(&stream);
                 Self::finish_loaded(
+                    scripts.as_ref(),
                     path,
                     LoadedWorld {
                         sound: map_sound,
@@ -662,7 +714,7 @@ impl ZoneLane for Iw5Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         decode_color_maps: bool,
-        material_seed: crate::MaterialCatalog,
+        material_seed: asset_material::MaterialCatalog,
     ) -> CommonCensus {
         let header = match image.iw5_header() {
             Ok(header) => header,
@@ -685,8 +737,8 @@ impl ZoneLane for Iw5Lane {
         };
         let mut sink = CommonWalkSink::default();
         sink.seed_materials(material_seed);
-        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(crate::AssetNamespace::Iw5);
+        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(asset_core::AssetNamespace::Iw5);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
             asset_audio::ZoneGame::Iw5,
@@ -710,7 +762,7 @@ impl ZoneLane for Iw5Lane {
         sink.weapons.resolve_reticles(&sink.materials);
         let captured = sink.weapons.len();
         let mut weapons = sink.weapons.into_build();
-        weapons.stamp_namespace(crate::AssetNamespace::Iw5);
+        weapons.stamp_namespace(asset_core::AssetNamespace::Iw5);
         weapons.apply_stats_tables(sink.stats_tables.values());
         weapons.resolve_sz_xanim_edges(&sink.xanims);
         weapons.resolve_fpv_mesh_edges(&sink.fpv_meshes);
@@ -722,7 +774,7 @@ impl ZoneLane for Iw5Lane {
         ));
         let gun_named = weapons.gun_xmodel_count();
         report.push(format!(
-        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0]; {} with szXAnims[IDLE]; {} with any szXAnims slot",
+        "common_mp weapons: {captured} captures -> {} unique catalog ids (sorted); {gun_named} with gunXModel[0]; {} with szXAnims[IDLE]; {} with any szXAnims slot",
         weapons.len(),
         weapons.idle_anim_count(),
         weapons.sz_xanims_count()
@@ -745,7 +797,7 @@ impl ZoneLane for Iw5Lane {
             sink.materials.images.len(),
             sink.materials.capture_gaps
         ));
-        let light_defs = crate::capture_iw5_light_defs(&stream, &sink.materials);
+        let light_defs = asset_world::capture_iw5_light_defs(&stream, &sink.materials);
         report.push(format!(
             "GfxLightDef common_mp: table={} bodies={} recorded={}",
             sink.light_def_table,
@@ -757,7 +809,7 @@ impl ZoneLane for Iw5Lane {
         let mut pending_images = None;
         if decode_color_maps {
             let stage = progress.begin_scoped(StageId::Images, "common_mp", None);
-            let (inline, plan) = crate::material_images::plan_material_color_maps(
+            let (inline, plan) = asset_material::material_images::plan_material_color_maps(
                 path,
                 &mut materials,
                 &stage,
@@ -785,6 +837,8 @@ impl ZoneLane for Iw5Lane {
             world_weapons: sink.world_weapons,
             xanims: sink.xanims,
             light_defs,
+            scene_models: sink.scene_models,
+            shared_surfaces: sink.shared_surfaces,
             report,
             ..Default::default()
         }
@@ -795,7 +849,7 @@ impl ZoneLane for Iw5Lane {
         path: &Path,
         image: &ZoneImage,
         progress: &LoadProgress,
-        material_seed: crate::MaterialCatalog,
+        material_seed: asset_material::MaterialCatalog,
     ) -> MaterialPopulation {
         let _ = progress;
         let zone_name = path.file_stem().map_or_else(
@@ -825,8 +879,8 @@ impl ZoneLane for Iw5Lane {
         };
         let mut sink = MaterialPopulationSink::default();
         sink.seed_materials(material_seed);
-        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(crate::AssetNamespace::Iw5);
+        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(asset_core::AssetNamespace::Iw5);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
             asset_audio::ZoneGame::Iw5,
@@ -857,6 +911,10 @@ impl ZoneLane for Iw5Lane {
             materials: sink.materials,
             report,
             cac_tables: sink.stats_tables.into_values().collect(),
+            scripts: sink.scripts,
         }
     }
 }
+
+const IW5_DEFAULT_ALLIES: &str = "sas_urban";
+const IW5_DEFAULT_AXIS: &str = "opforce_henchmen";

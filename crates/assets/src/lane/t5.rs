@@ -5,11 +5,13 @@ use super::{
     ZoneLane, ZoneWalkSink,
 };
 use crate::lane_capability::{LaneStatus, PreparedCapability};
-use crate::progress::{LoadProgress, StageId};
-use crate::session_load::{PreparedWorld, WorldDrawPolicy};
-use crate::{
-    MASK_PLAYER_SOLID, T5ZoneMemory, ZoneGame, ZoneImage, build_t5_clip_collision,
-    build_t5_world_draw, decode_material_color_maps, decode_reflection_probe_cubemap,
+use crate::session_load::PreparedWorld;
+use asset_core::ZoneGame;
+use asset_material::{decode_material_color_maps, decode_reflection_probe_cubemap};
+use asset_transport::progress::{LoadProgress, StageId};
+use asset_transport::{T5ZoneMemory, ZoneImage};
+use asset_world::{
+    MASK_PLAYER_SOLID, WorldDrawPolicy, build_t5_clip_collision, build_t5_world_draw,
     dm_spawn_points_t5, intermission_view_t5, minimap_corners_t5,
 };
 
@@ -57,10 +59,10 @@ impl ZoneLane for T5Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         _shared_surfaces: asset_model::SharedXModelSurfaces,
-        material_seed: crate::MaterialCatalog,
+        material_seed: asset_material::MaterialCatalog,
         _common_film_visions: &mut std::collections::BTreeMap<
             String,
-            Result<crate::FilmVision, crate::FilmVisionParseError>,
+            Result<asset_world::FilmVision, asset_world::FilmVisionParseError>,
         >,
     ) -> LoadedWorld {
         let mut report = vec![format!("game: T5 ({})", path.display())];
@@ -82,7 +84,7 @@ impl ZoneLane for T5Lane {
         };
 
         let stage = progress.begin_scoped(StageId::MapAssets, "memory", None);
-        report.push(crate::zone::xfile_arena_row(
+        report.push(asset_transport::xfile_arena_row(
             "zone arenas map",
             &header.block_size,
             fastfile_t5::XFILE_BLOCK_TEMP,
@@ -109,8 +111,8 @@ impl ZoneLane for T5Lane {
         let mut sink = ZoneWalkSink::default();
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
-        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(crate::AssetNamespace::T5);
+        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(asset_core::AssetNamespace::T5);
         sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
             path,
             asset_audio::ZoneGame::T5,
@@ -134,9 +136,7 @@ impl ZoneLane for T5Lane {
             stream.unsettled_offsets()
         ));
         let runtime_overrun = stream.block_overrun(fastfile_t5::XFILE_BLOCK_RUNTIME as u8);
-        report.push(format!(
-            "retail block overrun: runtime +{runtime_overrun} bytes"
-        ));
+        report.push(format!("block overrun: runtime +{runtime_overrun} bytes"));
 
         let clip = if let Some(geometry) = stream.clip_map() {
             report.push(format!(
@@ -195,6 +195,10 @@ impl ZoneLane for T5Lane {
         let createart_name = sink.createart_name.clone();
         let t5_teamset = sink.t5_teamset.clone();
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
+        let mut scripts = std::mem::take(&mut sink.scripts);
+        if let Some(entities) = asset_world::map_ents_entity_string_t5(&stream) {
+            scripts.set_entities(entities.to_owned());
+        }
         match (&createart_name, exp_fog) {
             (Some(name), Some(fog)) => report.push(format!(
                 "t5 createart: {name} fog=ready start={:.1} half={:.1}",
@@ -261,6 +265,7 @@ impl ZoneLane for T5Lane {
             report.push("no GfxWorld retained — nothing to draw".into());
             let dm_spawns = dm_spawn_points_t5(&stream);
             let mut loaded = LoadedWorld {
+                scripts,
                 sound: map_sound,
                 world: PreparedWorld {
                     policy: WorldDrawPolicy::t5(),
@@ -309,14 +314,7 @@ impl ZoneLane for T5Lane {
                         draw.sky_model.is_some()
                     ));
                 }
-                let mut map_models =
-                    super::build_t5_static_model_draw(&stream, geometry, map_xmodels);
-                if let Some(clip) = &clip {
-                    asset_world::capture_brush_trigger_hulls(
-                        &mut map_models.map_use_triggers,
-                        clip,
-                    );
-                }
+                let map_models = super::build_t5_static_model_draw(&stream, geometry, map_xmodels);
                 if let Some(error) = map_models.static_error.as_ref() {
                     report.push(format!("static models: {error}"));
                 }
@@ -336,9 +334,9 @@ impl ZoneLane for T5Lane {
                     "script_brushmodel: {} *N placements (SP_script_brushmodel, not DrawInst)",
                     map_models.script_brush_models.len()
                 ));
-                let crate::PreparedMapModels {
+                let asset_world::PreparedMapModels {
                     static_draw:
-                        crate::StaticModelDraw {
+                        asset_world::StaticModelDraw {
                             meshes: static_model_meshes,
                             placements: static_model_instances,
                             ..
@@ -346,14 +344,13 @@ impl ZoneLane for T5Lane {
                     scene_assets: map_xmodel_scene_assets,
                     script_instances: script_model_instances,
                     script_brush_models,
-                    map_use_triggers,
                     flag_descriptors,
                     script_structs,
                     ..
                 } = map_models;
                 let intermission_view = intermission_view_t5(&stream);
                 let minimap_corners = minimap_corners_t5(&stream);
-                let north_yaw = crate::worldspawn_north_yaw_t5(&stream);
+                let north_yaw = asset_world::worldspawn_north_yaw_t5(&stream);
                 let dm_spawns = dm_spawn_points_t5(&stream);
                 report.push(format!(
                     "ffa spawns: {} mp_dm_spawn* ({} start)",
@@ -458,7 +455,7 @@ impl ZoneLane for T5Lane {
                     draw.dpvs.cleared_boxes
                 ));
                 let smodel_lighting_samples = {
-                    use crate::model_lighting::{
+                    use asset_model::model_lighting::{
                         OwnedLightGrid, build_smodel_lighting_samples_with_sight,
                         census_lit_fragment_tiles, collect_t5_smodel_lighting_origins,
                     };
@@ -550,6 +547,7 @@ impl ZoneLane for T5Lane {
                 let min = draw.stats.min;
                 let max = draw.stats.max;
                 LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
@@ -560,10 +558,9 @@ impl ZoneLane for T5Lane {
                         map_xmodel_scene_assets,
                         script_model_instances,
                         script_brush_models,
-                        map_use_triggers,
                         flag_descriptors,
                         script_structs,
-                        dyn_ents: crate::DynEntCatalog::default(),
+                        dyn_ents: asset_world::DynEntCatalog::default(),
                         smodel_lighting_samples,
                         light_grid,
                         fx: sink.fx,
@@ -603,6 +600,7 @@ impl ZoneLane for T5Lane {
                 report.push(format!("T5 world mesh: {e}"));
                 let dm_spawns = dm_spawn_points_t5(&stream);
                 let mut loaded = LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     world: PreparedWorld {
                         policy: WorldDrawPolicy::t5(),
@@ -638,7 +636,7 @@ impl ZoneLane for T5Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         decode_color_maps: bool,
-        material_seed: crate::MaterialCatalog,
+        material_seed: asset_material::MaterialCatalog,
     ) -> CommonCensus {
         let header = match image.t5_header() {
             Ok(header) => header,
@@ -661,8 +659,8 @@ impl ZoneLane for T5Lane {
         };
         let mut sink = CommonWalkSink::default();
         sink.seed_materials(material_seed);
-        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(crate::AssetNamespace::T5);
+        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(asset_core::AssetNamespace::T5);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
             asset_audio::ZoneGame::T5,
@@ -694,7 +692,7 @@ impl ZoneLane for T5Lane {
 
         sink.weapons.resolve_reticles(&sink.materials);
         sink.weapons
-            .resolve_combat_fx(&sink.fx, &crate::TracerCatalog::default());
+            .resolve_combat_fx(&sink.fx, &asset_game::TracerCatalog::default());
         let leftover_fx = sink.fx.len();
         let leftover_fx_gaps = sink.fx.capture_gaps;
         for key in sink.weapons.rocket_model_hints() {
@@ -706,7 +704,7 @@ impl ZoneLane for T5Lane {
         let projectile_keys = sink.weapons.projectile_model_hints();
         sink.projectile_meshes.keep_referenced(&projectile_keys);
         let mut weapons = sink.weapons.into_build();
-        weapons.stamp_namespace(crate::AssetNamespace::T5);
+        weapons.stamp_namespace(asset_core::AssetNamespace::T5);
         weapons.apply_stats_tables(sink.stats_tables.values());
         weapons.resolve_sz_xanim_edges(&sink.xanims);
         weapons.resolve_fpv_mesh_edges(&sink.fpv_meshes);
@@ -718,7 +716,7 @@ impl ZoneLane for T5Lane {
         ));
         let gun_named = weapons.gun_xmodel_count();
         report.push(format!(
-        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0]",
+        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted); {gun_named} with gunXModel[0]",
         weapons.len()
     ));
         report.push(format!(
@@ -740,7 +738,7 @@ impl ZoneLane for T5Lane {
         let mut pending_images = None;
         if decode_color_maps {
             let stage = progress.begin_scoped(StageId::Images, "common_mp", None);
-            let (inline, plan) = crate::material_images::plan_material_color_maps(
+            let (inline, plan) = asset_material::material_images::plan_material_color_maps(
                 path,
                 &mut materials,
                 &stage,
@@ -777,6 +775,7 @@ impl ZoneLane for T5Lane {
             fx_models: sink.fx_models,
             report,
             teamsets: sink.teamsets,
+            scene_models: sink.scene_models,
             film_visions: std::collections::BTreeMap::new(),
             ..Default::default()
         }
@@ -787,7 +786,7 @@ impl ZoneLane for T5Lane {
         path: &Path,
         image: &ZoneImage,
         progress: &LoadProgress,
-        material_seed: crate::MaterialCatalog,
+        material_seed: asset_material::MaterialCatalog,
     ) -> MaterialPopulation {
         let _ = progress;
         let zone_name = path.file_stem().map_or_else(
@@ -817,8 +816,8 @@ impl ZoneLane for T5Lane {
         };
         let mut sink = MaterialPopulationSink::default();
         sink.seed_materials(material_seed);
-        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(crate::AssetNamespace::T5);
+        sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(asset_core::AssetNamespace::T5);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
             asset_audio::ZoneGame::T5,
@@ -849,6 +848,7 @@ impl ZoneLane for T5Lane {
             materials: sink.materials,
             report,
             cac_tables: sink.stats_tables.into_values().collect(),
+            scripts: sink.scripts,
         }
     }
 }
