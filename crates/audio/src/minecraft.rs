@@ -54,13 +54,9 @@ fn play_minecraft_sounds(
     for request in std::mem::take(&mut queue.0) {
         let pcm = cache.0.entry(request.key.clone()).or_insert_with(|| {
             let decoded = crate::pcm::decode_audio_bytes(&request.bytes);
-            diag::info!(
-                Audio,
-                "minecraft sound `{}`: {} bytes, {}",
-                request.key,
-                request.bytes.len(),
-                decoded.as_ref().map_or("did not decode".to_owned(), crate::pcm::PcmAudio::describe)
-            );
+            if decoded.is_none() {
+                diag::warn!(Audio, "minecraft sound `{}` did not decode", request.key);
+            }
             decoded
         });
         let Some(pcm) = pcm.as_ref() else {

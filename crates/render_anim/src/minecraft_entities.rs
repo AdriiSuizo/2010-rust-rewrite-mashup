@@ -638,10 +638,15 @@ fn bob_offset(id: i32) -> f32 {
     hash as f32 / u32::MAX as f32 * std::f32::consts::TAU
 }
 
-/// The game's data JAR the MinecraftOSS harness downloaded (loot tables,
-/// recipes), as the viewer finds it.
+/// The game's JAR with its loot tables and recipes.
 pub(crate) fn data_jar() -> Option<std::path::PathBuf> {
-    let root = assets::minecraft_map::root()?.join("harness/.gradle/loom-cache/minecraftMaven/net/minecraft");
+    let root = assets::minecraft_map::root()?;
+    // The client JAR fetched from Mojang, or the one a checkout's harness got.
+    let fetched = root.join(assets::minecraft_setup::CLIENT_JAR);
+    if fetched.is_file() {
+        return Some(fetched);
+    }
+    let root = root.join("harness/.gradle/loom-cache/minecraftMaven/net/minecraft");
     for entry in std::fs::read_dir(root).ok()?.flatten() {
         if !entry.file_name().to_string_lossy().starts_with("minecraft-common-") {
             continue;

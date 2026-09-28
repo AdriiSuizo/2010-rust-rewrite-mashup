@@ -214,8 +214,8 @@ pub(crate) fn register(app: &mut App) {
 }
 
 fn load(seed: i64) -> Result<Loaded, String> {
-    let root = assets::minecraft_map::root().ok_or("MINECRAFTOSS_ROOT is not set")?;
-    let paths = DataPaths::discover()?;
+    let root = assets::minecraft_map::root().ok_or_else(assets::minecraft_setup::status)?;
+    let paths = DataPaths::under(&root);
     let registries = Arc::new(Registries::load(&paths)?);
     let packs = PackStack::open(vec![root.join("resourcepacks/local/minecraft-26.3")])
         .map_err(|e| e.to_string())?;

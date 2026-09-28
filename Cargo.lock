@@ -447,6 +447,7 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "flate2",
  "frame",
  "fx_iw4",
  "half",
@@ -456,9 +457,11 @@ dependencies = [
  "render_material",
  "serde",
  "serde_json",
+ "sha1",
  "trace_iw4",
  "weapon_iw4",
  "xmodel_runtime",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -5733,6 +5736,17 @@ dependencies = [
  "render_frontend",
  "render_fx",
  "sim",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
 ]
 
 [[package]]

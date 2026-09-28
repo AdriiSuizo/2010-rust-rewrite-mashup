@@ -33,6 +33,7 @@ mod createfx {
 }
 mod discover;
 pub mod minecraft_map;
+pub mod minecraft_setup;
 pub mod skate_board;
 mod ent_channel {
     pub use asset_audio::*;

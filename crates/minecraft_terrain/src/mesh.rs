@@ -2673,8 +2673,9 @@ mod tests {
     #[test]
     #[ignore = "local performance diagnostic with the pinned resource pack"]
     fn local_block_edit_mesh_timing() {
-        let path = std::env::var("MINECRAFTOSS_PACK")
-            .unwrap_or_else(|_| "D:/MinecraftOSS/resourcepacks/local/minecraft-26.3".into());
+        let Ok(path) = std::env::var("MINECRAFTOSS_PACK") else {
+            return;
+        };
         if !std::path::Path::new(&path).exists() {
             return;
         }

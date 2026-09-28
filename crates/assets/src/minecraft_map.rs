@@ -16,17 +16,38 @@ pub fn is_minecraft_load(zone: &str) -> bool {
     is_minecraft(zone) || zone.split_once(':').is_some_and(|(_, rest)| is_minecraft(rest))
 }
 
-/// The MinecraftOSS checkout the world is generated from, when configured.
+/// Where the world's Minecraft files are: a MinecraftOSS checkout named by
+/// `MINECRAFTOSS_ROOT`, else the files fetched from Mojang once they are in.
 pub fn root() -> Option<std::path::PathBuf> {
-    let root = std::path::PathBuf::from(std::env::var_os("MINECRAFTOSS_ROOT")?);
-    root.join("datapacks").is_dir().then_some(root)
+    if let Some(root) = std::env::var_os("MINECRAFTOSS_ROOT").map(std::path::PathBuf::from)
+        && root.join("datapacks").is_dir()
+    {
+        return Some(root);
+    }
+    crate::minecraft_setup::ready()
+}
+
+/// Starts fetching Minecraft's files from Mojang when nothing supplies them.
+pub fn prepare() {
+    if root().is_none() {
+        crate::minecraft_setup::begin();
+    }
 }
 
 pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, String> {
     if !is_minecraft(zone) {
         return asset_transport::find_zone_file(root_dir, zone);
     }
-    let checkout = root().ok_or("MINECRAFTOSS_ROOT is not set to a MinecraftOSS checkout")?;
+    let checkout = match root() {
+        Some(root) => root,
+        None => {
+            // A first run straight into this map waits for Mojang's files.
+            crate::minecraft_setup::begin();
+            diag::info!(World, "Minecraft map: waiting for Minecraft's files from Mojang");
+            crate::minecraft_setup::wait(std::time::Duration::from_secs(600))
+                .ok_or_else(crate::minecraft_setup::status)?
+        }
+    };
     let mut proxy = asset_transport::find_zone_file(root_dir, PROXY_ZONE)?;
     proxy.zone_name = ZONE.to_owned();
     proxy.alias_note = Some(format!("Minecraft world from {}", checkout.display()));
@@ -35,6 +56,7 @@ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, Stri
 
 pub fn list_mp_maps(root_dir: &GamesRoot) -> Vec<String> {
     let mut maps = asset_transport::list_mp_maps(root_dir);
+    prepare();
     if root().is_some() && asset_transport::find_zone_file(root_dir, PROXY_ZONE).is_ok() {
         maps.push(ZONE.to_owned());
     }
