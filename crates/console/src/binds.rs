@@ -1,10 +1,10 @@
-use input_iw4::{command_id_lookup, command_name};
+use input_iw4::{ClientInput, cl_key_event, command_id_lookup, command_name};
 
 use std::collections::HashMap;
 
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
-use bevy::input::mouse::MouseButton;
+use bevy::input::mouse::{MouseButton, MouseScrollUnit};
 use bevy::prelude::Resource;
 
 pub const DEFAULT_CONTROLS: &str = include_str!("../assets/default_controls.cfg");
@@ -73,12 +73,40 @@ pub const BINDABLE_KEYS: &[&str] = &[
     "mouse3",
     "mouse4",
     "mouse5",
+    "mwheelup",
+    "mwheeldown",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindButton {
     Key(KeyCode),
     Mouse(MouseButton),
+    WheelUp,
+    WheelDown,
+}
+
+pub(crate) fn wheel_button(y: f32) -> Option<BindButton> {
+    if y > 0.0 {
+        Some(BindButton::WheelUp)
+    } else if y < 0.0 {
+        Some(BindButton::WheelDown)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn wheel_detents(unit: MouseScrollUnit, y: f32, carry: &mut f32) -> i32 {
+    if !y.is_finite() {
+        return 0;
+    }
+    let delta = match unit {
+        MouseScrollUnit::Line => y,
+        MouseScrollUnit::Pixel => y / 100.0,
+    };
+    *carry = (*carry + delta).clamp(-32.0, 32.0);
+    let detents = carry.trunc() as i32;
+    *carry -= detents as f32;
+    detents
 }
 
 pub struct BindInputs<'a> {
@@ -95,6 +123,7 @@ impl<'a> BindInputs<'a> {
         match button {
             BindButton::Key(key) => self.keys.pressed(key),
             BindButton::Mouse(btn) => self.mouse.pressed(btn),
+            BindButton::WheelUp | BindButton::WheelDown => false,
         }
     }
 
@@ -102,6 +131,7 @@ impl<'a> BindInputs<'a> {
         match button {
             BindButton::Key(key) => self.keys.just_pressed(key),
             BindButton::Mouse(btn) => self.mouse.just_pressed(btn),
+            BindButton::WheelUp | BindButton::WheelDown => false,
         }
     }
 
@@ -109,6 +139,7 @@ impl<'a> BindInputs<'a> {
         match button {
             BindButton::Key(key) => self.keys.just_released(key),
             BindButton::Mouse(btn) => self.mouse.just_released(btn),
+            BindButton::WheelUp | BindButton::WheelDown => false,
         }
     }
 }
@@ -261,6 +292,20 @@ impl KeyBinds {
     }
 }
 
+pub(crate) fn pulse_wheel_binding(
+    binds: &KeyBinds,
+    client: &mut ClientInput,
+    button: BindButton,
+    now_msec: i32,
+    frame_msec: u32,
+) {
+    let Some(id) = binds.get(button) else { return };
+    let key_num = host_keynum(button);
+    client.keys[key_num].binding = id;
+    cl_key_event(client, key_num, true, now_msec, frame_msec);
+    cl_key_event(client, key_num, false, now_msec, frame_msec);
+}
+
 pub fn host_keynum(button: BindButton) -> usize {
     match button {
         BindButton::Mouse(MouseButton::Left) => 180,
@@ -269,6 +314,8 @@ pub fn host_keynum(button: BindButton) -> usize {
         BindButton::Mouse(MouseButton::Back) => 183,
         BindButton::Mouse(MouseButton::Forward) => 184,
         BindButton::Mouse(_) => 185,
+        BindButton::WheelUp => 186,
+        BindButton::WheelDown => 187,
         BindButton::Key(key) => keycode_keynum(key),
     }
 }
@@ -424,6 +471,8 @@ pub fn parse_button_name(name: &str) -> Option<Vec<BindButton>> {
         "mouse3" | "mousemiddle" | "mmb" => BindButton::Mouse(MouseButton::Middle),
         "mouse4" => BindButton::Mouse(MouseButton::Back),
         "mouse5" => BindButton::Mouse(MouseButton::Forward),
+        "mwheelup" | "wheelup" => BindButton::WheelUp,
+        "mwheeldown" | "wheeldown" => BindButton::WheelDown,
         _ => return None,
     };
     Some(vec![button])
@@ -442,6 +491,8 @@ pub fn display_button(button: BindButton) -> String {
         BindButton::Mouse(MouseButton::Back) => "MOUSE4".into(),
         BindButton::Mouse(MouseButton::Forward) => "MOUSE5".into(),
         BindButton::Mouse(other) => format!("{other:?}"),
+        BindButton::WheelUp => "MWHEELUP".into(),
+        BindButton::WheelDown => "MWHEELDOWN".into(),
     }
 }
 
@@ -509,3 +560,4 @@ fn display_key(key: KeyCode) -> String {
     }
     .to_owned()
 }
+

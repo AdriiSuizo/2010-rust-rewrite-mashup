@@ -52,6 +52,9 @@ on host and clients — the host records authority, a client the snapshots it
 received plus its own presented state; `demo LATEST` plays it back.
 
 * ADS is `hold +speed_throw`, not `+speed`;
+* Aim binding: `bind MOUSE2 +speed_throw` aims only while held;
+  `bind MOUSE2 +toggleads_throw` toggles aim on each press. Both are available
+  under Options → Controls → Actions, and the chosen bind is saved in settings.
 * bolt action (`fire_type=1`): `hold +attack` is **one** shot, and a full
   magazine will not reload itself (`press +attack` ×N, then `press +reload`);
 * `look` without `LookState` only writes `ps.viewangles` — no aiming;

@@ -2,11 +2,15 @@ use std::{fs, path::PathBuf};
 
 use bevy::{
     audio::{AudioSink, AudioSinkPlayback, GlobalVolume, Volume},
-    input::{ButtonInput, keyboard::KeyCode, mouse::MouseButton},
+    input::{
+        ButtonInput,
+        keyboard::KeyCode,
+        mouse::{MouseButton, MouseWheel},
+    },
     prelude::*,
 };
 
-use crate::{BindButton, KeyBinds, display_button};
+use crate::{BindButton, KeyBinds, binds::wheel_button, display_button};
 
 #[derive(Resource, Default)]
 pub(crate) struct PendingMenuBinding {
@@ -47,10 +51,14 @@ pub(crate) fn consume_menu_binding(
     mut intents: MessageReader<ui::UiIntent>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<MouseWheel>,
     mut pending: ResMut<PendingMenuBinding>,
     mut binds: ResMut<KeyBinds>,
     mut view: ResMut<ui::BindingView>,
 ) {
+    let wheel_direction = wheel
+        .read()
+        .fold(None, |first, event| first.or_else(|| wheel_button(event.y)));
     let mut began = false;
     for intent in intents.read() {
         if let ui::UiIntent::BeginBinding { id } = intent {
@@ -82,7 +90,8 @@ pub(crate) fn consume_menu_binding(
                 .copied()
                 .map(BindButton::Mouse)
                 .next()
-        });
+        })
+        .or(wheel_direction);
     let Some(button) = button else { return };
     binds.clear_command(id);
     binds.set(button, id);
@@ -305,3 +314,4 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
         binds.set(BindButton::Key(KeyCode::Digit4), 21);
     }
 }
+

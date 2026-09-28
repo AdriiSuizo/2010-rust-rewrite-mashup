@@ -2,7 +2,7 @@ use bevy::{
     input::ButtonState,
     input::InputSystems,
     input::keyboard::{Key, KeyCode, KeyboardInput, NativeKeyCode},
-    input::mouse::{MouseButton, MouseMotion},
+    input::mouse::{MouseButton, MouseMotion, MouseWheel},
     input_focus::{FocusCause, InputFocus, InputFocusSystems},
     picking::{
         events::{Drag, Pointer, Press, Release},
@@ -20,8 +20,8 @@ use render_frontend::prepare::scene::world::WorldScene;
 use ui::{MenuEnabled, UiLayer};
 
 use crate::{
-    BINDABLE_KEYS, ConsoleCommand, ConsoleEditor, ConsoleInputState, KeyBinds,
-    binds::{BindInputs, host_keynum},
+    BINDABLE_KEYS, BindButton, ConsoleCommand, ConsoleEditor, ConsoleInputState, KeyBinds,
+    binds::{BindInputs, host_keynum, pulse_wheel_binding, wheel_detents},
     is_bind_command,
     registry::ConsoleRegistry,
     suggest::{SuggestSpan, SuggestTone, suggestion_spans},
@@ -419,6 +419,8 @@ fn publish_client_action_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut wheel_carry: Local<f32>,
     binds: Res<KeyBinds>,
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
@@ -464,9 +466,14 @@ fn publish_client_action_input(
 
     let now = out.now_msec;
     let frame = out.frame_msec;
+    if binds.is_changed() {
+        *wheel_carry = 0.0;
+    }
 
     if console.open || menu.0 || keys.just_pressed(KeyCode::Escape) {
         for _ in motion.read() {}
+        for _ in wheel.read() {}
+        *wheel_carry = 0.0;
         for key_num in 0..input_iw4::KEY_COUNT {
             if out.client.keys[key_num].down != 0 {
                 cl_key_event(&mut out.client, key_num, false, now, frame);
@@ -487,6 +494,20 @@ fn publish_client_action_input(
         }
         if inputs.just_released(button) {
             cl_key_event(&mut out.client, key_num, false, now, frame);
+        }
+    }
+    for event in wheel.read() {
+        let steps = wheel_detents(event.unit, event.y, &mut wheel_carry);
+        if steps == 0 {
+            continue;
+        }
+        let button = if steps > 0 {
+            BindButton::WheelUp
+        } else {
+            BindButton::WheelDown
+        };
+        for _ in 0..steps.unsigned_abs() {
+            pulse_wheel_binding(&binds, &mut out.client, button, now, frame);
         }
     }
 

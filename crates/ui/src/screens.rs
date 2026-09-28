@@ -1239,6 +1239,7 @@ const MOVEMENT_BINDS: &[(u32, &str)] = &[
 const ACTION_BINDS: &[(u32, &str)] = &[
     (1, "Fire Weapon"),
     (57, "Aim Down the Sight"),
+    (13, "Hold Aim Down the Sight"),
     (51, "Reload"),
     (66, "Switch Weapon"),
     (3, "Melee"),

@@ -289,6 +289,9 @@ pub fn cl_input_cmd(
         9 | 10 => panic!("+breath_sprint kbutton EAX unread; not merged with +sprint"),
         11 | 12 => apply_pair(&mut client.kb.usereload, cmd_id, key, now_msec, frame_msec),
         13 | 14 => {
+            if pair_down(cmd_id) {
+                client.using_ads = false;
+            }
             apply_pair(&mut client.kb.speed, cmd_id, key, now_msec, frame_msec);
             apply_pair(&mut client.kb.throw_btn, cmd_id, key, now_msec, frame_msec);
         }
