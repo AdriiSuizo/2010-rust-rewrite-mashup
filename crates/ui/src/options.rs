@@ -19,13 +19,15 @@ pub enum OptionsTab {
     Controls,
     Multiplayer,
     Game,
+    Controller,
 }
 
 impl OptionsTab {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Video,
         Self::Audio,
         Self::Controls,
+        Self::Controller,
         Self::Multiplayer,
         Self::Game,
     ];
@@ -41,6 +43,7 @@ impl OptionsTab {
             2 => Self::Controls,
             3 => Self::Multiplayer,
             4 => Self::Game,
+            5 => Self::Controller,
             _ => return None,
         })
     }
@@ -52,6 +55,7 @@ impl OptionsTab {
             Self::Controls => "Controls",
             Self::Multiplayer => "Multiplayer",
             Self::Game => "Game",
+            Self::Controller => "Controller",
         }
     }
 }
@@ -133,6 +137,7 @@ impl OptionsState {
             OptionsTab::Controls => OptionsControlGroup::Movement.widget_id(),
             OptionsTab::Multiplayer => "options/player_name",
             OptionsTab::Game => "options/sensitivity",
+            OptionsTab::Controller => "options/pad_layout",
         }
     }
 
@@ -173,13 +178,30 @@ pub(crate) fn options_widget_is_active(state: &OptionsState, id: &str) -> bool {
             OptionsTab::Controls => OptionsControlGroup::from_widget_id(id).is_some(),
             OptionsTab::Multiplayer => id == "options/player_name",
             OptionsTab::Game => matches!(id, "options/sensitivity" | "options/invert_mouse"),
+            OptionsTab::Controller => PAD_ROWS.contains(&id),
         },
-        OptionsDepth::ControlBinds => id.starts_with("options/binds/"),
+        OptionsDepth::ControlBinds => {
+            id.starts_with("options/binds/") || id.starts_with("options/padbinds/")
+        }
         OptionsDepth::ResolutionPicker => {
             id == "options/resolution_cancel" || id.starts_with("options/resolution_choice/")
         }
     }
 }
+
+/// The Controller tab's rows, top to bottom.
+pub(crate) const PAD_ROWS: [&str; 10] = [
+    "options/pad_layout",
+    "options/pad_stick_layout",
+    "options/pad_sensitivity",
+    "options/pad_ads_sensitivity",
+    "options/pad_invert",
+    "options/pad_curve",
+    "options/pad_aim_assist",
+    "options/pad_vibration",
+    "options/pad_deadzone_left",
+    "options/pad_deadzone_right",
+];
 
 pub(crate) fn options_pointer_widget_is_active(state: &OptionsState, id: &str) -> bool {
     match state.depth {
@@ -267,6 +289,18 @@ pub(crate) fn drive_options_navigation(
         left |= matches!(command, MenuShellCmd::Nav(NavDir::Left));
         right |= matches!(command, MenuShellCmd::Nav(NavDir::Right));
     }
+    // Across a binding row: the keyboard and controller columns.
+    if (left || right) && state.depth == OptionsDepth::ControlBinds && state.name_buffer.is_none() {
+        let focused = focus.widget.clone().unwrap_or_default();
+        if right && let Some(id) = focused.strip_prefix("options/binds/") {
+            focus.widget = Some(format!("options/padbinds/{id}"));
+            return;
+        }
+        if left && let Some(id) = focused.strip_prefix("options/padbinds/") {
+            focus.widget = Some(format!("options/binds/{id}"));
+            return;
+        }
+    }
     if left
         && state.name_buffer.is_none()
         && !matches!(
@@ -280,6 +314,7 @@ pub(crate) fn drive_options_navigation(
                     | "options/invert_mouse"
             )
         )
+        && !focus.widget.as_deref().is_some_and(|id| PAD_ROWS.contains(&id))
     {
         if let Some(parent) = state.go_parent() {
             focus.widget = Some(parent);
@@ -366,7 +401,11 @@ pub(crate) const fn first_bind_id(group: OptionsControlGroup) -> u32 {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct BindingView {
     pub chords: BTreeMap<u32, String>,
+    /// The controller buttons bound to each command.
+    pub pad_chords: BTreeMap<u32, String>,
     pub listening: Option<u32>,
+    /// The binding being listened for is the controller's.
+    pub listening_pad: bool,
     pub revision: u64,
 }
 
@@ -376,6 +415,13 @@ impl BindingView {
             .get(&command_id)
             .map(String::as_str)
             .unwrap_or("UNBOUND")
+    }
+
+    pub fn pad_chord(&self, command_id: u32) -> &str {
+        self.pad_chords
+            .get(&command_id)
+            .map(String::as_str)
+            .unwrap_or("-")
     }
 }
 
@@ -419,8 +465,9 @@ pub(crate) fn apply_option_intents(
                 options.touch();
                 focus.widget = Some("options/player_name".into());
             }
-            UiIntent::BeginBinding { id } => {
+            UiIntent::BeginBinding { id, pad } => {
                 bindings.listening = Some(*id);
+                bindings.listening_pad = *pad;
                 bindings.revision = bindings.revision.wrapping_add(1);
             }
             UiIntent::SetBinding { id, .. } => {
@@ -466,6 +513,36 @@ pub(crate) fn apply_option_intents(
                     (SettingKey::PlayerName, SettingValue::Text(value)) => {
                         let value: String = value.trim().chars().take(16).collect();
                         !value.is_empty() && replace(&mut settings.player_name, value)
+                    }
+                    (SettingKey::PadLayout, SettingValue::Float(value)) => {
+                        replace(&mut settings.pad_layout, *value as u8)
+                    }
+                    (SettingKey::PadStickLayout, SettingValue::Float(value)) => {
+                        replace(&mut settings.pad_stick_layout, (*value as u8).min(3))
+                    }
+                    (SettingKey::PadCurve, SettingValue::Float(value)) => {
+                        replace(&mut settings.pad_curve, (*value as u8).min(2))
+                    }
+                    (SettingKey::PadAimAssist, SettingValue::Float(value)) => {
+                        replace(&mut settings.pad_aim_assist, (*value as u8).min(2))
+                    }
+                    (SettingKey::PadSensitivity, SettingValue::Float(value)) if value.is_finite() => {
+                        replace(&mut settings.pad_sensitivity, value.clamp(1.0, 10.0))
+                    }
+                    (SettingKey::PadAdsSensitivity, SettingValue::Float(value)) if value.is_finite() => {
+                        replace(&mut settings.pad_ads_sensitivity, value.clamp(0.5, 1.5))
+                    }
+                    (SettingKey::PadDeadzoneLeft, SettingValue::Float(value)) if value.is_finite() => {
+                        replace(&mut settings.pad_deadzone_left, value.clamp(0.0, 0.4))
+                    }
+                    (SettingKey::PadDeadzoneRight, SettingValue::Float(value)) if value.is_finite() => {
+                        replace(&mut settings.pad_deadzone_right, value.clamp(0.0, 0.4))
+                    }
+                    (SettingKey::PadInvert, SettingValue::Bool(value)) => {
+                        replace(&mut settings.pad_invert, *value)
+                    }
+                    (SettingKey::PadVibration, SettingValue::Bool(value)) => {
+                        replace(&mut settings.pad_vibration, *value)
                     }
                     _ => false,
                 };

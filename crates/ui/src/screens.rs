@@ -1231,10 +1231,12 @@ const MOVEMENT_BINDS: &[(u32, &str)] = &[
     (31, "Move Left"),
     (33, "Move Right"),
     (25, "Stand/Jump"),
-    (72, "Crouch"),
-    (74, "Prone"),
+    (35, "Crouch"),
+    (53, "Prone"),
+    (23, "Change Stance"),
     (59, "Sprint"),
     (47, "Hold Breath"),
+    (9, "Sprint/Hold Breath"),
     (37, "Turn Left"),
     (39, "Turn Right"),
     (45, "Hold Strafe"),
@@ -1243,12 +1245,18 @@ const MOVEMENT_BINDS: &[(u32, &str)] = &[
 const ACTION_BINDS: &[(u32, &str)] = &[
     (1, "Fire Weapon"),
     (57, "Aim Down the Sight"),
+    (13, "Aim (hold)"),
     (51, "Reload"),
+    (11, "Reload/Use"),
     (66, "Switch Weapon"),
     (3, "Melee"),
     (49, "Use"),
     (5, "Throw Frag/Use Equipment"),
     (7, "Throw Special Grenade"),
+    (15, "Action Slot 1"),
+    (17, "Action Slot 2"),
+    (19, "Action Slot 3"),
+    (21, "Killstreak"),
     (61, "Show Objectives/Scores"),
     (63, "Voice Chat"),
 ];
@@ -1256,7 +1264,6 @@ const ACTION_BINDS: &[(u32, &str)] = &[
 const LOOK_BINDS: &[(u32, &str)] = &[
     (41, "Look Up"),
     (43, "Look Down"),
-    (71, "Center View"),
     (76, "Toggle Aim Down Sight"),
     (77, "Leave Aim Down Sight"),
 ];
@@ -1436,6 +1443,16 @@ pub fn options(host: Host<'_>) -> Screen {
                 "Name used by the local player (16 characters maximum).",
             ));
         }
+        OptionsTab::Controller => {
+            widgets.push(retail_title(
+                "options/page_title",
+                248.0,
+                28.0,
+                240.0,
+                "CONTROLLER",
+            ));
+            widgets.extend(controller_rows(settings));
+        }
         OptionsTab::Game => {
             widgets.push(retail_title(
                 "options/page_title",
@@ -1541,6 +1558,154 @@ fn resolution_picker(settings: &frame::GameSettings, state: &OptionsState) -> Ve
     widgets
 }
 
+/// A cycler through `names`, stepping a numeric setting.
+fn choice_cycler(
+    id: &str,
+    y: f32,
+    label: &str,
+    names: &[&str],
+    current: usize,
+    key: crate::SettingKey,
+    help: &str,
+) -> Widget {
+    let n = names.len();
+    let value = |i: usize| crate::SettingValue::Float(i as f32);
+    cycler(
+        id,
+        238.0,
+        y,
+        label,
+        names.get(current).copied().unwrap_or("Custom"),
+        UiIntent::SetSetting { key, value: value((current + 1) % n) },
+        Some(UiIntent::SetSetting { key, value: value((current + n - 1) % n) }),
+        help,
+    )
+}
+
+fn controller_rows(settings: &frame::GameSettings) -> Vec<Widget> {
+    use crate::SettingKey as K;
+    let layout = if settings.pad_layout == frame::GameSettings::PAD_LAYOUT_CUSTOM {
+        usize::MAX
+    } else {
+        usize::from(settings.pad_layout)
+    };
+    let row = |i: usize| 56.0 + i as f32 * 22.0;
+    vec![
+        choice_cycler(
+            "options/pad_layout",
+            row(0),
+            "Button Layout",
+            &PAD_LAYOUTS,
+            layout,
+            K::PadLayout,
+            "MW2's console button layouts. Rebinding a button makes it Custom.",
+        ),
+        choice_cycler(
+            "options/pad_stick_layout",
+            row(1),
+            "Stick Layout",
+            &["Default", "Southpaw", "Legacy", "Legacy Southpaw"],
+            usize::from(settings.pad_stick_layout),
+            K::PadStickLayout,
+            "Which stick moves and which looks.",
+        ),
+        slider(
+            "options/pad_sensitivity",
+            238.0,
+            row(2),
+            "Look Sensitivity",
+            settings.pad_sensitivity,
+            1.0,
+            10.0,
+            0.5,
+            K::PadSensitivity,
+            "How fast the right stick turns. Default: 3.",
+        ),
+        slider(
+            "options/pad_ads_sensitivity",
+            238.0,
+            row(3),
+            "ADS Sensitivity",
+            settings.pad_ads_sensitivity,
+            0.5,
+            1.5,
+            0.05,
+            K::PadAdsSensitivity,
+            "Look speed while aiming down the sight, times the look sensitivity.",
+        ),
+        cycler(
+            "options/pad_invert",
+            238.0,
+            row(4),
+            "Look Inversion",
+            if settings.pad_invert { "Enabled" } else { "Disabled" },
+            UiIntent::SetSetting { key: K::PadInvert, value: crate::SettingValue::Bool(!settings.pad_invert) },
+            None,
+            "Push up to look down.",
+        ),
+        choice_cycler(
+            "options/pad_curve",
+            row(5),
+            "Response Curve",
+            &["Standard", "Linear", "Dynamic"],
+            usize::from(settings.pad_curve),
+            K::PadCurve,
+            "Standard is slow near the centre for fine aim; Linear follows the stick; Dynamic is quick off the centre.",
+        ),
+        choice_cycler(
+            "options/pad_aim_assist",
+            row(6),
+            "Aim Assist",
+            &["Off", "Slowdown", "Full"],
+            usize::from(settings.pad_aim_assist),
+            K::PadAimAssist,
+            "Slowdown eases the aim over targets; Full also pulls onto a close target when you aim down the sight.",
+        ),
+        cycler(
+            "options/pad_vibration",
+            238.0,
+            row(7),
+            "Vibration",
+            if settings.pad_vibration { "Enabled" } else { "Disabled" },
+            UiIntent::SetSetting { key: K::PadVibration, value: crate::SettingValue::Bool(!settings.pad_vibration) },
+            None,
+            "Controller rumble.",
+        ),
+        slider(
+            "options/pad_deadzone_left",
+            238.0,
+            row(8),
+            "Left Stick Deadzone",
+            settings.pad_deadzone_left,
+            0.0,
+            0.4,
+            0.01,
+            K::PadDeadzoneLeft,
+            "Stick travel ignored around the centre. Raise it if you drift.",
+        ),
+        slider(
+            "options/pad_deadzone_right",
+            238.0,
+            row(9),
+            "Right Stick Deadzone",
+            settings.pad_deadzone_right,
+            0.0,
+            0.4,
+            0.01,
+            K::PadDeadzoneRight,
+            "Stick travel ignored around the centre. Raise it if you drift.",
+        ),
+    ]
+}
+
+const PAD_LAYOUTS: [&str; 5] = [
+    "Default",
+    "Tactical",
+    "Lefty",
+    "Bumper Jumper",
+    "Bumper Jumper Tactical",
+];
+
 fn options_bind_rows(host: Host<'_>, group: OptionsControlGroup) -> Vec<Widget> {
     let fallback = BindingView::default();
     let bindings = host.bindings.unwrap_or(&fallback);
@@ -1557,31 +1722,46 @@ fn options_bind_rows(host: Host<'_>, group: OptionsControlGroup) -> Vec<Widget> 
         260.0,
         group.title(),
     ));
+    widgets.push(right_label("options/binds/keyboard_head", 380.0, 44.0, 116.0, 12.0, 0.2, "KEYBOARD"));
+    widgets.push(right_label("options/binds/pad_head", 514.0, 44.0, 90.0, 12.0, 0.2, "CONTROLLER"));
     for (i, (command_id, label)) in rows.iter().enumerate() {
+        let y = 56.0 + i as f32 * 20.0;
         let listening = bindings.listening == Some(*command_id);
-        let chord = if listening {
-            "PRESS A KEY"
-        } else {
-            bindings.chord(*command_id)
-        };
+        let keyboard_listening = listening && !bindings.listening_pad;
+        let pad_listening = listening && bindings.listening_pad;
+        let chord = if keyboard_listening { "PRESS A KEY" } else { bindings.chord(*command_id) };
         widgets.push(bind_control(
             &format!("options/binds/{command_id}"),
             228.0,
-            56.0 + i as f32 * 20.0,
+            y,
+            270.0,
             label,
             *command_id,
             chord,
-            listening,
+            keyboard_listening,
+            false,
+        ));
+        let pad_chord = if pad_listening { "PRESS" } else { bindings.pad_chord(*command_id) };
+        widgets.push(bind_control(
+            &format!("options/padbinds/{command_id}"),
+            502.0,
+            y,
+            102.0,
+            "",
+            *command_id,
+            pad_chord,
+            pad_listening,
+            true,
         ));
     }
     widgets.push(label(
         "options/binds/help",
-        326.0,
+        296.0,
         432.0,
-        260.0,
+        300.0,
         18.0,
         0.25,
-        "Press ENTER or CLICK to change",
+        "ENTER, CLICK or A to change · RIGHT for the controller",
     ));
     widgets
 }
@@ -1661,7 +1841,7 @@ fn options_tabs(selected: OptionsTab) -> Vec<Widget> {
     widgets.push(tinted_panel(
         "options/tab_divider",
         64.0,
-        164.0,
+        54.0 + OptionsTab::ALL.len() as f32 * 22.0,
         148.0,
         1.0,
         [1.0, 1.0, 1.0, 0.2],
@@ -1749,23 +1929,26 @@ fn text_edit(
     widget
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bind_control(
     id: &str,
     x: f32,
     y: f32,
+    width: f32,
     label: &str,
     command_id: u32,
     chord: &str,
     listening: bool,
+    pad: bool,
 ) -> Widget {
     let mut widget = button(
         id,
         x,
         y,
-        350.0,
+        width,
         18.0,
         " ",
-        vec![ScreenCmd::Emit(UiIntent::BeginBinding { id: command_id })],
+        vec![ScreenCmd::Emit(UiIntent::BeginBinding { id: command_id, pad })],
     );
     widget.content = Content::Bind {
         label: label.to_owned(),

@@ -761,6 +761,46 @@ pub fn sample_client_input(
     if frozen {
         actions.mouse_x = 0.0;
         actions.mouse_y = 0.0;
+        actions.pad_move = [0.0; 2];
+        actions.pad_look_rate = [0.0; 2];
+    }
+    // The controller's turn this frame, eased over targets by aim assist:
+    // other players not on the local team, and a block world's mobs.
+    {
+        let dt = cls.frametime_secs();
+        let targets: Vec<([f32; 3], f32)> = ps
+            .filter(|_| actions.pad_aim_assist > 0)
+            .map(|_| {
+                let snapshot = presented.snapshot();
+                let team = |id: sim::ClientId| {
+                    snapshot.and_then(|s| s.meta.for_client(id)).map(|m| m.client_state_team)
+                };
+                let teams = snapshot.is_some_and(|s| s.meta.kind.is_team());
+                let mine = team(local.0);
+                let mut targets: Vec<([f32; 3], f32)> = snapshot
+                    .into_iter()
+                    .flat_map(|s| s.players.iter().map(|(id, _)| *id))
+                    .filter(|id| *id != local.0)
+                    .filter(|id| !teams || team(*id) != mine)
+                    .filter_map(|id| presented.player(id))
+                    .filter(|other| other.pm_type == 0)
+                    .map(|other| ([other.origin[0], other.origin[1], other.origin[2] + 44.0], 16.0))
+                    .collect();
+                targets.extend(sim::voxel::mob_targets());
+                targets
+            })
+            .unwrap_or_default();
+        let (eye, angles) = ps.map_or(([0.0; 3], [0.0; 2]), |ps| {
+            (
+                [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current],
+                [
+                    look.angles[0] as f32 / input_iw4::ANGLE2SHORT,
+                    look.angles[1] as f32 / input_iw4::ANGLE2SHORT,
+                ],
+            )
+        });
+        let ads = actions.client.using_ads || actions.client.kb.speed.active;
+        crate::client::input::pad_aim_assist(&mut actions, eye, angles, &targets, ads, dt);
     }
     let remote_mouse = presented
         .snapshot()
@@ -832,7 +872,14 @@ pub fn sample_client_input(
     let hotbar = minecraft.as_ref().is_some_and(|ui| ui.active);
     if hotbar {
         actions.client.action_slots.clear();
-        actions.client.weapon_cycles.clear();
+        // Switching weapon steps the hotbar.
+        let cycles = std::mem::take(&mut actions.client.weapon_cycles);
+        if let Some(ui) = minecraft.as_mut()
+            && let Some(next) = cycles.last()
+        {
+            let step = if *next { 1 } else { 8 };
+            ui.select = Some((ui.selected + step) % 9);
+        }
         if let (Some(ps), Some(ui)) = (ps.filter(|_| !frozen), minecraft.as_mut())
             && let Some(target) = ui.weapon_request
             && target != select.index
@@ -910,6 +957,10 @@ pub fn sample_client_input(
         }
     }
     let mut cmd = build_usercmd(&mut actions, &look, 0);
+    // Reload/use reloads when nothing usable is in reach.
+    if cmd.buttons & playerstate_iw4::buttons::USE_RELOAD != 0 && ps.is_some_and(|ps| ps.cursor_hint == 0) {
+        cmd.buttons |= playerstate_iw4::buttons::RELOAD;
+    }
     if minecraft.as_ref().is_some_and(|ui| ui.active && ui.holding_item) {
         cmd.buttons &= !(playerstate_iw4::buttons::ATTACK | playerstate_iw4::buttons::ADS);
     }

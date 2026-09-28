@@ -151,8 +151,18 @@ fn update(
     gamepads: Query<Entity, With<Gamepad>>,
     mut state: Local<RumblePlayback>,
     mut output: MessageWriter<GamepadRumbleRequest>,
+    settings: Res<frame::GameSettings>,
 ) {
     let now = clock.time();
+    // Vibration off in the controller options: nothing plays.
+    if !settings.pad_vibration {
+        for _ in requests.read() {}
+        state.active.clear();
+        if let Some((gamepad, _)) = state.output.take() {
+            output.write(GamepadRumbleRequest::Stop { gamepad });
+        }
+        return;
+    }
     let owner = bank.as_ref().and_then(|bank| {
         let meta = presented.snapshot()?.meta.for_client(local.0)?;
         (meta.lifecycle == sim::ClientLifecycle::Alive).then_some((

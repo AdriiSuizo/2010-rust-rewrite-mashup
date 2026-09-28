@@ -1,0 +1,182 @@
+//! The controller: its sticks as movement and turn rates, and its buttons
+//! as menu keys while a menu is up. Its gameplay buttons go through the
+//! bind table with the keyboard's.
+use bevy::input::ButtonInput;
+use bevy::input::gamepad::{Gamepad, GamepadButton};
+use bevy::input::keyboard::KeyCode;
+use bevy::prelude::*;
+
+/// Turn rates, degrees a second, at full deflection and look sensitivity 3.
+const YAW_RATE: f32 = 170.0;
+const PITCH_RATE: f32 = 100.0;
+/// Aiming down the sight turns slower, before the ADS sensitivity.
+const ADS_RATE_SCALE: f32 = 0.55;
+/// Held at full horizontal deflection, the turn speeds up to this much
+/// faster, after `BOOST_DELAY` over `BOOST_RAMP` seconds.
+const BOOST: f32 = 0.6;
+const BOOST_DELAY: f32 = 0.15;
+const BOOST_RAMP: f32 = 0.3;
+
+/// The sticks after their deadzones, as the stick layout assigns them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Sticks {
+    /// Forward and right.
+    pub movement: Vec2,
+    /// Right and up.
+    pub look: Vec2,
+}
+
+/// A stick with its centre `deadzone` cut out and the rest rescaled to
+/// 0..1, keeping its direction.
+fn radial(stick: Vec2, deadzone: f32) -> Vec2 {
+    let length = stick.length();
+    if length <= deadzone || length <= f32::EPSILON {
+        return Vec2::ZERO;
+    }
+    let scaled = ((length - deadzone) / (1.0 - deadzone).max(0.01)).min(1.0);
+    stick / length * scaled
+}
+
+pub(crate) fn sticks(pad: &Gamepad, settings: &frame::GameSettings) -> Sticks {
+    let left = radial(pad.left_stick(), settings.pad_deadzone_left);
+    let right = radial(pad.right_stick(), settings.pad_deadzone_right);
+    match settings.pad_stick_layout {
+        // Southpaw: the sticks swap.
+        1 => Sticks { movement: Vec2::new(right.y, right.x), look: left },
+        // Legacy: the left stick moves forward and turns, the right looks
+        // up and down and strafes.
+        2 => Sticks { movement: Vec2::new(left.y, right.x), look: Vec2::new(left.x, right.y) },
+        3 => Sticks { movement: Vec2::new(right.y, left.x), look: Vec2::new(right.x, left.y) },
+        _ => Sticks { movement: Vec2::new(left.y, left.x), look: right },
+    }
+}
+
+/// The response to a look stick's deflection, 0..1.
+fn curve(deflection: f32, kind: u8) -> f32 {
+    let d = deflection.clamp(0.0, 1.0);
+    match kind {
+        1 => d,
+        2 => 1.0 - (1.0 - d) * (1.0 - d),
+        _ => 0.35 * d + 0.65 * d * d * d,
+    }
+}
+
+/// Turn rates, pitch and yaw in degrees a second, for a look stick.
+/// `boost_time` is how long the stick has been held fully sideways.
+pub(crate) fn look_rates(look: Vec2, settings: &frame::GameSettings, ads: bool, boost_time: &mut f32, dt: f32) -> [f32; 2] {
+    let deflection = look.length();
+    if deflection <= f32::EPSILON {
+        *boost_time = 0.0;
+        return [0.0; 2];
+    }
+    let shaped = look / deflection * curve(deflection, settings.pad_curve);
+    if look.x.abs() > 0.95 && !ads {
+        *boost_time += dt;
+    } else {
+        *boost_time = 0.0;
+    }
+    let boost = 1.0 + BOOST * ((*boost_time - BOOST_DELAY) / BOOST_RAMP).clamp(0.0, 1.0);
+    let mut scale = settings.pad_sensitivity / frame::GameSettings::PAD_SENSITIVITY_DEFAULT;
+    if ads {
+        scale *= ADS_RATE_SCALE * settings.pad_ads_sensitivity;
+    }
+    let pitch_sign = if settings.pad_invert { 1.0 } else { -1.0 };
+    [pitch_sign * shaped.y * PITCH_RATE * scale, -shaped.x * YAW_RATE * boost * scale]
+}
+
+/// Menu directions repeat while held: after the first press, then this
+/// often.
+const REPEAT_DELAY: f32 = 0.4;
+const REPEAT_EVERY: f32 = 0.12;
+
+#[derive(Default)]
+pub(crate) struct PadMenuKeys {
+    /// Keys held on the controller's behalf.
+    held: Vec<KeyCode>,
+    /// A direction pulsed last frame, released now.
+    pulsed: Option<KeyCode>,
+    /// The direction held and when it next repeats.
+    direction: Option<(KeyCode, f32)>,
+}
+
+/// While a menu is up the controller drives it as the keyboard does: the
+/// D-pad or left stick moves, A accepts, B backs out. Start opens and
+/// closes the menu anywhere.
+pub(crate) fn drive_menus_with_pad(
+    gamepads: Query<&Gamepad>,
+    menu: Res<ui::MenuEnabled>,
+    pending: Res<crate::user_settings::PendingMenuBinding>,
+    time: Res<Time>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut state: Local<PadMenuKeys>,
+) {
+    if let Some(key) = state.pulsed.take() {
+        keys.release(key);
+    }
+    let pad = gamepads.iter().next();
+    let capturing = pending.capturing_pad();
+    let mut wanted: Vec<KeyCode> = Vec::new();
+    if let Some(pad) = pad.filter(|_| !capturing) {
+        if pad.pressed(GamepadButton::Start) {
+            wanted.push(KeyCode::Escape);
+        }
+        if menu.0 {
+            if pad.pressed(GamepadButton::South) {
+                wanted.push(KeyCode::Enter);
+            }
+            if pad.pressed(GamepadButton::East) {
+                wanted.push(KeyCode::Escape);
+            }
+            let stick = pad.left_stick();
+            let direction = if pad.pressed(GamepadButton::DPadUp) || stick.y > 0.6 {
+                Some(KeyCode::ArrowUp)
+            } else if pad.pressed(GamepadButton::DPadDown) || stick.y < -0.6 {
+                Some(KeyCode::ArrowDown)
+            } else if pad.pressed(GamepadButton::DPadLeft) || stick.x < -0.6 {
+                Some(KeyCode::ArrowLeft)
+            } else if pad.pressed(GamepadButton::DPadRight) || stick.x > 0.6 {
+                Some(KeyCode::ArrowRight)
+            } else {
+                None
+            };
+            let now = time.elapsed_secs();
+            let fire = match (direction, state.direction) {
+                (Some(key), Some((held, next))) if key == held => {
+                    if now >= next {
+                        state.direction = Some((key, now + REPEAT_EVERY));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                (Some(key), _) => {
+                    state.direction = Some((key, now + REPEAT_DELAY));
+                    true
+                }
+                (None, _) => {
+                    state.direction = None;
+                    false
+                }
+            };
+            if fire && let Some(key) = direction {
+                keys.press(key);
+                state.pulsed = Some(key);
+            }
+        } else {
+            state.direction = None;
+        }
+    }
+    wanted.dedup();
+    let held = std::mem::take(&mut state.held);
+    for key in &held {
+        if !wanted.contains(key) {
+            keys.release(*key);
+        }
+    }
+    for key in &wanted {
+        if !held.contains(key) {
+            keys.press(*key);
+        }
+    }
+    state.held = wanted;
+}

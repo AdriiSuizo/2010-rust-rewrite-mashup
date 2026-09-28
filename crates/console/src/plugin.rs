@@ -309,6 +309,18 @@ impl Plugin for ConsolePlugin {
             .add_systems(PreUpdate, feed_console_keyboard.before(InputSystems))
             .add_systems(
                 PreUpdate,
+                crate::gamepad::drive_menus_with_pad
+                    .after(InputSystems)
+                    .before(publish_client_action_input),
+            )
+            .add_systems(
+                Update,
+                crate::user_settings::apply_pad_layout_setting
+                    .after(crate::user_settings::consume_menu_binding)
+                    .before(crate::user_settings::sync_binding_view),
+            )
+            .add_systems(
+                PreUpdate,
                 (
                     handle_console_input,
                     handle_scrollback_pointer,
@@ -428,7 +440,12 @@ fn publish_client_action_input(
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
+    (gamepads, mut boost_time): (Query<&bevy::input::gamepad::Gamepad>, Local<f32>),
 ) {
+    let pad = gamepads.iter().next();
+    out.pad_aim_assist = settings.pad_aim_assist;
+    out.pad_move = [0.0; 2];
+    out.pad_look_rate = [0.0; 2];
     let inventory_open = minecraft.as_ref().is_some_and(|ui| ui.active && ui.inventory_open);
     skate.input_blocked = console.open || menu.0;
     if !skate.input_blocked && keys.just_pressed(KeyCode::KeyJ) { skate.toggle_requested = true; }
@@ -480,7 +497,13 @@ fn publish_client_action_input(
         return;
     }
 
-    let inputs = BindInputs::new(&keys, &mouse_buttons);
+    if let Some(pad) = pad {
+        let sticks = crate::gamepad::sticks(pad, &settings);
+        let ads = out.client.using_ads || out.client.kb.speed.active;
+        out.pad_move = [sticks.movement.x, sticks.movement.y];
+        out.pad_look_rate = crate::gamepad::look_rates(sticks.look, &settings, ads, &mut boost_time, time.delta_secs());
+    }
+    let inputs = BindInputs::new(&keys, &mouse_buttons).with_pad(pad);
     for (button, id) in binds.iter() {
         let key_num = host_keynum(button);
         if key_num >= input_iw4::KEY_COUNT {

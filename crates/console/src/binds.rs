@@ -3,6 +3,7 @@ use input_iw4::{command_id_lookup, command_name};
 use std::collections::HashMap;
 
 use bevy::input::ButtonInput;
+use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::input::keyboard::KeyCode;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::Resource;
@@ -73,28 +74,229 @@ pub const BINDABLE_KEYS: &[&str] = &[
     "mouse3",
     "mouse4",
     "mouse5",
+    "BUTTON_A",
+    "BUTTON_B",
+    "BUTTON_X",
+    "BUTTON_Y",
+    "BUTTON_LSHLDR",
+    "BUTTON_RSHLDR",
+    "BUTTON_LTRIG",
+    "BUTTON_RTRIG",
+    "BUTTON_LSTICK",
+    "BUTTON_RSTICK",
+    "DPAD_UP",
+    "DPAD_DOWN",
+    "DPAD_LEFT",
+    "DPAD_RIGHT",
+    "BUTTON_BACK",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindButton {
     Key(KeyCode),
     Mouse(MouseButton),
+    Pad(PadButton),
+}
+
+impl BindButton {
+    pub fn is_pad(self) -> bool {
+        matches!(self, Self::Pad(_))
+    }
+}
+
+/// A controller button, named as MW2's console builds name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PadButton {
+    A,
+    B,
+    X,
+    Y,
+    LeftBumper,
+    RightBumper,
+    LeftTrigger,
+    RightTrigger,
+    LeftStick,
+    RightStick,
+    DpadUp,
+    DpadDown,
+    DpadLeft,
+    DpadRight,
+    Back,
+    Start,
+}
+
+impl PadButton {
+    pub const ALL: [Self; 16] = [
+        Self::A,
+        Self::B,
+        Self::X,
+        Self::Y,
+        Self::LeftBumper,
+        Self::RightBumper,
+        Self::LeftTrigger,
+        Self::RightTrigger,
+        Self::LeftStick,
+        Self::RightStick,
+        Self::DpadUp,
+        Self::DpadDown,
+        Self::DpadLeft,
+        Self::DpadRight,
+        Self::Back,
+        Self::Start,
+    ];
+
+    pub const fn gamepad_button(self) -> GamepadButton {
+        match self {
+            Self::A => GamepadButton::South,
+            Self::B => GamepadButton::East,
+            Self::X => GamepadButton::West,
+            Self::Y => GamepadButton::North,
+            Self::LeftBumper => GamepadButton::LeftTrigger,
+            Self::RightBumper => GamepadButton::RightTrigger,
+            Self::LeftTrigger => GamepadButton::LeftTrigger2,
+            Self::RightTrigger => GamepadButton::RightTrigger2,
+            Self::LeftStick => GamepadButton::LeftThumb,
+            Self::RightStick => GamepadButton::RightThumb,
+            Self::DpadUp => GamepadButton::DPadUp,
+            Self::DpadDown => GamepadButton::DPadDown,
+            Self::DpadLeft => GamepadButton::DPadLeft,
+            Self::DpadRight => GamepadButton::DPadRight,
+            Self::Back => GamepadButton::Select,
+            Self::Start => GamepadButton::Start,
+        }
+    }
+
+    pub fn from_gamepad_button(button: GamepadButton) -> Option<Self> {
+        Self::ALL.into_iter().find(|pad| pad.gamepad_button() == button)
+    }
+
+    /// The console key name, as `bind` takes it.
+    pub const fn console_name(self) -> &'static str {
+        match self {
+            Self::A => "BUTTON_A",
+            Self::B => "BUTTON_B",
+            Self::X => "BUTTON_X",
+            Self::Y => "BUTTON_Y",
+            Self::LeftBumper => "BUTTON_LSHLDR",
+            Self::RightBumper => "BUTTON_RSHLDR",
+            Self::LeftTrigger => "BUTTON_LTRIG",
+            Self::RightTrigger => "BUTTON_RTRIG",
+            Self::LeftStick => "BUTTON_LSTICK",
+            Self::RightStick => "BUTTON_RSTICK",
+            Self::DpadUp => "DPAD_UP",
+            Self::DpadDown => "DPAD_DOWN",
+            Self::DpadLeft => "DPAD_LEFT",
+            Self::DpadRight => "DPAD_RIGHT",
+            Self::Back => "BUTTON_BACK",
+            Self::Start => "BUTTON_START",
+        }
+    }
+
+    /// The short label the controls screen shows.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::LeftBumper => "LB",
+            Self::RightBumper => "RB",
+            Self::LeftTrigger => "LT",
+            Self::RightTrigger => "RT",
+            Self::LeftStick => "LS",
+            Self::RightStick => "RS",
+            Self::DpadUp => "D-UP",
+            Self::DpadDown => "D-DOWN",
+            Self::DpadLeft => "D-LEFT",
+            Self::DpadRight => "D-RIGHT",
+            Self::Back => "BACK",
+            Self::Start => "START",
+        }
+    }
+
+    const fn keynum(self) -> usize {
+        190 + self as usize
+    }
+}
+
+/// MW2's console button layouts, as its controls menu offers them.
+pub const PAD_LAYOUT_NAMES: [&str; 5] = [
+    "Default",
+    "Tactical",
+    "Lefty",
+    "Bumper Jumper",
+    "Bumper Jumper Tactical",
+];
+
+/// A layout's buttons and the commands they drive.
+pub fn pad_layout(layout: usize) -> Vec<(PadButton, &'static str)> {
+    use PadButton::*;
+    let mut binds = vec![
+        (RightTrigger, "+attack"),
+        (LeftTrigger, "+speed_throw"),
+        (RightBumper, "+frag"),
+        (LeftBumper, "+smoke"),
+        (A, "+gostand"),
+        (B, "+stance"),
+        (X, "+usereload"),
+        (Y, "weapnext"),
+        (LeftStick, "+breath_sprint"),
+        (RightStick, "+melee"),
+        (DpadUp, "+actionslot 1"),
+        (DpadDown, "+actionslot 2"),
+        (DpadLeft, "+actionslot 3"),
+        (DpadRight, "+actionslot 4"),
+        (Back, "+scores"),
+    ];
+    let mut set = |button: PadButton, command: &'static str| {
+        binds.retain(|(b, _)| *b != button);
+        binds.push((button, command));
+    };
+    let tactical = |set: &mut dyn FnMut(PadButton, &'static str)| {
+        set(B, "+melee");
+        set(RightStick, "+stance");
+    };
+    match layout {
+        1 => tactical(&mut set),
+        2 => {
+            set(LeftTrigger, "+attack");
+            set(RightTrigger, "+speed_throw");
+            set(LeftBumper, "+frag");
+            set(RightBumper, "+smoke");
+        }
+        3 | 4 => {
+            set(LeftBumper, "+gostand");
+            set(A, "+smoke");
+            if layout == 4 {
+                tactical(&mut set);
+            }
+        }
+        _ => {}
+    }
+    binds
 }
 
 pub struct BindInputs<'a> {
     pub keys: &'a ButtonInput<KeyCode>,
     pub mouse: &'a ButtonInput<MouseButton>,
+    pub pad: Option<&'a Gamepad>,
 }
 
 impl<'a> BindInputs<'a> {
     pub fn new(keys: &'a ButtonInput<KeyCode>, mouse: &'a ButtonInput<MouseButton>) -> Self {
-        Self { keys, mouse }
+        Self { keys, mouse, pad: None }
+    }
+
+    pub fn with_pad(mut self, pad: Option<&'a Gamepad>) -> Self {
+        self.pad = pad;
+        self
     }
 
     pub fn pressed(&self, button: BindButton) -> bool {
         match button {
             BindButton::Key(key) => self.keys.pressed(key),
             BindButton::Mouse(btn) => self.mouse.pressed(btn),
+            BindButton::Pad(btn) => self.pad.is_some_and(|pad| pad.pressed(btn.gamepad_button())),
         }
     }
 
@@ -102,6 +304,9 @@ impl<'a> BindInputs<'a> {
         match button {
             BindButton::Key(key) => self.keys.just_pressed(key),
             BindButton::Mouse(btn) => self.mouse.just_pressed(btn),
+            BindButton::Pad(btn) => {
+                self.pad.is_some_and(|pad| pad.just_pressed(btn.gamepad_button()))
+            }
         }
     }
 
@@ -109,6 +314,9 @@ impl<'a> BindInputs<'a> {
         match button {
             BindButton::Key(key) => self.keys.just_released(key),
             BindButton::Mouse(btn) => self.mouse.just_released(btn),
+            BindButton::Pad(btn) => {
+                self.pad.is_some_and(|pad| pad.just_released(btn.gamepad_button()))
+            }
         }
     }
 }
@@ -122,6 +330,7 @@ impl KeyBinds {
     pub fn apply_defaults(&mut self) {
         self.map.clear();
         let _ = self.apply_script(DEFAULT_CONTROLS);
+        self.apply_pad_layout(0);
     }
 
     pub fn apply_script(&mut self, script: &str) -> Vec<String> {
@@ -183,6 +392,28 @@ impl KeyBinds {
 
     pub fn clear_all(&mut self) {
         self.map.clear();
+    }
+
+    /// Unbinds a command from the keyboard and mouse, or from the
+    /// controller, leaving the other's binding alone.
+    pub fn clear_command_on(&mut self, id: u32, pad: bool) -> bool {
+        let before = self.map.len();
+        self.map.retain(|button, bound| *bound != id || button.is_pad() != pad);
+        self.map.len() != before
+    }
+
+    /// Replaces every controller binding with a console button layout.
+    pub fn apply_pad_layout(&mut self, layout: usize) {
+        self.map.retain(|button, _| !button.is_pad());
+        for (button, command) in pad_layout(layout) {
+            if let Some(id) = command_id_lookup(command) {
+                self.set(BindButton::Pad(button), id);
+            }
+        }
+    }
+
+    pub fn has_pad_binds(&self) -> bool {
+        self.map.keys().any(|button| button.is_pad())
     }
 
     pub fn get(&self, button: BindButton) -> Option<u32> {
@@ -269,6 +500,7 @@ pub fn host_keynum(button: BindButton) -> usize {
         BindButton::Mouse(MouseButton::Back) => 183,
         BindButton::Mouse(MouseButton::Forward) => 184,
         BindButton::Mouse(_) => 185,
+        BindButton::Pad(button) => button.keynum(),
         BindButton::Key(key) => keycode_keynum(key),
     }
 }
@@ -424,7 +656,13 @@ pub fn parse_button_name(name: &str) -> Option<Vec<BindButton>> {
         "mouse3" | "mousemiddle" | "mmb" => BindButton::Mouse(MouseButton::Middle),
         "mouse4" => BindButton::Mouse(MouseButton::Back),
         "mouse5" => BindButton::Mouse(MouseButton::Forward),
-        _ => return None,
+        other => {
+            let upper = other.to_ascii_uppercase();
+            return PadButton::ALL
+                .into_iter()
+                .find(|pad| pad.console_name() == upper || pad.label() == upper)
+                .map(|pad| vec![BindButton::Pad(pad)]);
+        }
     };
     Some(vec![button])
 }
@@ -442,6 +680,7 @@ pub fn display_button(button: BindButton) -> String {
         BindButton::Mouse(MouseButton::Back) => "MOUSE4".into(),
         BindButton::Mouse(MouseButton::Forward) => "MOUSE5".into(),
         BindButton::Mouse(other) => format!("{other:?}"),
+        BindButton::Pad(pad) => pad.console_name().into(),
     }
 }
 

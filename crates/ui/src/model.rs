@@ -148,6 +148,16 @@ pub enum SettingKey {
     Sensitivity,
     InvertMouse,
     PlayerName,
+    PadLayout,
+    PadStickLayout,
+    PadSensitivity,
+    PadAdsSensitivity,
+    PadInvert,
+    PadCurve,
+    PadAimAssist,
+    PadVibration,
+    PadDeadzoneLeft,
+    PadDeadzoneRight,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -191,6 +201,8 @@ pub enum UiIntent {
     },
     BeginBinding {
         id: u32,
+        /// Rebinding the controller's button rather than the keyboard's.
+        pad: bool,
     },
     SetSetting {
         key: SettingKey,

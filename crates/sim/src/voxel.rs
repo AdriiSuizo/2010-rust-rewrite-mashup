@@ -180,6 +180,28 @@ pub(crate) fn mob_hitloc(up: f32) -> u8 {
     }
 }
 
+/// The world's mobs as aim assist sees them: each box's centre in map
+/// units and its half width.
+pub fn mob_targets() -> Vec<([f32; 3], f32)> {
+    let Ok(world) = WORLD.read() else {
+        return Vec::new();
+    };
+    let Some(origin) = world.as_ref().map(|w| w.origin) else {
+        return Vec::new();
+    };
+    let Ok(boxes) = MOB_BOXES.read() else {
+        return Vec::new();
+    };
+    boxes
+        .iter()
+        .map(|(_, b)| {
+            let centre = [(b[0] + b[3]) * 0.5, (b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5];
+            let half = ((b[3] - b[0]).max(b[5] - b[2]) * 0.5) as f32 * BLOCK;
+            (to_map(origin, centre), half)
+        })
+        .collect()
+}
+
 pub(crate) fn push_mob_shot(key: u64, damage: f32, from: [f32; 3]) {
     let Ok(world) = WORLD.read() else {
         return;

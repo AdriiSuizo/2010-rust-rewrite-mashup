@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
+use bevy::input::gamepad::GamepadButton;
 use bevy::prelude::*;
 use minecraft_terrain::clouds::CloudMask;
 use minecraft_terrain::day_cycle::{DayCycle, Skybox};
@@ -276,6 +277,12 @@ fn celestial_image(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
     Ok(celestial)
 }
 
+/// A controller trigger, held or just pressed: with a block or an empty hand
+/// the right trigger mines and the left places, as the mouse buttons do.
+fn pad_trigger(gamepads: &Query<&bevy::input::gamepad::Gamepad>, button: GamepadButton, just: bool) -> bool {
+    gamepads.iter().any(|pad| if just { pad.just_pressed(button) } else { pad.pressed(button) })
+}
+
 fn seed() -> i64 {
     if let Some(seed) = std::env::var("IW4L_MINECRAFT_SEED")
         .ok()
@@ -307,7 +314,11 @@ fn update(
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
-    (skate, cameras): (Res<frame::SkateMode>, Query<&Transform, With<render_scene::FlyCamera>>),
+    (skate, cameras, gamepads): (
+        Res<frame::SkateMode>,
+        Query<&Transform, With<render_scene::FlyCamera>>,
+        Query<&bevy::input::gamepad::Gamepad>,
+    ),
 ) {
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
@@ -577,11 +588,11 @@ fn update(
             let (yaw, pitch) = (f64::from(mc_yaw).to_radians(), f64::from(ps.viewangles[0]).to_radians());
             glam::DVec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos())
         };
-        if buttons.just_pressed(MouseButton::Left) {
+        if buttons.just_pressed(MouseButton::Left) || pad_trigger(&gamepads, GamepadButton::RightTrigger2, true) {
             hand.swing = Some(0.0);
             entities.punch(eye_block, look, mc_yaw);
         }
-        if buttons.pressed(MouseButton::Left) {
+        if buttons.pressed(MouseButton::Left) || pad_trigger(&gamepads, GamepadButton::RightTrigger2, false) {
             for _ in 0..hand_ticks {
                 if let Some(hit) = player.target(&world.scene, 4.5) {
                     // A hand mines as vanilla's `getDestroyProgress`: a
@@ -597,8 +608,8 @@ fn update(
             }
         }
         hand.place_delay = hand.place_delay.saturating_sub(hand_ticks);
-        let place = buttons.just_pressed(MouseButton::Right)
-            || (buttons.pressed(MouseButton::Right) && hand.place_delay == 0);
+        let place = (buttons.just_pressed(MouseButton::Right) || pad_trigger(&gamepads, GamepadButton::LeftTrigger2, true))
+            || ((buttons.pressed(MouseButton::Right) || pad_trigger(&gamepads, GamepadButton::LeftTrigger2, false)) && hand.place_delay == 0);
         if place {
             hand.place_delay = 4;
             if let Some(pos) = player.place_selected(

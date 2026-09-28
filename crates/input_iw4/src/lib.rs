@@ -236,7 +236,15 @@ pub struct ClientInput {
 
     pub using_ads: bool,
 
+    /// Stance a stance button left the player in: 0 standing, 1 crouched,
+    /// 2 prone.
     pub stance_latch: i32,
+    /// When the held stance button went down, until it goes prone or up.
+    pub stance_pressed_at: Option<i32>,
+    /// The stance button went prone while held; its release changes nothing.
+    pub stance_hold_fired: bool,
+    /// A jump press spent standing up from a stance; its release is ignored.
+    pub gostand_swallowed: bool,
 
     pub weapon_cycles: Vec<bool>,
     pub action_slots: Vec<usize>,
@@ -251,6 +259,9 @@ impl Default for ClientInput {
             kb: KbuttonSet::default(),
             using_ads: false,
             stance_latch: 0,
+            stance_pressed_at: None,
+            stance_hold_fired: false,
+            gostand_swallowed: false,
             weapon_cycles: Vec::new(),
             action_slots: Vec::new(),
             offhand_hold_cancel: false,
@@ -286,7 +297,15 @@ pub fn cl_input_cmd(
         3 | 4 => apply_pair(&mut client.kb.melee, cmd_id, key, now_msec, frame_msec),
         5 | 6 => apply_pair(&mut client.kb.frag, cmd_id, key, now_msec, frame_msec),
         7 | 8 => apply_pair(&mut client.kb.smoke, cmd_id, key, now_msec, frame_msec),
-        9 | 10 => panic!("+breath_sprint kbutton EAX unread; not merged with +sprint"),
+        // One button sprints, or holds breath while aiming; sprinting
+        // stands a crouched player up.
+        9 | 10 => {
+            if pair_down(cmd_id) && client.stance_latch == 1 {
+                client.stance_latch = 0;
+            }
+            apply_pair(&mut client.kb.sprint, cmd_id, key, now_msec, frame_msec);
+            apply_pair(&mut client.kb.holdbreath, cmd_id, key, now_msec, frame_msec);
+        }
         11 | 12 => apply_pair(&mut client.kb.usereload, cmd_id, key, now_msec, frame_msec),
         13 | 14 => {
             apply_pair(&mut client.kb.speed, cmd_id, key, now_msec, frame_msec);
@@ -297,9 +316,25 @@ pub fn cl_input_cmd(
                 client.action_slots.push(((cmd_id - 15) / 2) as usize);
             }
         }
-        23 | 24 => panic!("+stance writes the stance latch; not a movedown alias"),
+        // A tap toggles crouch; holding goes prone (`STANCE_HOLD_MSEC`).
+        23 | 24 => {
+            if pair_down(cmd_id) {
+                client.stance_pressed_at = Some(now_msec);
+                client.stance_hold_fired = false;
+            } else if client.stance_pressed_at.take().is_some() && !client.stance_hold_fired {
+                client.stance_latch = if client.stance_latch == 1 { 0 } else { 1 };
+            }
+        }
+        // Jumping from a stance stands up a step instead of jumping.
         25 | 26 => {
-            apply_pair(&mut client.kb.gostand, cmd_id, key, now_msec, frame_msec);
+            if pair_down(cmd_id) && client.stance_latch != 0 {
+                client.stance_latch -= 1;
+                client.gostand_swallowed = true;
+            } else if !pair_down(cmd_id) && client.gostand_swallowed {
+                client.gostand_swallowed = false;
+            } else {
+                apply_pair(&mut client.kb.gostand, cmd_id, key, now_msec, frame_msec);
+            }
         }
         27 | 28 => apply_pair(&mut client.kb.forward, cmd_id, key, now_msec, frame_msec),
         29 | 30 => apply_pair(&mut client.kb.back, cmd_id, key, now_msec, frame_msec),
@@ -516,8 +551,26 @@ pub fn create_cmd(input: &CreateCmdInput) -> UserCmd {
     }
 }
 
+/// How long the stance button is held before it goes prone.
+pub const STANCE_HOLD_MSEC: i32 = 350;
+
 pub fn sample_move(client: &mut ClientInput, now_msec: i32, frame_msec: u32) -> (u32, MoveAxes) {
-    let bits = key_move_bits(&client.kb, client.using_ads, cmd_buttons(&client.kb));
+    if let Some(at) = client.stance_pressed_at
+        && !client.stance_hold_fired
+        && now_msec.wrapping_sub(at) >= STANCE_HOLD_MSEC
+    {
+        client.stance_latch = 2;
+        client.stance_hold_fired = true;
+    }
+    let mut bits = key_move_bits(&client.kb, client.using_ads, cmd_buttons(&client.kb));
+    // A latched stance, unless a held stance key already says otherwise.
+    if !client.kb.prone.active && !client.kb.movedown.active {
+        match client.stance_latch {
+            1 => bits |= buttons::CROUCH,
+            2 => bits |= buttons::PRONE,
+            _ => {}
+        }
+    }
     let axes = key_move_from_fractions(
         movement_key_state(&mut client.kb.forward, now_msec, frame_msec),
         movement_key_state(&mut client.kb.back, now_msec, frame_msec),

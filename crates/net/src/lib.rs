@@ -55,7 +55,7 @@ pub use client::entity_event_registry::{
 };
 pub use client::frame_census::{ClientPhaseCensus, HUD_STAGE_N, UpdatePhaseCensus};
 pub use client::input::{
-    ClientActionInput, KEY_FRAME_MSEC_MAX, LookState, accumulate_look, build_usercmd,
+    ClientActionInput, KEY_FRAME_MSEC_MAX, LookState, accumulate_look, build_usercmd, pad_aim_assist,
     com_frame_time_msec, idle_usercmd, key_frame_msec, look_angles_from_degrees,
 };
 pub use client::predict::{
