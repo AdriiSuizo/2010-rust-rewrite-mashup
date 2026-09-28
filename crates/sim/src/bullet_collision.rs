@@ -691,6 +691,22 @@ impl EntityCollisionCapabilities {
         self.epoch
     }
 
+    /// Must stay the bounds test `bullet_trace_filtered` applies to each geom.
+    pub(crate) fn ray_may_hit(
+        &self,
+        cmodels: &SimClipCmodels,
+        start: [f32; 3],
+        end: [f32; 3],
+    ) -> bool {
+        let collision = self
+            .dobj
+            .as_ref()
+            .and_then(|state| state.current_collision.as_ref());
+        entity_abs_aabb(&self.linked_brushes, collision, cmodels).is_some_and(|(mins, maxs)| {
+            !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss)
+        })
+    }
+
     pub fn trace_geom(&self) -> EntityCollisionTraceGeom {
         EntityCollisionTraceGeom {
             owner: self.owner,
@@ -2355,10 +2371,18 @@ fn geom_abs_aabb(
     geom: &EntityCollisionTraceGeom,
     cmodels: &SimClipCmodels,
 ) -> Option<([f32; 3], [f32; 3])> {
+    entity_abs_aabb(&geom.linked_brushes, geom.collision.as_ref(), cmodels)
+}
+
+fn entity_abs_aabb(
+    linked_brushes: &[LinkedBrushCollisionBrush],
+    collision: Option<&AuthorityDObjCollision>,
+    cmodels: &SimClipCmodels,
+) -> Option<([f32; 3], [f32; 3])> {
     let mut mins = [f32::MAX; 3];
     let mut maxs = [f32::MIN; 3];
     let mut any = false;
-    for brush in &geom.linked_brushes {
+    for brush in linked_brushes {
         let Some(cmodel) = clipmap_iw4::clip_handle_to_model(&cmodels.models, brush.cmodel_handle)
         else {
             continue;
@@ -2367,7 +2391,7 @@ fn geom_abs_aabb(
         expand_aabb(&mut mins, &mut maxs, bmin, bmax);
         any = true;
     }
-    if let Some(dobj) = geom.collision.as_ref() {
+    if let Some(dobj) = collision {
         for bone in &dobj.bones {
             let (bmin, bmax) = obb_world_aabb(bone);
             expand_aabb(&mut mins, &mut maxs, bmin, bmax);

@@ -2799,7 +2799,15 @@ impl SimState {
         query: crate::bullet_collision::BulletTraceQuery,
         poses: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::TraceOutcome {
-        let geoms = self.current_entity_trace_geoms();
+        let geoms: Vec<EntityCollisionTraceGeom> = self
+            .entity_collision_capabilities
+            .iter()
+            .filter(|capabilities| {
+                capabilities.ray_may_hit(&self.content.data.clip_cmodels, query.start, query.end)
+                    && self.objectives.collision_active(capabilities.owner)
+            })
+            .map(EntityCollisionCapabilities::trace_geom)
+            .collect();
         let default = [];
         let players = poses.unwrap_or_else(|| {
             self.collision_history
@@ -2826,14 +2834,6 @@ impl SimState {
         query: crate::bullet_collision::BulletTraceQuery,
     ) -> crate::bullet_collision::TraceOutcome {
         self.bullet_trace(query, None)
-    }
-
-    fn current_entity_trace_geoms(&self) -> Vec<EntityCollisionTraceGeom> {
-        self.entity_collision_capabilities
-            .iter()
-            .filter(|capabilities| self.objectives.collision_active(capabilities.owner))
-            .map(EntityCollisionCapabilities::trace_geom)
-            .collect()
     }
 
     pub fn clip_brush_count(&self) -> usize {

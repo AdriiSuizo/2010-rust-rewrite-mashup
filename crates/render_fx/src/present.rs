@@ -661,14 +661,16 @@ fn eval_pending_collide(
     out
 }
 
+const COLLIDE_JOBS_PER_WORKER: usize = 16;
+
 fn collide_worker_count(jobs: usize) -> usize {
-    if jobs == 0 {
-        return 1;
-    }
-    std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(1).max(1))
-        .unwrap_or(1)
-        .min(jobs)
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let threads = *THREADS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1).max(1))
+            .unwrap_or(1)
+    });
+    threads.min(jobs / COLLIDE_JOBS_PER_WORKER).max(1)
 }
 
 fn run_collide_jobs(

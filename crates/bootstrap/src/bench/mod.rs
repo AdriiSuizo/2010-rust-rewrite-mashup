@@ -133,6 +133,20 @@ pub fn insert(
     let _ = ARTIFACTS.set(artifacts.to_path_buf());
     arm_exit_hook();
     app.add_systems(Last, (milestones::poll, facts::collect));
+    #[cfg(not(unix))]
+    app.add_systems(PostUpdate, report_on_app_exit);
+}
+
+/// `std::process::exit` on Windows runs no `atexit` handler: report from
+/// `PostUpdate` of the frame that sent `AppExit`, before `Last` exits.
+#[cfg(not(unix))]
+fn report_on_app_exit(mut exit: MessageReader<AppExit>) {
+    if exit.read().last().is_none() {
+        return;
+    }
+    if let Some(artifacts) = ARTIFACTS.get() {
+        report(artifacts, None);
+    }
 }
 
 /// Every exit ends in `std::process::exit` (`console::exit_process`),

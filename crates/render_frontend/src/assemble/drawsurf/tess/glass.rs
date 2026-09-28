@@ -54,6 +54,8 @@ pub struct GfxGlassMeshDraw {
 
     pub origin: [f32; 3],
 
+    pub radius: f32,
+
     pub reflection_probe_index: u8,
 }
 
@@ -98,6 +100,7 @@ pub struct GfxGlassMeshPlan {
 
     pub applied: Vec<(u32, u8)>,
     pub range_share: Option<Arc<Vec<(u32, u32)>>>,
+    pub bounds_share: Option<Arc<Vec<[f32; 4]>>>,
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -149,6 +152,7 @@ impl GfxGlassMeshPlan {
         super::reset_rows(&mut self.vertices);
         super::reset_rows(&mut self.indices);
         self.range_share = None;
+        self.bounds_share = None;
         self.materials.clear();
         self.draws.clear();
         self.skip_why = None;
@@ -175,6 +179,15 @@ impl GfxGlassMeshPlan {
             self.draws
                 .iter()
                 .map(|draw| (draw.index_start, draw.index_count)),
+        ));
+        self.bounds_share = Some(Arc::new(
+            self.draws
+                .iter()
+                .map(|draw| {
+                    let [x, y, z] = draw.origin;
+                    [x, y, z, draw.radius]
+                })
+                .collect(),
         ));
     }
 
@@ -396,6 +409,19 @@ impl GfxGlassMeshPlan {
             return;
         };
         let color_rgba = fx_glass_scale_color_alpha(fx_glass_def_color_rgba(def), fade);
+        let origin = fx_glass_place_origin(place);
+        let radius = slab_v
+            .iter()
+            .take(nv)
+            .map(|v| {
+                let d = [
+                    v.xyz[0] - origin[0],
+                    v.xyz[1] - origin[1],
+                    v.xyz[2] - origin[2],
+                ];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+            })
+            .fold(0.0f32, f32::max);
         let base = self.vertices.len() as u32;
         for v in slab_v.iter().take(nv) {
             self.verts_mut().push(fx_pack_code_mesh_vertex_signed(
@@ -418,7 +444,6 @@ impl GfxGlassMeshPlan {
             material_sorted_index: Some(ordinal.get()),
         });
         let init_index = fx_glass_state_init_index(state);
-        let origin = fx_glass_place_origin(place);
         self.draws.push(GfxGlassMeshDraw {
             material,
             index_start,
@@ -435,6 +460,7 @@ impl GfxGlassMeshPlan {
             init_index,
             piece: piece as u16,
             origin,
+            radius,
             reflection_probe_index: 0,
         });
         if applied_state == 1 {
