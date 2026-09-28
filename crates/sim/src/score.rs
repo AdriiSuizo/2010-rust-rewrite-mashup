@@ -165,7 +165,7 @@ pub(crate) fn apply_death_score(
             .unwrap_or((0, 0, 0));
 
         let score_limit = world.bootstrap_ref().score_limit;
-        if score_limit > 0 && score >= score_limit {
+        if score_limit > 0 && score >= score_limit && !crate::voxel::active() {
             world.set_pending_final_kill(Some((victim, attacker)));
         }
 
@@ -262,7 +262,7 @@ pub(crate) fn finish_prematch(world: &mut FrameWorld, tick: Tick) {
 }
 
 fn evaluate_time_limit_clock(world: &mut FrameWorld, tick: Tick) {
-    let time_limit_ms = world.bootstrap_ref().time_limit_ms;
+    let time_limit_ms = if crate::voxel::active() { 0 } else { world.bootstrap_ref().time_limit_ms };
     if time_limit_ms == 0 {
         return;
     }
@@ -328,7 +328,8 @@ fn evaluate_player_score_limit_soon(world: &mut FrameWorld, score: i32) {
 }
 
 pub(crate) fn apply_match_end(world: &mut FrameWorld, tick: Tick) {
-    if world.phase() != MatchPhase::Playing {
+    // A Minecraft world plays on with no limits.
+    if world.phase() != MatchPhase::Playing || crate::voxel::active() {
         return;
     }
     let score_limit = world.bootstrap_ref().score_limit;

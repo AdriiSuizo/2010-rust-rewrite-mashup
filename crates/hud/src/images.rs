@@ -149,6 +149,11 @@ pub struct HudImages {
 }
 
 impl HudImages {
+    /// An image made at run time in a namespace, under a name of its own.
+    pub fn insert_runtime_in(&mut self, ns: AssetNamespace, name: &str, handle: Handle<Image>) {
+        self.by_name.insert(iwd_key(ns, name, HudSampling::Color, None), Some(handle));
+    }
+
     /// An image made at run time, drawn under a material name of its own.
     pub fn insert_runtime(&mut self, name: &str, handle: Handle<Image>) {
         self.by_name

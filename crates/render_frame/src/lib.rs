@@ -50,7 +50,7 @@ pub use products::{
 };
 pub use retained::{
     BspCameraLane, LightAttenuationBind, RENDER_FX_DEPTH_HACK, RetainedDrawItem, RetainedDrawKind,
-    T5LightFalloffPack, XMODEL_OBJECT_ID_VIEWMODEL, host_viewmodel_render_fx_flags,
+    T5LightFalloffPack, XMODEL_OBJECT_ID_VIEWMODEL, host_viewmodel_render_fx_flags, DEPTH_HACK_SCENE_ENTNUM, depth_hack_scene_entnum,
 };
 pub use sun_effects::{SunEffectsDef, SunEffectsFrame, angular_lerp};
 pub use sun_shadow::{

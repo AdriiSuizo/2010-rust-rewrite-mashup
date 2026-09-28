@@ -59,6 +59,11 @@ pub struct MinecraftWorldView {
     pub entity_meshes: [(Vec<u8>, Vec<u32>); 4],
     /// The black card behind the inventory's character, in blocks.
     pub backdrop: Option<[[f32; 3]; 4]>,
+    /// The first-person hand or held item: section vertex bytes in view
+    /// space (x right, y up, z back) and indices, with the projection that
+    /// draws them (vanilla's fixed 70 degree hand field of view).
+    pub hand: (Vec<u8>, Vec<u32>),
+    pub hand_clip: [f32; 16],
 }
 
 struct Loaded {
@@ -74,6 +79,18 @@ struct Loaded {
     crack_texture: Arc<image::RgbaImage>,
 }
 
+/// The hand's swing and the timers of mining and placing by hand.
+#[derive(Default)]
+struct HandState {
+    /// Ticks into a swing, while one runs.
+    swing: Option<f32>,
+    /// Seconds towards the next hand-mining and placing tick.
+    clock: f64,
+    /// Ticks until another placement while the button is held
+    /// (`rightClickDelay`).
+    place_delay: u32,
+}
+
 #[derive(Default)]
 struct Runtime {
     loading: Option<mpsc::Receiver<Result<Loaded, String>>>,
@@ -86,6 +103,9 @@ struct Runtime {
     light_volume_age: u32,
     cloud_center: Option<(i32, i32)>,
     mining: crate::minecraft_mining::Mining,
+    minimap: crate::minecraft_minimap::Minimap,
+    hand: HandState,
+    sounds: Option<crate::minecraft_sounds::Sounds>,
     inventory_ui: crate::minecraft_inventory::InventoryUi,
     entities: Option<crate::minecraft_entities::Entities>,
     /// Shape id of each block state already seen.
@@ -95,7 +115,80 @@ struct Runtime {
     was_alive: bool,
 }
 
+/// The player's MW2 body stands in the inventory's character window, on a
+/// black card: placed from this frame's camera and projection where the
+/// window shows, facing the camera, turned and aiming towards the mouse,
+/// and drawn with the card in the view model's depth band so no wall comes
+/// between.
+pub(crate) fn place_inventory_puppet(
+    ui: Res<frame::MinecraftUi>,
+    mut puppet: ResMut<frame::InventoryPuppet>,
+    mut view: ResMut<MinecraftWorldView>,
+    local: Res<net::LocalPresentClient>,
+    presented: Res<net::PresentedSnapshot>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    cameras: Query<&Transform, With<render_scene::FlyCamera>>,
+    lenses: Query<&Projection, With<render_scene::FpvLens>>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    puppet.active = false;
+    view.backdrop = None;
+    render_frame::DEPTH_HACK_SCENE_ENTNUM.store(u32::MAX, Relaxed);
+    let alive = presented.player(local.0).is_some_and(|ps| ps.pm_type == 0);
+    if !(ui.active && ui.inventory_open && alive) {
+        return;
+    }
+    let (Some([cx, cy, box_w, box_h]), Ok(window), Ok(camera), Ok(Projection::Perspective(lens))) =
+        (ui.character_box, windows.single(), cameras.single(), lenses.single())
+    else {
+        return;
+    };
+    let (w, h) = (window.width().max(1.0), window.height().max(1.0));
+    let tan_v = (lens.fov * 0.5).tan();
+    let tan_h = tan_v * if lens.aspect_ratio > 1e-3 { lens.aspect_ratio } else { w / h };
+    let (eye, fwd, right, up) = (camera.translation, *camera.forward(), *camera.right(), *camera.up());
+    // A point `distance` along the view at a window pixel.
+    let at = |px: f32, py: f32, distance: f32| {
+        let (nx, ny) = (px / w * 2.0 - 1.0, 1.0 - py / h * 2.0);
+        eye + (fwd + right * (nx * tan_h) + up * (ny * tan_v)) * distance
+    };
+    let distance = 10.0;
+    let world_h = box_h / h * 2.0 * tan_v * distance;
+    // A standing MW2 player is about 72 units: most of the window.
+    let scale = world_h * 0.82 / 72.0;
+    let feet = at(cx, cy + box_h * 0.5, distance) + up * (world_h * 0.07);
+    // Turned by the mouse as vanilla's
+    // `InventoryScreen.renderEntityInInventoryFollowsMouse` turns its body.
+    let turn = (ui.gaze[0] * 1.2).atan() * 0.7;
+    let x_axis = (-fwd * turn.cos() + right * turn.sin()).normalize_or(-fwd);
+    let y_axis = up.cross(x_axis);
+    puppet.root = Mat4::from_cols(
+        (x_axis * scale).extend(0.0),
+        (y_axis * scale).extend(0.0),
+        (up * scale).extend(0.0),
+        feet.extend(1.0),
+    );
+    puppet.pitch = (ui.gaze[1] * 1.2).atan().to_degrees() * 0.6;
+    puppet.client = local.0.0;
+    puppet.active = true;
+    render_frame::DEPTH_HACK_SCENE_ENTNUM.store(local.0.0, Relaxed);
+    // The card: the window and a margin the panel covers, behind it.
+    let corner = |dx: f32, dy: f32| {
+        let p = at(cx + dx * box_w * 0.6, cy + dy * box_h * 0.6, distance * 1.4);
+        let b = sim::voxel::to_block(view.origin, p.to_array());
+        [b[0] as f32, b[1] as f32, b[2] as f32]
+    };
+    view.backdrop = Some([corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)]);
+}
+
 pub(crate) fn register(app: &mut App) {
+    app.add_systems(
+        Update,
+        place_inventory_puppet
+            .after(crate::sync_camera_from_presented)
+            .after(frame::PresentedPublished)
+            .in_set(frame::ClientSet::Present),
+    );
     app.init_resource::<MinecraftWorldView>()
         .init_resource::<frame::MinecraftUi>()
         .init_resource::<frame::InventoryPuppet>()
@@ -193,11 +286,12 @@ fn update(
     presented: Res<net::PresentedSnapshot>,
     authority: Option<ResMut<net::AuthorityWorld>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    (mut ui, mut puppet, mut images, scene_view): (
+    (mut ui, mut puppet, mut images, mut sound_queue, buttons): (
         ResMut<frame::MinecraftUi>,
         ResMut<frame::InventoryPuppet>,
         ResMut<Assets<Image>>,
-        Option<Res<render_scene::PreparedSceneView>>,
+        ResMut<audio::McSoundQueue>,
+        Res<ButtonInput<MouseButton>>,
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
@@ -236,6 +330,7 @@ fn update(
                 view.celestial = Some(world.celestial.clone());
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
+                runtime.sounds = Some(crate::minecraft_sounds::Sounds::load(&world.packs));
                 runtime.entities = Some(crate::minecraft_entities::Entities::new(&world.stream, world.seed));
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
@@ -291,6 +386,9 @@ fn update(
         mining,
         entities,
         inventory_ui,
+        sounds,
+        hand,
+        minimap,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -372,18 +470,154 @@ fn update(
         }
     }
 
-    // Shots and explosions from the authoritative game: bullets that met a
-    // mob hurt it, the rest mine.
-    let (mob_shots, events): (Vec<_>, Vec<_>) = sim::voxel::take_events()
-        .into_iter()
-        .partition(|event| matches!(event, sim::voxel::VoxelEvent::MobShot { .. }));
     // Minecraft's yaw: 0 facing +Z (map -Y), turning towards -X.
     let yaw_rad = ps.viewangles[1].to_radians();
     let mc_yaw = (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees();
+    let mut all_events = sim::voxel::take_events();
+
+    // The hand, when no gun is selected: vanilla's left click mines by hand
+    // (with the hand's break speed) or punches, its right click places the
+    // held block (`Player.place_selected`, vanilla's placement states).
+    let dt_hand = time.delta_secs_f64();
+    if let Some(ticks) = hand.swing.as_mut() {
+        *ticks += (dt_hand * 20.0) as f32;
+        if *ticks >= crate::minecraft_hand::SWING_TICKS {
+            hand.swing = None;
+        }
+    }
+    let holding = entities.as_ref().is_some_and(|e| {
+        e.inventory.slots[e.selected].as_ref().is_none_or(|s| crate::minecraft_inventory::weapon_of(s).is_none())
+    });
+    ui.holding_item = alive && holding;
+    hand.clock += dt_hand;
+    let hand_ticks = (hand.clock / TICK_SECONDS) as u32;
+    hand.clock -= f64::from(hand_ticks) * TICK_SECONDS;
+    if let Some(entities) = entities.as_mut()
+        && ui.holding_item
+        && !ui.inventory_open
+    {
+        let mut player = minecraftoss_player::Player::new(glam::DVec3::from_array(feet));
+        player.yaw = f64::from(mc_yaw);
+        player.pitch = f64::from(ps.viewangles[0]);
+        player.selected = entities.selected;
+        let eye_block = glam::DVec3::from_array(feet) + glam::DVec3::Y * 1.62;
+        let look = {
+            let (yaw, pitch) = (f64::from(mc_yaw).to_radians(), f64::from(ps.viewangles[0]).to_radians());
+            glam::DVec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos())
+        };
+        if buttons.just_pressed(MouseButton::Left) {
+            hand.swing = Some(0.0);
+            entities.punch(eye_block, look, mc_yaw);
+        }
+        if buttons.pressed(MouseButton::Left) {
+            for _ in 0..hand_ticks {
+                if let Some(hit) = player.target(&world.scene, 4.5) {
+                    // A hand mines as vanilla's `getDestroyProgress`: a
+                    // block's hardness times thirty ticks.
+                    all_events.push(sim::voxel::VoxelEvent::Shot {
+                        block: [hit.pos.0, hit.pos.1, hit.pos.2],
+                        damage: 160.0 / 30.0,
+                    });
+                    if hand.swing.is_none_or(|t| t >= crate::minecraft_hand::SWING_TICKS * 0.5) {
+                        hand.swing = Some(0.0);
+                    }
+                }
+            }
+        }
+        hand.place_delay = hand.place_delay.saturating_sub(hand_ticks);
+        let place = buttons.just_pressed(MouseButton::Right)
+            || (buttons.pressed(MouseButton::Right) && hand.place_delay == 0);
+        if place {
+            hand.place_delay = 4;
+            if let Some(pos) = player.place_selected(
+                &mut world.scene,
+                &mut entities.inventory,
+                minecraftoss_player::GameMode::Survival,
+            ) {
+                // Not into the player's own box.
+                let [fx, fy, fz] = feet;
+                let inside = (fx - 0.3) < f64::from(pos.0 + 1)
+                    && (fx + 0.3) > f64::from(pos.0)
+                    && fy < f64::from(pos.1 + 1)
+                    && (fy + 1.8) > f64::from(pos.1)
+                    && (fz - 0.3) < f64::from(pos.2 + 1)
+                    && (fz + 0.3) > f64::from(pos.2);
+                let block = minecraft_terrain::scene::Scene::block(&world.scene, pos).cloned();
+                if inside {
+                    world.scene.set(pos, None);
+                    if let Some(block) = block {
+                        let _ = entities.inventory.add_item(
+                            minecraftoss_player::inventory::ItemStack::new(block.id.key(), 1),
+                            entities.selected,
+                        );
+                    }
+                } else if let Some(block) = block {
+                    let state = world.stream.states.state_of(&block);
+                    let blocks = &world.registries.blocks;
+                    let shape = state.map_or(0, |state| {
+                        *shapes.entry(state).or_insert_with(|| {
+                            let boxes = blocks.collision_boxes(state);
+                            if boxes.is_empty() {
+                                return 0;
+                            }
+                            let key: Vec<[u32; 6]> = boxes.iter().map(|b| b.map(|v| (v as f32).to_bits())).collect();
+                            if let Some(&id) = shape_ids.get(&key) {
+                                return id;
+                            }
+                            let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
+                            let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
+                            shape_ids.insert(key, id);
+                            id
+                        })
+                    });
+                    sim::voxel::set_block_shape(pos.0, pos.1, pos.2, shape);
+                    world.stream.record_edits(&world.scene, &[pos]);
+                    world.stream.mark_edited(&world.scene, &[pos]);
+                    entities.placed(&world.scene, pos);
+                    hand.swing = Some(0.0);
+                    if let (Some(sounds), Some(kind)) = (sounds.as_mut(), world.scene.sound_type(&block)) {
+                        let centre = [pos.0 as f64 + 0.5, pos.1 as f64 + 0.5, pos.2 as f64 + 0.5];
+                        let at = Vec3::from_array(sim::voxel::to_map(origin, centre));
+                        sounds.play(&world.packs, &kind.place, Some(at), (kind.volume + 1.0) / 2.0, kind.pitch * 0.8);
+                    }
+                }
+            }
+        }
+    }
+
+    // Shots and explosions from the authoritative game: bullets that met a
+    // mob hurt it, the rest mine.
+    let (mob_shots, events): (Vec<_>, Vec<_>) = all_events
+        .into_iter()
+        .partition(|event| matches!(event, sim::voxel::VoxelEvent::MobShot { .. }));
     if let Some(entities) = entities.as_mut() {
         for shot in mob_shots {
             if let sim::voxel::VoxelEvent::MobShot { key, damage, from } = shot {
                 entities.shoot(key, damage, from, mc_yaw);
+            }
+        }
+    }
+    // Vanilla's block sounds: a hit for each bullet into a block, then the
+    // break of each block broken (`SoundType` volume and pitch as
+    // `MultiPlayerGameMode` and `LevelRenderer` scale them), and blasts.
+    let at = |b: [f64; 3]| Vec3::from_array(sim::voxel::to_map(origin, b));
+    if let Some(sounds) = sounds.as_mut() {
+        for event in &events {
+            match *event {
+                sim::voxel::VoxelEvent::Shot { block, .. } => {
+                    let pos = (block[0], block[1], block[2]);
+                    if let Some(kind) = minecraft_terrain::scene::Scene::block(&world.scene, pos)
+                        .and_then(|b| world.scene.sound_type(b))
+                    {
+                        let centre = [block[0] as f64 + 0.5, block[1] as f64 + 0.5, block[2] as f64 + 0.5];
+                        sounds.play(&world.packs, &kind.hit, Some(at(centre)), (kind.volume + 1.0) / 4.0, kind.pitch * 0.5);
+                    }
+                }
+                sim::voxel::VoxelEvent::Explosion { center } => {
+                    let pitch = (1.0 + (sounds.random() - sounds.random()) * 0.2) * 0.7;
+                    sounds.play(&world.packs, "minecraft:entity.generic.explode", Some(at(center)), 4.0, pitch);
+                }
+                sim::voxel::VoxelEvent::MobShot { .. } => {}
             }
         }
     }
@@ -398,6 +632,17 @@ fn update(
         },
         time.elapsed_secs_f64(),
     );
+    if let Some(sounds) = sounds.as_mut() {
+        for (pos, block, blast) in &broken {
+            if *blast {
+                continue;
+            }
+            if let Some(kind) = world.scene.sound_type(block) {
+                let centre = [pos.0 as f64 + 0.5, pos.1 as f64 + 0.5, pos.2 as f64 + 0.5];
+                sounds.play(&world.packs, &kind.break_sound, Some(at(centre)), (kind.volume + 1.0) / 2.0, kind.pitch * 0.8);
+            }
+        }
+    }
     if let Some(entities) = entities.as_mut() {
         let positions: Vec<_> = broken.iter().map(|(pos, ..)| *pos).collect();
         entities.broke(&world.scene, &positions);
@@ -433,6 +678,19 @@ fn update(
         light.set_chunk_column(chunk, column);
     }
 
+    if let Some(sounds) = sounds.as_mut() {
+        sound_queue.0.append(&mut sounds.queued);
+    }
+    // The minimap's picture, and its corners on the map.
+    ui.minimap = minimap
+        .update(time.delta_secs_f64(), feet, &world.scene, &world.packs, &world.atlas, &mut images)
+        .map(|(image, [bx, bz])| {
+            let corner = |x: i32, z: i32| {
+                let p = sim::voxel::to_map(origin, [f64::from(x), feet[1], f64::from(z)]);
+                [p[0], p[1]]
+            };
+            (image, corner(bx, bz), corner(bx + 256, bz + 256))
+        });
     // The Overworld clock and the environment attributes of MinecraftOSS.
     let dt = time.delta_secs_f64();
     let partial = mining.tick(&world.scene, dt);
@@ -508,58 +766,47 @@ fn update(
         entities.selected = selected;
         inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
 
-        // The player's MW2 body stands in the inventory's character box, on a
-        // black card: close in front of the camera (nearer than any wall the
-        // player's hull allows) where the box shows through the camera's own
-        // projection, facing it, turned and aiming towards the mouse.
-        puppet.active = false;
-        view.backdrop = None;
-        if ui.inventory_open
-            && alive
-            && let (Some([cx, cy, box_w, box_h]), Ok(window), Some(scene)) =
-                (ui.character_box, windows.single(), scene_view.as_deref().filter(|v| v.ready))
-        {
-            let (w, h) = (window.width().max(1.0), window.height().max(1.0));
-            let world_from_clip = scene.clip_from_world.inverse();
-            let eye = scene.eye;
-            let fwd = scene.forward.normalize_or(Vec3::X);
-            let at = |px: f32, py: f32, distance: f32| {
-                let p = world_from_clip * Vec4::new(px / w * 2.0 - 1.0, 1.0 - py / h * 2.0, 0.5, 1.0);
-                let ray = (p.truncate() / p.w - eye).normalize_or(fwd);
-                eye + ray * (distance / ray.dot(fwd).max(0.05))
+        if let Some(sounds) = sounds.as_mut() {
+            for (event, position, volume, pitch) in std::mem::take(&mut entities.sounds) {
+                sounds.play(&world.packs, &event, Some(at(position.to_array())), volume, pitch);
+            }
+        }
+        // The hand or held item in view.
+        view.hand = Default::default();
+        if ui.holding_item && !puppet.active {
+            let swing = hand.swing.map_or(0.0, |t| (t / crate::minecraft_hand::SWING_TICKS).clamp(0.0, 1.0));
+            let eye_light_at = glam::Vec3::new(eye[0] as f32, eye[1] as f32, eye[2] as f32);
+            let held = entities.inventory.slots[entities.selected].clone();
+            let mesh = match held {
+                Some(stack) => {
+                    let display = minecraft_terrain::pack::ResourceId::parse(&stack.id)
+                        .ok()
+                        .and_then(|id| minecraft_terrain::model::item_first_person_transform(&world.packs, &id).ok())
+                        .unwrap_or(glam::Mat4::IDENTITY);
+                    let pose = crate::minecraft_hand::item_pose(display, swing, 0.0);
+                    entities.held_item_mesh(&stack.id, pose, eye_light_at, &world.packs, &world.atlas, light)
+                }
+                None => crate::minecraft_hand::empty_hand_mesh(
+                    &world.atlas,
+                    swing,
+                    0.0,
+                    view.eye_light[0],
+                    view.eye_light[1],
+                ),
             };
-            let distance = 10.0;
-            let top = at(cx, cy - box_h * 0.5, distance);
-            let bottom = at(cx, cy + box_h * 0.5, distance);
-            let up = (top - bottom).normalize_or(Vec3::Z);
-            let right = (at(cx + 10.0, cy, distance) - at(cx, cy, distance)).normalize_or(Vec3::Y);
-            let world_h = (top - bottom).length();
-            // A standing MW2 player is about 72 units: most of the box.
-            let scale = world_h * 0.82 / 72.0;
-            let feet = bottom + up * (world_h * 0.07);
-            // Turned by the mouse as vanilla's
-            // `InventoryScreen.renderEntityInInventoryFollowsMouse` turns its body.
-            let turn = (ui.gaze[0] * 1.2).atan() * 0.7;
-            let facing = -fwd * turn.cos() + right * turn.sin();
-            let x_axis = (facing - up * facing.dot(up)).normalize_or(-fwd);
-            let y_axis = up.cross(x_axis);
-            puppet.root = Mat4::from_cols(
-                (x_axis * scale).extend(0.0),
-                (y_axis * scale).extend(0.0),
-                (up * scale).extend(0.0),
-                feet.extend(1.0),
-            );
-            puppet.pitch = (ui.gaze[1] * 1.2).atan().to_degrees() * 0.6;
-            puppet.client = local.0.0;
-            puppet.active = true;
-            // The card behind it, a little further out, filling the box.
-            let back = distance + 4.0;
-            let corner = |dx: f32, dy: f32| {
-                let p = at(cx + dx * box_w * 0.5, cy + dy * box_h * 0.5, back);
-                let b = sim::voxel::to_block(origin, p.to_array());
-                [b[0] as f32, b[1] as f32, b[2] as f32]
-            };
-            view.backdrop = Some([corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)]);
+            let vertices: Vec<minecraft_terrain::mesh::SectionVertex> =
+                mesh.vertices.iter().map(minecraft_terrain::mesh::SectionVertex::from_vertex).collect();
+            view.hand = (bytemuck::cast_slice(&vertices).to_vec(), mesh.indices);
+            // Reverse-Z with no far plane, as the scene's; 70 degrees up.
+            let f = 1.0 / (35.0f32.to_radians()).tan();
+            let near = 0.05;
+            view.hand_clip = Mat4::from_cols(
+                Vec4::new(f / aspect, 0.0, 0.0, 0.0),
+                Vec4::new(0.0, f, 0.0, 0.0),
+                Vec4::new(0.0, 0.0, 0.0, -1.0),
+                Vec4::new(0.0, 0.0, near, 0.0),
+            )
+            .to_cols_array();
         }
 
         sim::voxel::set_mob_boxes(entities.boxes());
@@ -745,6 +992,7 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
         view.crack_texture = None;
         view.particles = Default::default();
         view.entity_meshes = Default::default();
+        view.hand = Default::default();
         view.cracks = Default::default();
         view.clouds = None;
         view.light_volume = None;

@@ -82,6 +82,12 @@ pub struct MinecraftUi {
     pub selected_name: Option<(String, f32)>,
     /// The MW2 gun the hotbar selection asks the player to raise.
     pub weapon_request: Option<u32>,
+    /// The selection is not a gun: the hand or a held item shows, and the
+    /// gun neither fires nor aims.
+    pub holding_item: bool,
+    /// The minimap's picture of the world and the map points of its
+    /// north-west and south-east corners.
+    pub minimap: Option<(Handle<Image>, [f32; 2], [f32; 2])>,
 }
 
 /// The player's own MW2 body, drawn standing in the inventory's character

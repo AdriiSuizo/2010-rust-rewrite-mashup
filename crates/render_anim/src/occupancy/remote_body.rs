@@ -80,6 +80,7 @@ pub fn register_remote_body_systems(app: &mut App) {
             Update,
             sync_remote_bodies
                 .after(PresentedPublished)
+                .after(crate::minecraft_world::place_inventory_puppet)
                 .before(occupy_remote_scene_ents)
                 .in_set(render_scene::GfxSceneAdd),
         )

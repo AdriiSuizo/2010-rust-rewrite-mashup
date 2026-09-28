@@ -85,6 +85,9 @@ pub struct MinecraftWorldFrame {
     pub entity_meshes: [(Vec<u8>, Vec<u32>); 4],
     /// A black card to draw, in blocks: behind the inventory's character.
     pub backdrop: Option<[[f32; 3]; 4]>,
+    /// The first-person hand or held item in view space, and its projection.
+    pub hand: (Vec<u8>, Vec<u32>),
+    pub hand_clip: [f32; 16],
 }
 
 #[repr(C)]
@@ -92,6 +95,7 @@ pub struct MinecraftWorldFrame {
 struct TerrainView {
     clip_from_rel: [f32; 16],
     rel_from_clip: [f32; 16],
+    hand_clip: [f32; 16],
     /// View origin in map units.
     view: [f32; 4],
     /// The block at map origin.
@@ -126,11 +130,12 @@ struct TerrainGpu {
     /// This frame's entity meshes, in `MinecraftWorldFrame::entity_meshes` order.
     entities: [Option<(Buffer, Buffer, u32)>; 4],
     backdrop: Option<Buffer>,
+    hand: Option<(Buffer, Buffer, u32)>,
     sampler: Option<Sampler>,
     bind: Option<BindGroup>,
     sections: HashMap<[i32; 3], SectionGpu>,
     visible: Vec<[i32; 3]>,
-    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 10]>,
+    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 11]>,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -252,6 +257,22 @@ fn prepare_terrain(
             contents: bytemuck::cast_slice(&corners),
             usage: BufferUsages::VERTEX,
         })
+    });
+    let (hand_vertices, hand_indices) = std::mem::take(&mut frame.hand);
+    gpu.hand = (!hand_indices.is_empty()).then(|| {
+        (
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4l_minecraft_hand_vertices"),
+                contents: &hand_vertices,
+                usage: BufferUsages::VERTEX,
+            }),
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4l_minecraft_hand_indices"),
+                contents: bytemuck::cast_slice(&hand_indices),
+                usage: BufferUsages::INDEX,
+            }),
+            hand_indices.len() as u32,
+        )
     });
     let meshes = std::mem::take(&mut frame.entity_meshes);
     for (slot, (vertices, indices)) in gpu.entities.iter_mut().zip(meshes) {
@@ -399,6 +420,7 @@ fn prepare_terrain(
 
     let mut view = TerrainView {
         environment: frame.environment,
+        hand_clip: frame.hand_clip,
         ..TerrainView::default()
     };
     if let Some(exec) = published.as_ref().map(|p| &p.exec_frame)
@@ -478,7 +500,7 @@ fn draw_terrain(
     let (target, depth, extracted_view, msaa) = view.into_inner();
     let format = target.main_texture_format();
     let samples = msaa.map_or(1, Msaa::samples);
-    let [sky, opaque, translucent, clouds, crack, entity, entity_culled, entity_translucent, shadow, backdrop] = gpu
+    let [sky, opaque, translucent, clouds, crack, entity, entity_culled, entity_translucent, shadow, backdrop, hand] = gpu
         .pipelines
         .entry((format, samples))
         .or_insert_with(|| pipelines(&device, &registry, format, samples))
@@ -515,9 +537,12 @@ fn draw_terrain(
         pass.draw_indexed(0..*count, 0, 0..1);
     }
     if let Some(card) = gpu.backdrop.as_ref() {
+        let (band_min, band_max) = reverse_z_viewport_depth(super::depth_range::GFX_DEPTH_RANGE_VIEWMODEL);
+        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, band_min, band_max);
         pass.set_render_pipeline(&backdrop);
         pass.set_vertex_buffer(0, card.slice(..));
         pass.draw(0..6, 0..1);
+        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, depth_min, depth_max);
         pass.set_render_pipeline(&opaque);
     }
     // Mobs, then their shadows on what is drawn so far.
@@ -559,6 +584,16 @@ fn draw_terrain(
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..*count, 0, 0..1);
     }
+    // The hand in front of everything, as the view model is.
+    if let Some((vertices, indices, count)) = gpu.hand.as_ref() {
+        let (band_min, band_max) = reverse_z_viewport_depth(super::depth_range::GFX_DEPTH_RANGE_VIEWMODEL);
+        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, band_min, band_max);
+        pass.set_render_pipeline(&hand);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(0..*count, 0, 0..1);
+        pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, depth_min, depth_max);
+    }
     if let Some((_, vertices, indices, count)) = gpu.clouds.as_ref() {
         pass.set_render_pipeline(&clouds);
         pass.set_vertex_buffer(0, vertices.slice(..));
@@ -581,6 +616,7 @@ struct Environment {
 struct TerrainView {
     clip_from_rel: mat4x4<f32>,
     rel_from_clip: mat4x4<f32>,
+    hand_clip: mat4x4<f32>,
     view: vec4<f32>,
     origin: vec4<f32>,
     environment: Environment,
@@ -848,10 +884,39 @@ fn entity_translucent_fragment(in: EntityOut) -> @location(0) vec4<f32> {
     return vec4<f32>(mix(lit, view.environment.fog.rgb, fog_value(in.world_pos)), texel.a * in.colour.a);
 }
 
+// The first-person hand: view-space vertices under the hand projection,
+// lit by the lightmap, cut out as items are (below 0.1).
+@vertex
+fn hand_vertex(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) colour: vec4<f32>,
+    @location(3) light: vec2<f32>,
+) -> Out {
+    var out: Out;
+    out.clip = view.hand_clip * vec4<f32>(position, 1.0);
+    out.uv = uv;
+    let level = light * (255.0 / 16.0);
+    out.colour = vec4<f32>(colour.rgb * lightmap(level.x, level.y), colour.a);
+    out.world_pos = view.environment.camera_pos.xyz;
+    return out;
+}
+
+@fragment
+fn hand_fragment(in: Out) -> @location(0) vec4<f32> {
+    let texel = textureSampleLevel(atlas, atlas_sampler, in.uv, 0.0);
+    if texel.a < 0.1 {
+        discard;
+    }
+    return vec4<f32>(texel.rgb * in.colour.rgb, 1.0);
+}
+
 // The card behind the inventory's character.
 @vertex
 fn backdrop_vertex(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return view.clip_from_rel * vec4<f32>(rel_from_block(position), 1.0);
+    // The far end of its depth band, whatever its distance.
+    let clip = view.clip_from_rel * vec4<f32>(rel_from_block(position), 1.0);
+    return vec4<f32>(clip.xy, 0.0, clip.w);
 }
 
 @fragment
@@ -895,7 +960,7 @@ fn pipelines(
     registry: &ExactPipelineRegistry,
     format: TextureFormat,
     samples: u32,
-) -> [RenderPipeline; 10] {
+) -> [RenderPipeline; 11] {
     let shader = unsafe {
         device.create_shader_module(ShaderModuleDescriptor {
             label: Some("iw4l_minecraft_terrain"),
@@ -1125,5 +1190,6 @@ fn pipelines(
             None,
         ),
         make("backdrop_vertex", "backdrop_fragment", &backdrop_buffers, true, CompareFunction::GreaterEqual, None, None),
+        make("hand_vertex", "hand_fragment", &buffers, true, CompareFunction::GreaterEqual, None, None),
     ]
 }

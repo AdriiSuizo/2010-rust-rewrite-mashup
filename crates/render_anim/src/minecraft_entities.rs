@@ -62,6 +62,9 @@ pub(crate) struct Entities {
     loot: Option<LootBook>,
     loot_sequences: HashMap<String, XoroshiroRandom>,
     seed: i64,
+    /// Sounds the mob world made since the last take: event, block point,
+    /// volume, pitch.
+    pub(crate) sounds: Vec<(String, DVec3, f32, f32)>,
     random: minecraftoss_player::rng::LegacyRandom,
 }
 
@@ -139,6 +142,7 @@ impl Entities {
             loot,
             loot_sequences: HashMap::new(),
             seed,
+            sounds: Vec::new(),
             random: minecraftoss_player::rng::LegacyRandom::new((seed ^ 0x1735) as u64),
         }
     }
@@ -273,6 +277,46 @@ impl Entities {
         }
     }
 
+    /// A held item's model under a view-space pose, lit at `light_at`.
+    pub(crate) fn held_item_mesh(
+        &mut self,
+        id: &str,
+        pose: glam::Mat4,
+        light_at: glam::Vec3,
+        packs: &PackStack,
+        atlas: &Atlas,
+        light: &SkyLight,
+    ) -> ChunkMesh {
+        let mut mesh = ChunkMesh::default();
+        let _ = self.items.append_posed_blocks(&mut mesh, &[(pose, light_at, id.to_owned())], packs, atlas, light);
+        mesh
+    }
+
+    /// A fist on the mob the player looks at within reach (one damage, as
+    /// an empty hand deals).
+    pub(crate) fn punch(&mut self, eye: DVec3, look: DVec3, yaw: f32) -> bool {
+        let Some((hit, _)) = self.world.mob_on_ray(eye, look, 3.0) else {
+            return false;
+        };
+        let attack = minecraftoss_entities::world::PlayerAttack {
+            player_id: PLAYER,
+            position: eye - DVec3::Y * f64::from(EYE_HEIGHT),
+            yaw,
+            attack_damage: 1.0,
+            strength: 1.0,
+            sprinting: false,
+            can_critical: false,
+            can_sweep: false,
+        };
+        self.server.mob_action(hit, Some(attack), &self.inventory.clone(), self.selected, false);
+        true
+    }
+
+    /// A block the player placed, for the level the mobs walk in.
+    pub(crate) fn placed(&mut self, scene: &HandcraftedScene, pos: (i32, i32, i32)) {
+        self.server.player_edit(scene, pos, PlayerEdit::Place);
+    }
+
     /// Client ticks run so far.
     pub(crate) fn client_ticks(&self) -> u64 {
         self.ticks
@@ -392,6 +436,17 @@ impl Entities {
             }
             self.server_picked.extend(output.picked);
             changes.extend(output.changes);
+            for sound in &output.mob_sounds {
+                self.sounds.push((sound.event.clone(), sound.position, sound.volume, sound.pitch));
+            }
+            for sound in output.mob_results.iter().flat_map(|result| result.sounds.iter()) {
+                self.sounds.push((sound.event.clone(), sound.position, sound.volume, sound.pitch));
+            }
+            // `ServerExplosion`'s sound: loud, pitched down.
+            for blast in &output.explosions {
+                let pitch = (1.0 + (self.random.next_float() - self.random.next_float()) * 0.2) * 0.7;
+                self.sounds.push(("minecraft:entity.generic.explode".to_owned(), blast.position, 4.0, pitch));
+            }
             if let Some(mobs) = output.mobs {
                 self.world = *mobs;
                 for (feet, width, height) in self.client.receive(server_mobs(&self.world)) {
@@ -408,6 +463,11 @@ impl Entities {
         }
         if ticked {
             self.server_items_tick(DVec3::from_array(player.feet));
+            // `ItemEntity.playerTouch`'s pickup pop.
+            for _ in 0..self.world_items.take_pickup_sounds() {
+                let pitch = ((self.random.next_float() - self.random.next_float()) * 0.7 + 1.0) * 2.0;
+                self.sounds.push(("minecraft:entity.item.pickup".to_owned(), DVec3::from_array(player.feet), 0.2, pitch));
+            }
         }
         (changes, hits)
     }

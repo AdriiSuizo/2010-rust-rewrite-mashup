@@ -58,6 +58,9 @@ pub(crate) fn spawn_compass(root: &mut ChildSpawnerCommands) {
     ));
 }
 
+/// The Minecraft world's minimap picture, as a map material.
+const MINECRAFT_MINIMAP: &str = "mc_minimap";
+
 fn hide(pass: &mut HudTessPass) {
     pass.compass = TessJob::Hide;
 }
@@ -108,6 +111,7 @@ pub(crate) fn update_compass(
     mut pass: ResMut<HudTessPass>,
     view: Option<Res<frame::ViewSubject>>,
     local_vars: Res<crate::playercard::UiLocalVars>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
 ) {
     take_fire_pings(
         &mut ping_bus,
@@ -136,7 +140,22 @@ pub(crate) fn update_compass(
         hide(&mut pass);
         return;
     };
-    let Some(drawable) = resolve(compass.as_deref(), &mut hud_images, &mut gaps) else {
+    // On a Minecraft map the minimap shows the Minecraft world.
+    let block_world = minecraft
+        .as_ref()
+        .filter(|ui| ui.active)
+        .and_then(|ui| ui.minimap.clone())
+        .and_then(|(image, a, b)| {
+            let map_ns = hud_images.map_namespace();
+            hud_images.insert_runtime_in(map_ns, MINECRAFT_MINIMAP, image);
+            Some(DrawableCompass {
+                image_name: MINECRAFT_MINIMAP.to_owned(),
+                bounds: compass_map_bounds_from_minimap_corners(a, b, 0.0)?,
+                max_range: COMPASS_MAX_RANGE_DEFAULT_MP,
+                north_yaw: 0.0,
+            })
+        });
+    let Some(drawable) = block_world.or_else(|| resolve(compass.as_deref(), &mut hud_images, &mut gaps)) else {
         hide(&mut pass);
         return;
     };

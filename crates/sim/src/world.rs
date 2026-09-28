@@ -3009,7 +3009,7 @@ impl SimState {
                 match_elapsed_ms: self.match_elapsed_ms,
                 prematch: self.prematch,
                 score_limit: self.bootstrap.score_limit,
-                time_limit_ms: self.bootstrap.time_limit_ms,
+                time_limit_ms: if crate::voxel::active() { 0 } else { self.bootstrap.time_limit_ms },
                 kind: self.bootstrap.kind,
                 clients,
                 care_packages: self.care_packages.clone(),

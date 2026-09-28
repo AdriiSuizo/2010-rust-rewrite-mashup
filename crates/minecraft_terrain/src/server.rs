@@ -1267,6 +1267,77 @@ mod tests {
         assert!(animals(&near) <= animals(&server.mobs));
     }
 
+    /// Generated animals wander about a player among them, climbing the
+    /// terrain's steps (`jumpFromGround`); around a spectator they idle
+    /// once `noActionTime` passes 100, as `Mob.checkDespawn` only resets it
+    /// near a player it counts.
+    #[test]
+    fn idle_animals_wander_near_a_player() {
+        let Ok(paths) = DataPaths::discover() else { return };
+        let Ok(registries) = Registries::load(&paths) else { return };
+        let registries = Arc::new(registries);
+        let worldgen = Arc::new(WorldGen::new(Arc::new(TerrainGenerator::overworld(registries.clone(), 1234).unwrap())).unwrap());
+        let states = Arc::new(BlockStates::new(registries.clone(), 1234, -64, 384).unwrap());
+        let mut map = ChunkMap::with_worldgen(worldgen.clone(), 6, 8);
+        let mut server = ServerSim::new(worldgen, states, "minecraft:overworld");
+        for x in 15..=25 {
+            for z in 123..=133 {
+                server.load_chunk(&map.load_now(ChunkPos::new(x, z)));
+            }
+        }
+        // Among the first animals generated.
+        let herd = server.mobs.cows().iter().map(|e| e.cow.body.position).chain(server.mobs.sheep().iter().map(|e| e.body.position)).next().expect("animals");
+        let mut player = minecraftoss_entities::tempt::PlayerCandidate {
+            id: 0,
+            position: herd + glam::DVec3::new(3.0, 4.0, 0.0),
+            eye_height: 1.62,
+            main_hand_cow_food: false,
+            offhand_cow_food: false,
+            main_hand_pig_food: false,
+            offhand_pig_food: false,
+            main_hand_chicken_food: false,
+            offhand_chicken_food: false,
+            main_hand_carrot_on_a_stick: false,
+            offhand_carrot_on_a_stick: false,
+            main_hand_wolf_interest: false,
+            offhand_wolf_interest: false,
+            main_hand_horse_tempt: false,
+            offhand_horse_tempt: false,
+            alive: true,
+            spectator: false,
+            attackable: true,
+        };
+        let mut share = Vec::new();
+        for spectator in [false, true] {
+            player.spectator = spectator;
+            let (mut moving, mut samples) = (0, 0);
+            let mut last: std::collections::HashMap<u64, glam::DVec3> = Default::default();
+            for tick in 0..1200 {
+                server.set_players(&[player.position.to_array()], 2);
+                server.set_simulation_area((20, 128), 5);
+                server.tick();
+                server.despawn_mobs(&[player], 2);
+                server.tick_mobs(&[player], true);
+                let w = &server.mobs;
+                let animals = w.cows().iter().map(|e| (e.id, e.cow.body.position)).chain(w.sheep().iter().map(|e| (e.id, e.body.position)));
+                for (id, p) in animals {
+                    if p.distance(player.position) > 32.0 {
+                        continue;
+                    }
+                    if let Some(old) = last.insert(id, p) {
+                        if tick >= 200 {
+                            samples += 1;
+                            moving += usize::from(glam::DVec2::new(old.x - p.x, old.z - p.z).length() > 0.01);
+                        }
+                    }
+                }
+            }
+            share.push(moving as f64 / samples.max(1) as f64);
+        }
+        assert!(share[0] > 0.15, "animals walk about a player: {share:?}");
+        assert!(share[1] < 0.01, "and idle about a spectator: {share:?}");
+    }
+
     /// Mobs leave with their chunk into the entity storage and come back
     /// from it as they were: where they wandered, hurt, sheared, and one
     /// killed stays dead, not respawned from generation.

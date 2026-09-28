@@ -910,6 +910,9 @@ pub fn sample_client_input(
         }
     }
     let mut cmd = build_usercmd(&mut actions, &look, 0);
+    if minecraft.as_ref().is_some_and(|ui| ui.active && ui.holding_item) {
+        cmd.buttons &= !(playerstate_iw4::buttons::ATTACK | playerstate_iw4::buttons::ADS);
+    }
     look.angles = cmd.angles;
     if let Some((mouse_x, mouse_y)) = remote_mouse {
         cmd.remote_control = remote_control_axes(&actions, mouse_x, mouse_y);
