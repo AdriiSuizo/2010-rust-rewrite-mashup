@@ -983,6 +983,7 @@ pub fn extract_minecraft_world(
     frame.particles = std::mem::take(&mut view.particles);
     frame.cracks = std::mem::take(&mut view.cracks);
     frame.entity_meshes = std::mem::take(&mut view.entity_meshes);
+    frame.backdrop = view.backdrop;
     frame.crack_texture = view.crack_texture.as_ref().map(|image| {
         let key = std::sync::Arc::as_ptr(image) as usize;
         if let Some((held, converted)) = cracks_of.as_ref()

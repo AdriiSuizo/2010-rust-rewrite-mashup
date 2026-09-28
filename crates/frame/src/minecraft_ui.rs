@@ -75,9 +75,9 @@ pub struct MinecraftUi {
     /// The mouse in the inventory's character box, -1..1 across and down,
     /// which the character's gaze follows.
     pub gaze: [f32; 2],
-    /// The character box's centre and height in window pixels, for placing
-    /// the character.
-    pub character_box: Option<[f32; 3]>,
+    /// The character box in window pixels (centre x and y, width, height),
+    /// for placing the character.
+    pub character_box: Option<[f32; 4]>,
     /// The name of the item just selected and how long ago, for the hotbar.
     pub selected_name: Option<(String, f32)>,
     /// The MW2 gun the hotbar selection asks the player to raise.

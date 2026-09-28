@@ -57,6 +57,8 @@ pub struct MinecraftWorldView {
     /// Mob models (cut out, back-face culled, translucent) and entity
     /// shadows, as `mesh::Vertex` bytes and indices.
     pub entity_meshes: [(Vec<u8>, Vec<u32>); 4],
+    /// The black card behind the inventory's character, in blocks.
+    pub backdrop: Option<[[f32; 3]; 4]>,
 }
 
 struct Loaded {
@@ -191,10 +193,11 @@ fn update(
     presented: Res<net::PresentedSnapshot>,
     authority: Option<ResMut<net::AuthorityWorld>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    (mut ui, mut puppet, mut images): (
+    (mut ui, mut puppet, mut images, scene_view): (
         ResMut<frame::MinecraftUi>,
         ResMut<frame::InventoryPuppet>,
         ResMut<Assets<Image>>,
+        Option<Res<render_scene::PreparedSceneView>>,
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
@@ -505,31 +508,36 @@ fn update(
         entities.selected = selected;
         inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
 
-        // The player's MW2 body stands in the inventory's character box: in
-        // front of the camera where the box shows, facing it, turned and
-        // aiming towards the mouse.
+        // The player's MW2 body stands in the inventory's character box, on a
+        // black card: close in front of the camera (nearer than any wall the
+        // player's hull allows) where the box shows through the camera's own
+        // projection, facing it, turned and aiming towards the mouse.
         puppet.active = false;
+        view.backdrop = None;
         if ui.inventory_open
             && alive
-            && let (Some([cx, cy, box_h]), Ok(window)) = (ui.character_box, windows.single())
+            && let (Some([cx, cy, box_w, box_h]), Ok(window), Some(scene)) =
+                (ui.character_box, windows.single(), scene_view.as_deref().filter(|v| v.ready))
         {
             let (w, h) = (window.width().max(1.0), window.height().max(1.0));
-            let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
-            let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
-            let right = Vec3::new(yaw.sin(), -yaw.cos(), 0.0);
-            let up = right.cross(fwd).normalize_or(Vec3::Z);
-            // Hor+ MW2: 65 degrees across at 4:3, so about 51 up the screen.
-            let tan_v = (51.0f32.to_radians() * 0.5).tan();
-            let distance = 30.0;
-            let ndc = [cx / w * 2.0 - 1.0, 1.0 - cy / h * 2.0];
-            let scale = (box_h / h) * 2.0 * distance * tan_v / 76.0;
-            let eye_map = Vec3::new(ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current);
-            let centre = eye_map
-                + fwd * distance
-                + right * (ndc[0] * distance * tan_v * (w / h))
-                + up * (ndc[1] * distance * tan_v);
-            let feet = centre - up * (36.0 * scale);
-            // Facing the camera, turned by the mouse as vanilla's
+            let world_from_clip = scene.clip_from_world.inverse();
+            let eye = scene.eye;
+            let fwd = scene.forward.normalize_or(Vec3::X);
+            let at = |px: f32, py: f32, distance: f32| {
+                let p = world_from_clip * Vec4::new(px / w * 2.0 - 1.0, 1.0 - py / h * 2.0, 0.5, 1.0);
+                let ray = (p.truncate() / p.w - eye).normalize_or(fwd);
+                eye + ray * (distance / ray.dot(fwd).max(0.05))
+            };
+            let distance = 10.0;
+            let top = at(cx, cy - box_h * 0.5, distance);
+            let bottom = at(cx, cy + box_h * 0.5, distance);
+            let up = (top - bottom).normalize_or(Vec3::Z);
+            let right = (at(cx + 10.0, cy, distance) - at(cx, cy, distance)).normalize_or(Vec3::Y);
+            let world_h = (top - bottom).length();
+            // A standing MW2 player is about 72 units: most of the box.
+            let scale = world_h * 0.82 / 72.0;
+            let feet = bottom + up * (world_h * 0.07);
+            // Turned by the mouse as vanilla's
             // `InventoryScreen.renderEntityInInventoryFollowsMouse` turns its body.
             let turn = (ui.gaze[0] * 1.2).atan() * 0.7;
             let facing = -fwd * turn.cos() + right * turn.sin();
@@ -544,6 +552,14 @@ fn update(
             puppet.pitch = (ui.gaze[1] * 1.2).atan().to_degrees() * 0.6;
             puppet.client = local.0.0;
             puppet.active = true;
+            // The card behind it, a little further out, filling the box.
+            let back = distance + 4.0;
+            let corner = |dx: f32, dy: f32| {
+                let p = at(cx + dx * box_w * 0.5, cy + dy * box_h * 0.5, back);
+                let b = sim::voxel::to_block(origin, p.to_array());
+                [b[0] as f32, b[1] as f32, b[2] as f32]
+            };
+            view.backdrop = Some([corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)]);
         }
 
         sim::voxel::set_mob_boxes(entities.boxes());

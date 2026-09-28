@@ -22,17 +22,20 @@ const ICONS: &str = "mc_item_icons";
 const CENTER: i32 = 2;
 const MAX: i32 = 3;
 
-// MW2's HUD palette: near-black glass, hairline whites and the friendly
-// green of its minimap and splashes.
-const PANEL: [f32; 4] = [0.030, 0.034, 0.038, 0.88];
-const HEADER: [f32; 4] = [0.070, 0.078, 0.080, 0.96];
-const EDGE: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
-const ACCENT: [f32; 4] = [0.60, 0.80, 0.34, 1.0];
-const TEXT: [f32; 4] = [0.93, 0.94, 0.91, 1.0];
-const TEXT_DIM: [f32; 4] = [0.60, 0.62, 0.60, 1.0];
-const SLOT: [f32; 4] = [0.0, 0.0, 0.0, 0.46];
-const SLOT_EDGE: [f32; 4] = [1.0, 1.0, 1.0, 0.09];
-const SLOT_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.12];
+// MW2's theme: the rust orange of its menus and smoke, the pale green-white
+// of its logo, on warm dark glass.
+const PANEL: [f32; 4] = [0.046, 0.040, 0.034, 0.90];
+const HEADER: [f32; 4] = [0.085, 0.068, 0.050, 0.97];
+const EDGE: [f32; 4] = [1.0, 0.92, 0.82, 0.14];
+const ACCENT: [f32; 4] = [0.91, 0.53, 0.18, 1.0];
+const HIGHLIGHT: [f32; 4] = [0.86, 0.96, 0.82, 1.0];
+const TEXT: [f32; 4] = [0.93, 0.93, 0.90, 1.0];
+const TEXT_DIM: [f32; 4] = [0.66, 0.62, 0.56, 1.0];
+const SLOT: [f32; 4] = [0.0, 0.0, 0.0, 0.48];
+const SLOT_EDGE: [f32; 4] = [1.0, 0.90, 0.78, 0.10];
+const SLOT_HOVER: [f32; 4] = [0.91, 0.53, 0.18, 0.20];
+/// The inventory's size over its virtual layout.
+const K: f32 = 1.3;
 
 /// Slot size and pitch in virtual pixels.
 const S: f32 = 20.0;
@@ -88,6 +91,8 @@ struct Canvas<'a> {
     surface: &'a crate::surface::Hud2dSurface,
     cmds: Vec<Draw2dCmd>,
     fonts: HashMap<String, &'a FontDef>,
+    /// The scale virtual coordinates are drawn at.
+    k: f32,
 }
 
 impl Canvas<'_> {
@@ -108,7 +113,8 @@ impl Canvas<'_> {
         st: [f32; 4],
         align: (i32, i32),
     ) {
-        let r = self.surface.apply_rect(x, y, w, h, align.0, align.1);
+        let k = self.k;
+        let r = self.surface.apply_rect(x * k, y * k, w * k, h * k, align.0, align.1);
         self.cmds.push(Draw2dCmd {
             x: r.x,
             y: r.y,
@@ -160,9 +166,10 @@ impl Canvas<'_> {
         };
         let text_scale = px / ui_text_height(1.0);
         let width = ui_text_width(def, text, text_scale);
-        let nscale = r_normalized_text_scale(def.pixel_height, text_scale);
         let x = if right { x - width } else { x };
-        let r = self.surface.apply_rect(x, y + px, nscale, nscale, align.0, align.1);
+        let k = self.k;
+        let nscale = r_normalized_text_scale(def.pixel_height, text_scale * k);
+        let r = self.surface.apply_rect(x * k, (y + px) * k, nscale, nscale, align.0, align.1);
         self.cmds.push(Draw2dCmd {
             x: (r.x + 0.5).floor(),
             y: (r.y + 0.5).floor(),
@@ -322,7 +329,7 @@ pub(crate) fn update_minecraft_hud(
                 .collect()
         })
         .unwrap_or_default();
-    let mut canvas = Canvas { surface: &surface, cmds: Vec::new(), fonts };
+    let mut canvas = Canvas { surface: &surface, cmds: Vec::new(), fonts, k: 1.0 };
     let weapons = weapons.as_deref();
     let strings = strings.as_deref();
 
@@ -341,6 +348,7 @@ pub(crate) fn update_minecraft_hud(
         if keys.just_pressed(KeyCode::KeyQ) {
             ui.drop_selected = Some(ctrl);
         }
+        canvas.k = 1.15;
         draw_hotbar(&mut canvas, &mut ui, weapons, strings, &mut gaps, time.delta_secs());
         ui.character_box = None;
     } else {
@@ -348,11 +356,12 @@ pub(crate) fn update_minecraft_hud(
         let hovered = mouse.and_then(|m| hovered_slot(&surface, m));
         let inside = mouse.is_some_and(|m| over_panel(&surface, m));
         handle_clicks(&mut ui, &mut input, &buttons, hovered, inside, shift, digit, now);
+        canvas.k = K;
         draw_inventory(&mut canvas, &mut ui, weapons, strings, &mut gaps, hovered, mouse);
         // Where the character stands, and the mouse it follows.
-        let b = surface.apply_rect(BOX[0], BOX[1], BOX[2], BOX[3], CENTER, CENTER);
+        let b = surface.apply_rect(BOX[0] * K, BOX[1] * K, BOX[2] * K, BOX[3] * K, CENTER, CENTER);
         let centre = [b.x + b.w * 0.5, b.y + b.h * 0.36];
-        ui.character_box = Some([b.x + b.w * 0.5, b.y + b.h * 0.5, b.h]);
+        ui.character_box = Some([b.x + b.w * 0.5, b.y + b.h * 0.5, b.w, b.h]);
         if let Some(m) = mouse {
             ui.gaze = [(m.x - centre[0]) / (b.h * 0.5), (m.y - centre[1]) / (b.h * 0.5)];
         }
@@ -369,13 +378,13 @@ pub(crate) fn update_minecraft_hud(
 
 fn hovered_slot(surface: &crate::surface::Hud2dSurface, mouse: Vec2) -> Option<McSlot> {
     layout().into_iter().find_map(|(slot, x, y, size)| {
-        let r = surface.apply_rect(x, y, size, size, CENTER, CENTER);
+        let r = surface.apply_rect(x * K, y * K, size * K, size * K, CENTER, CENTER);
         (mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y && mouse.y < r.y + r.h).then_some(slot)
     })
 }
 
 fn over_panel(surface: &crate::surface::Hud2dSurface, mouse: Vec2) -> bool {
-    let r = surface.apply_rect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, CENTER, CENTER);
+    let r = surface.apply_rect(PANEL_X * K, PANEL_Y * K, PANEL_W * K, PANEL_H * K, CENTER, CENTER);
     mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y && mouse.y < r.y + r.h
 }
 
@@ -459,24 +468,24 @@ fn draw_hotbar(
     let pitch = 25.0;
     let width = pitch * 9.0 - (pitch - size);
     let x0 = -width * 0.5;
-    let y = -44.0;
+    let y = -size - 3.0;
     // The strip behind it.
-    canvas.fill(x0 - 4.0, y - 4.0, width + 8.0, size + 8.0, [0.0, 0.0, 0.0, 0.38], align);
-    canvas.quad(x0 - 4.0, y - 4.0, width + 8.0, size + 8.0, [1.0, 1.0, 1.0, 0.05], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], align);
-    canvas.frame(x0 - 4.0, y - 4.0, width + 8.0, size + 8.0, [1.0, 1.0, 1.0, 0.10], align);
+    canvas.fill(x0 - 3.0, y - 3.0, width + 6.0, size + 6.0, [0.04, 0.03, 0.02, 0.50], align);
+    canvas.quad(x0 - 3.0, y - 3.0, width + 6.0, size + 6.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.10], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], align);
+    canvas.frame(x0 - 3.0, y - 3.0, width + 6.0, size + 6.0, EDGE, align);
     for i in 0..9 {
         let selected = i == ui.selected;
         let x = x0 + i as f32 * pitch;
         let lift = if selected { -2.0 } else { 0.0 };
         if selected {
-            canvas.quad(x - 6.0, y - 8.0 + lift, size + 12.0, size + 14.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.40], "mockup_bg_glow", [0.0, 0.0, 1.0, 1.0], align);
+            canvas.quad(x - 7.0, y - 9.0 + lift, size + 14.0, size + 16.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.55], "mockup_bg_glow", [0.0, 0.0, 1.0, 1.0], align);
         }
-        canvas.fill(x, y + lift, size, size, if selected { [0.08, 0.10, 0.06, 0.78] } else { SLOT }, align);
-        canvas.frame(x, y + lift, size, size, if selected { ACCENT } else { SLOT_EDGE }, align);
+        canvas.fill(x, y + lift, size, size, if selected { [0.16, 0.09, 0.03, 0.80] } else { SLOT }, align);
+        canvas.frame(x, y + lift, size, size, if selected { HIGHLIGHT } else { SLOT_EDGE }, align);
         if selected {
             canvas.fill(x, y + lift + size - 1.5, size, 1.5, ACCENT, align);
         }
-        canvas.text(FONT_SMALL, x + 1.5, y + lift + 0.5, 5.5, if selected { ACCENT } else { TEXT_DIM }, &(i + 1).to_string(), false, align);
+        canvas.text(FONT_SMALL, x + 1.5, y + lift + 0.5, 5.5, if selected { HIGHLIGHT } else { TEXT_DIM }, &(i + 1).to_string(), false, align);
         if let Some(stack) = ui.slots.get(i).and_then(Option::as_ref).cloned() {
             draw_stack(canvas, ui, weapons, &stack, x, y + lift, size, align);
         }
@@ -494,7 +503,7 @@ fn draw_hotbar(
             let w = canvas.fonts.get(FONT_TITLE).map_or(0.0, |def| {
                 ui_text_width(def, &text, px / ui_text_height(1.0))
             });
-            canvas.text(FONT_TITLE, -w * 0.5, y - 18.0, px, [TEXT[0], TEXT[1], TEXT[2], fade], &text, false, align);
+            canvas.text(FONT_TITLE, -w * 0.5, y - 17.0, px, [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], fade], &text, false, align);
         }
     }
 }
@@ -522,6 +531,7 @@ fn draw_inventory(
     ];
     for (x, y, w, h) in around {
         canvas.fill(x, y, w, h, dim, c);
+        canvas.quad(x, y, w, h, [ACCENT[0], ACCENT[1], ACCENT[2], 0.07], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
     }
 
     // The panel: glass, header, edges and brackets.
@@ -534,10 +544,10 @@ fn draw_inventory(
         canvas.fill(x, y, w, h, PANEL, c);
     }
     canvas.fill(PANEL_X, PANEL_Y, PANEL_W, HEADER_H, HEADER, c);
-    canvas.quad(PANEL_X, PANEL_Y, PANEL_W, HEADER_H, [ACCENT[0], ACCENT[1], ACCENT[2], 0.10], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
+    canvas.quad(PANEL_X, PANEL_Y, PANEL_W, HEADER_H, [ACCENT[0], ACCENT[1], ACCENT[2], 0.22], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
     canvas.fill(PANEL_X, PANEL_Y + HEADER_H - 1.0, PANEL_W, 1.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.85], c);
     canvas.fill(PANEL_X, PANEL_Y, 3.0, HEADER_H, ACCENT, c);
-    canvas.text(FONT_TITLE, PANEL_X + 9.0, PANEL_Y + 5.0, 10.0, TEXT, "INVENTORY", false, c);
+    canvas.text(FONT_TITLE, PANEL_X + 9.0, PANEL_Y + 5.0, 10.0, HIGHLIGHT, "INVENTORY", false, c);
     canvas.text(FONT_SMALL, PANEL_X + PANEL_W - 8.0, PANEL_Y + 7.5, 6.0, TEXT_DIM, "SURVIVAL  //  E TO CLOSE", true, c);
     canvas.frame(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, EDGE, c);
     canvas.brackets(PANEL_X - 2.0, PANEL_Y - 2.0, PANEL_W + 4.0, PANEL_H + 4.0, 8.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.9], c);
@@ -546,7 +556,7 @@ fn draw_inventory(
     canvas.quad(bx, by + bh - 26.0, bw, 26.0, [0.0, 0.0, 0.0, 0.35], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
     canvas.frame(bx, by, bw, bh, EDGE, c);
     canvas.brackets(bx, by, bw, bh, 5.0, ACCENT, c);
-    canvas.text(FONT_SMALL, bx + 4.0, by + bh - 9.0, 5.5, TEXT_DIM, "OPERATOR", false, c);
+    canvas.text(FONT_SMALL, bx + 4.0, by + bh - 9.0, 5.5, [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], 0.75], "OPERATOR", false, c);
 
     // Section labels.
     canvas.text(FONT_SMALL, 22.0, -100.0, 6.0, TEXT_DIM, "CRAFTING", false, c);
@@ -554,14 +564,14 @@ fn draw_inventory(
     canvas.text(FONT_TITLE, 68.0, -73.5, 11.0, TEXT_DIM, ">", false, c);
     canvas.text(FONT_SMALL, GRID_X, -6.5, 6.0, TEXT_DIM, "BACKPACK", false, c);
     canvas.fill(GRID_X + 38.0, -3.5, 158.0, 0.5, EDGE, c);
-    canvas.fill(GRID_X, 75.0, 196.0, 0.5, [ACCENT[0], ACCENT[1], ACCENT[2], 0.35], c);
+    canvas.fill(GRID_X, 75.0, 196.0, 0.5, [ACCENT[0], ACCENT[1], ACCENT[2], 0.45], c);
 
     // The slots.
     for (slot, x, y, size) in layout() {
         let hover = hovered == Some(slot);
         let is_result = slot == McSlot::Result;
         canvas.fill(x, y, size, size, if hover { SLOT_HOVER } else { SLOT }, c);
-        canvas.frame(x, y, size, size, if hover { ACCENT } else if is_result { [ACCENT[0], ACCENT[1], ACCENT[2], 0.45] } else { SLOT_EDGE }, c);
+        canvas.frame(x, y, size, size, if hover { HIGHLIGHT } else if is_result { [ACCENT[0], ACCENT[1], ACCENT[2], 0.55] } else { SLOT_EDGE }, c);
         if let McSlot::Inventory(i) = slot
             && i < 9
             && i == ui.selected
@@ -593,8 +603,8 @@ fn draw_inventory(
     let [sx, sy] = placement.scale_virtual_to_real;
     let (w_real, h_real) = (canvas.surface.width(), canvas.surface.height());
     // The mouse in the panel's centred virtual space.
-    let vx = (mouse.x - w_real * 0.5) / sx;
-    let vy = (mouse.y - h_real * 0.5) / sy;
+    let vx = (mouse.x - w_real * 0.5) / sx / K;
+    let vy = (mouse.y - h_real * 0.5) / sy / K;
     if let Some(stack) = ui.cursor.clone() {
         draw_stack(canvas, ui, weapons, &stack, vx - 10.0, vy - 10.0, 20.0, c);
         return;
@@ -612,6 +622,6 @@ fn draw_inventory(
     canvas.fill(x, y, w, 22.0, [0.02, 0.025, 0.028, 0.94], c);
     canvas.frame(x, y, w, 22.0, EDGE, c);
     canvas.fill(x, y, 2.0, 22.0, ACCENT, c);
-    canvas.text(FONT_TITLE, x + 7.0, y + 3.0, title_px, TEXT, &name, false, c);
+    canvas.text(FONT_TITLE, x + 7.0, y + 3.0, title_px, HIGHLIGHT, &name, false, c);
     canvas.text(FONT_SMALL, x + 7.0, y + 13.5, sub_px, TEXT_DIM, &sub, false, c);
 }

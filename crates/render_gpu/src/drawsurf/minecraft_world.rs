@@ -83,6 +83,8 @@ pub struct MinecraftWorldFrame {
     /// Mob models (cut out, back-face culled, translucent) and entity
     /// shadows: MinecraftOSS `Vertex` bytes (44 each) and indices.
     pub entity_meshes: [(Vec<u8>, Vec<u32>); 4],
+    /// A black card to draw, in blocks: behind the inventory's character.
+    pub backdrop: Option<[[f32; 3]; 4]>,
 }
 
 #[repr(C)]
@@ -123,11 +125,12 @@ struct TerrainGpu {
     cracks: Option<(Buffer, Buffer, u32)>,
     /// This frame's entity meshes, in `MinecraftWorldFrame::entity_meshes` order.
     entities: [Option<(Buffer, Buffer, u32)>; 4],
+    backdrop: Option<Buffer>,
     sampler: Option<Sampler>,
     bind: Option<BindGroup>,
     sections: HashMap<[i32; 3], SectionGpu>,
     visible: Vec<[i32; 3]>,
-    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 9]>,
+    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 10]>,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -241,6 +244,14 @@ fn prepare_terrain(
             }),
             particle_indices.len() as u32,
         )
+    });
+    gpu.backdrop = frame.backdrop.take().map(|[a, b, c, d]| {
+        let corners: [[f32; 3]; 6] = [a, b, c, a, c, d];
+        device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("iw4l_minecraft_backdrop"),
+            contents: bytemuck::cast_slice(&corners),
+            usage: BufferUsages::VERTEX,
+        })
     });
     let meshes = std::mem::take(&mut frame.entity_meshes);
     for (slot, (vertices, indices)) in gpu.entities.iter_mut().zip(meshes) {
@@ -467,7 +478,7 @@ fn draw_terrain(
     let (target, depth, extracted_view, msaa) = view.into_inner();
     let format = target.main_texture_format();
     let samples = msaa.map_or(1, Msaa::samples);
-    let [sky, opaque, translucent, clouds, crack, entity, entity_culled, entity_translucent, shadow] = gpu
+    let [sky, opaque, translucent, clouds, crack, entity, entity_culled, entity_translucent, shadow, backdrop] = gpu
         .pipelines
         .entry((format, samples))
         .or_insert_with(|| pipelines(&device, &registry, format, samples))
@@ -502,6 +513,12 @@ fn draw_terrain(
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..*count, 0, 0..1);
+    }
+    if let Some(card) = gpu.backdrop.as_ref() {
+        pass.set_render_pipeline(&backdrop);
+        pass.set_vertex_buffer(0, card.slice(..));
+        pass.draw(0..6, 0..1);
+        pass.set_render_pipeline(&opaque);
     }
     // Mobs, then their shadows on what is drawn so far.
     for (pipeline, mesh) in [(&entity, &gpu.entities[0]), (&entity_culled, &gpu.entities[1]), (&shadow, &gpu.entities[3])] {
@@ -831,6 +848,17 @@ fn entity_translucent_fragment(in: EntityOut) -> @location(0) vec4<f32> {
     return vec4<f32>(mix(lit, view.environment.fog.rgb, fog_value(in.world_pos)), texel.a * in.colour.a);
 }
 
+// The card behind the inventory's character.
+@vertex
+fn backdrop_vertex(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return view.clip_from_rel * vec4<f32>(rel_from_block(position), 1.0);
+}
+
+@fragment
+fn backdrop_fragment() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.012, 0.011, 0.010, 1.0);
+}
+
 // shadow.wgsl: black, as dark as the shadow sprite and the vertex alpha.
 @fragment
 fn shadow_fragment(in: EntityOut) -> @location(0) vec4<f32> {
@@ -867,7 +895,7 @@ fn pipelines(
     registry: &ExactPipelineRegistry,
     format: TextureFormat,
     samples: u32,
-) -> [RenderPipeline; 9] {
+) -> [RenderPipeline; 10] {
     let shader = unsafe {
         device.create_shader_module(ShaderModuleDescriptor {
             label: Some("iw4l_minecraft_terrain"),
@@ -976,6 +1004,16 @@ fn pipelines(
         array_stride: ENTITY_VERTEX_BYTES,
         step_mode: VertexStepMode::Vertex,
         attributes: &entity_attributes,
+    }];
+    let backdrop_attributes = [VertexAttribute {
+        format: VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    }];
+    let backdrop_buffers = [RawVertexBufferLayout {
+        array_stride: 12,
+        step_mode: VertexStepMode::Vertex,
+        attributes: &backdrop_attributes,
     }];
     let crumbling = BlendState {
         color: bevy::render::render_resource::BlendComponent {
@@ -1086,5 +1124,6 @@ fn pipelines(
             Some(BlendState::ALPHA_BLENDING),
             None,
         ),
+        make("backdrop_vertex", "backdrop_fragment", &backdrop_buffers, true, CompareFunction::GreaterEqual, None, None),
     ]
 }
