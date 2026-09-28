@@ -1,14 +1,17 @@
-//! Double-click setup: find the player's MW2 install, ask for their Skate 3
-//! default.xex, convert the few Skate 3 files skating needs with the bundled
-//! converter, and record both in `.env` beside the executable. Every later
-//! double-click goes straight to the menu.
+//! First-launch setup: find the player's MW2 install, offer to take their
+//! Skate 3 default.xex, convert the few Skate 3 files skating needs with the
+//! bundled converter, and record both in `.env` beside the executable. Skate
+//! 3 is optional: without it the game plays with skating off. Every later
+//! launch goes straight in.
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
-const TITLE: &str = "IW4L Skate";
+const TITLE: &str = "2010 Rust Rewrite Mashup";
+/// `.env` key recording that the player chose to play without Skate 3.
+const SKATE_SWITCH: &str = "IW4L_SKATE";
 const MW2_FOLDER: &str = "Call of Duty Modern Warfare 2";
 
 pub fn prepare() -> Result<(), String> {
@@ -25,18 +28,27 @@ pub fn prepare() -> Result<(), String> {
         env.write(&env_path)?;
     }
 
+    if env.get(SKATE_SWITCH) == Some("off") {
+        return Ok(());
+    }
     let assets = match env
         .get("IW4L_SKATE_ASSETS")
         .map(PathBuf::from)
         .filter(|path| skate_ready(path))
     {
         Some(assets) => assets,
-        None => {
-            let assets = convert_skate(&root)?;
-            env.set("IW4L_SKATE_ASSETS", &assets);
-            env.write(&env_path)?;
-            assets
-        }
+        None => match convert_skate(&root)? {
+            Some(assets) => {
+                env.set("IW4L_SKATE_ASSETS", &assets);
+                env.write(&env_path)?;
+                assets
+            }
+            None => {
+                env.set_value(SKATE_SWITCH, "off");
+                env.write(&env_path)?;
+                return Ok(());
+            }
+        },
     };
     assets::skate_board::ensure(&assets)
         .map_err(|error| format!("Could not prepare the skateboard: {error}"))
@@ -132,7 +144,8 @@ fn skate_ready(assets: &Path) -> bool {
     .all(|file| assets.join(file).is_file())
 }
 
-fn convert_skate(root: &Path) -> Result<PathBuf, String> {
+/// The converted Skate 3 data, or none when the player plays without it.
+fn convert_skate(root: &Path) -> Result<Option<PathBuf>, String> {
     let converter = root.join("skate").join("iw4l-skate-convert.exe");
     if !converter.is_file() {
         return Err(format!(
@@ -140,18 +153,29 @@ fn convert_skate(root: &Path) -> Result<PathBuf, String> {
             converter.display()
         ));
     }
-    inform(
-        "Next, select your Skate 3 default.xex.\n\n\
-         It's in your extracted Skate 3 (Xbox 360) game folder. Keep the game's \
-         data folder beside it. ISO files do not work.",
-    );
+    let answer = MessageDialog::new()
+        .set_title(TITLE)
+        .set_description(
+            "Do you have Skate 3 (Xbox 360)?\n\n\
+             Skate mode needs your extracted Skate 3 default.xex, with the game's \
+             data folder beside it. ISO files do not work.\n\n\
+             Choose No to play MW2 and the Minecraft world without skating. \
+             Delete the .env file beside iw4l.exe to be asked again.",
+        )
+        .set_buttons(MessageButtons::YesNo)
+        .show();
+    if answer != MessageDialogResult::Yes {
+        return Ok(None);
+    }
     let out = root.join("skate-data");
     loop {
-        let xex = rfd::FileDialog::new()
+        let Some(xex) = rfd::FileDialog::new()
             .set_title("Select your Skate 3 default.xex")
             .add_filter("Skate 3 default.xex", &["xex"])
             .pick_file()
-            .ok_or("Setup cancelled: no Skate 3 default.xex was selected.")?;
+        else {
+            return Ok(None);
+        };
         println!("Converting Skate 3 data from {}", xex.display());
         match run_converter(&converter, &xex, &out) {
             Ok(()) => break,
@@ -160,7 +184,7 @@ fn convert_skate(root: &Path) -> Result<PathBuf, String> {
     }
     let assets = out.join("assets");
     if skate_ready(&assets) {
-        Ok(assets)
+        Ok(Some(assets))
     } else {
         Err(format!(
             "The Skate 3 conversion finished but {} is incomplete.",
@@ -231,6 +255,14 @@ impl EnvFile {
                 .is_none_or(|(name, _)| name.trim() != key)
         });
         self.lines.push(format!("{key}=\"{value}\""));
+    }
+
+    fn set_value(&mut self, key: &str, value: &str) {
+        self.lines.retain(|line| {
+            line.split_once('=')
+                .is_none_or(|(name, _)| name.trim() != key)
+        });
+        self.lines.push(format!("{key}={value}"));
     }
 
     fn write(&self, path: &Path) -> Result<(), String> {

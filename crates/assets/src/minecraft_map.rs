@@ -56,8 +56,9 @@ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, Stri
 
 pub fn list_mp_maps(root_dir: &GamesRoot) -> Vec<String> {
     let mut maps = asset_transport::list_mp_maps(root_dir);
+    // Listed before Mojang's files are in: loading it waits for them.
     prepare();
-    if root().is_some() && asset_transport::find_zone_file(root_dir, PROXY_ZONE).is_ok() {
+    if asset_transport::find_zone_file(root_dir, PROXY_ZONE).is_ok() {
         maps.push(ZONE.to_owned());
     }
     maps.sort();

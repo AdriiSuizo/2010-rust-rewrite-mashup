@@ -16,9 +16,12 @@ fn main() {
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
-    if args.is_empty() {
+    {
+        // Also for a shortcut that names a map, so it works on first launch.
         first_run::prepare().unwrap_or_else(|e| first_run::fail(&e));
-        args.push("menu".into());
+        if args.is_empty() {
+            args.push("menu".into());
+        }
     }
     let artifacts = ensure_artifacts_dir().unwrap_or_else(|e| diag::exit_launch_error(&e));
     announce_log(diag::init_log(&artifacts));

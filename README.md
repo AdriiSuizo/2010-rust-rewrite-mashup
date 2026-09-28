@@ -26,20 +26,16 @@ You don't need Minecraft installed. The first time the game starts, it downloads
 ## What you'll need
 
 - **MW2**, only tested with the Steam version.
-- For Skate 3 mode: the **Xbox 360 version of Skate 3** (the extracted `default.xex` with its `data` folder) and a controller.
+- Optional, for Skate 3 mode: the **Xbox 360 version of Skate 3** (the extracted `default.xex` with its `data` folder) and a controller. Without it, everything else still works; skating is just off.
 - For the Minecraft map: an internet connection the first time you play, and `curl`. `curl` comes with Windows 10 and 11, macOS and most Linux distributions.
 
 ## How to play
 
-1. Grab the zip from [Releases](../../releases/latest) and extract it, or build it yourself (see [docs/BUILD.md](docs/BUILD.md)).
-2. Double-click `iw4l.exe`, then point it at your MW2 folder and, for skating, your Skate 3 `default.xex`.
-3. Pick a map, or open the Minecraft world by starting the game with:
+1. Grab the zip from [Releases](../../releases/latest) and extract it somewhere you can write to (not Program Files), or build it yourself (see [docs/BUILD.md](docs/BUILD.md)).
+2. Double-click `iw4l.exe` and confirm your MW2 folder. It then asks whether you have Skate 3: choose **Yes** and select your `default.xex`, or **No** to play without skating.
+3. To play the Minecraft world, pick it from the map list: **scroll to the second page of maps**. It's called **overworld**.
 
-   ```
-   iw4l.exe map minecraft:overworld
-   ```
-
-   You can also open the console with the backtick key (`` ` ``, under Esc) and type `map minecraft:overworld`.
+   You can also double-click `Minecraft World.bat` in the release folder, start the game with `iw4l.exe map minecraft:overworld`, or open the console with the backtick key (`` ` ``, under Esc) and type `map minecraft:overworld`.
 
 ### Controls on the Minecraft map
 
