@@ -2009,6 +2009,10 @@ struct PreparedExactDraw {
 
     /// Which constant arena `constant_base` indexes.
     arena_lane: u8,
+
+    /// The loaded map only stands in for a Minecraft world: this draw of
+    /// its world is prepared but not submitted.
+    minecraft_hidden: bool,
 }
 
 fn bsp_draw_source(kind: &RetainedDrawKind) -> (Option<BspCameraLane>, u16, u16, u16) {
@@ -6122,6 +6126,14 @@ impl ExactPrepare<'_> {
                     tess,
                     owner_object_id: matches!(kind, RetainedDrawKind::XModel { .. })
                         .then(|| drawsurf_object_id(key)),
+                    minecraft_hidden: super::minecraft_world::hides_map()
+                        && matches!(
+                            kind,
+                            RetainedDrawKind::World { .. }
+                                | RetainedDrawKind::Smodel { .. }
+                                | RetainedDrawKind::Glass { .. }
+                                | RetainedDrawKind::MarkMesh { .. }
+                        ),
                     depth_min,
                     depth_max,
                     state: GfxPassState::from_bits(executable.state),

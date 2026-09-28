@@ -23,6 +23,7 @@ pub use killstreaks::{
     model_source as killstreak_model_source,
 };
 mod mantle_xanim;
+pub mod voxel;
 pub mod match_state;
 mod missile;
 mod weapon_lock;

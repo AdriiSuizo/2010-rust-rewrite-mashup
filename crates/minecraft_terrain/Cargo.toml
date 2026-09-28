@@ -1,0 +1,23 @@
+[package]
+name = "minecraft_terrain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Minecraft terrain streaming, lighting and section meshing, ported from MinecraftOSS engine/viewer at 9e4108d."
+
+[dependencies]
+minecraftoss-core = { path = "D:/MinecraftOSS/engine/core" }
+minecraftoss-world = { path = "D:/MinecraftOSS/engine/world" }
+minecraftoss-generator = { path = "D:/MinecraftOSS/engine/generator" }
+minecraftoss-player = { path = "D:/MinecraftOSS/engine/player" }
+minecraftoss-entities = { path = "D:/MinecraftOSS/engine/entities" }
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+regex = "1"
+

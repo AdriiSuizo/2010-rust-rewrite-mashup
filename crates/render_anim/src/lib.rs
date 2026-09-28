@@ -37,4 +37,5 @@ pub use occupancy::{
 };
 pub use plugin::RenderAnimPlugin;
 
+pub mod minecraft_world;
 pub mod skate;

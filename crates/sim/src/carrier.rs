@@ -220,6 +220,10 @@ impl SimWorld {
         self.frame().set_legs_anim(id, legs_anim)
     }
 
+    pub fn teleport(&mut self, id: ClientId, origin: [f32; 3]) -> bool {
+        self.frame().teleport(id, origin)
+    }
+
     pub fn set_viewangles(&mut self, id: ClientId, viewangles: [f32; 3]) -> bool {
         self.frame().set_viewangles(id, viewangles)
     }

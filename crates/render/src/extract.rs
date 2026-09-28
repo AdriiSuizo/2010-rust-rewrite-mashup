@@ -922,3 +922,49 @@ pub fn extract_model_lighting_tiles(
             }),
     );
 }
+
+/// Moves the Minecraft world's new section meshes and state to the render
+/// world, converting the atlas once per world.
+pub fn extract_minecraft_world(
+    mut main_world: ResMut<bevy::render::MainWorld>,
+    mut frame: ResMut<render_gpu::MinecraftWorldFrame>,
+    mut atlas_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
+) {
+    let Some(mut view) = main_world.get_resource_mut::<render_anim::minecraft_world::MinecraftWorldView>() else {
+        return;
+    };
+    frame.active = view.active;
+    frame.origin = view.origin;
+    frame.view_distance = 8.0;
+    if frame.generation != view.generation {
+        frame.generation = view.generation;
+        frame.uploads.clear();
+        frame.removed.clear();
+    }
+    frame.atlas = view.atlas.as_ref().map(|atlas| {
+        let key = std::sync::Arc::as_ptr(atlas) as usize;
+        if let Some((held, converted)) = atlas_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let mut levels = vec![atlas.pixels.as_raw().clone()];
+        levels.extend(atlas.mipmaps.iter().map(|level| level.as_raw().clone()));
+        let converted = std::sync::Arc::new(render_gpu::MinecraftAtlasImage {
+            width: atlas.pixels.width(),
+            height: atlas.pixels.height(),
+            levels,
+        });
+        *atlas_of = Some((key, converted.clone()));
+        converted
+    });
+    let to_pos = |p: minecraft_terrain::sections::SectionPos| [p.0, p.1, p.2];
+    frame.removed.extend(view.removed.drain(..).map(to_pos));
+    frame.uploads.extend(view.uploads.drain(..).map(|(pos, mesh)| render_gpu::MinecraftSectionUpload {
+        pos: to_pos(pos),
+        vertices: bytemuck::cast_slice(&mesh.vertices).to_vec(),
+        indices: mesh.indices,
+        transparent_start: mesh.transparent_start,
+    }));
+    frame.visible = view.visible.iter().map(|(pos, _)| to_pos(*pos)).collect();
+}

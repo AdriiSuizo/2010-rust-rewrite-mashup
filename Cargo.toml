@@ -44,6 +44,7 @@ members = [
     "crates/sound_iw4",
     "crates/input_iw4",
     "crates/launcher",
+    "crates/minecraft_terrain",
     "crates/lighting_iw4",
     "crates/marks_iw4",
     "crates/master_protocol",

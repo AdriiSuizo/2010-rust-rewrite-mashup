@@ -2162,6 +2162,9 @@ impl SimState {
             mask,
             &|piece| !ignore_glass && self.world_objects.glass_is_solid(piece as u32),
         );
+        if crate::voxel::active_for(clip_brushes) {
+            return world_hit;
+        }
         let linked: Vec<LinkedBrushCollisionBrush> = self
             .entity_collision_capabilities
             .iter()
@@ -2805,9 +2808,11 @@ impl SimState {
         // Only the entities the ray can reach are copied out: every trace
         // skips the rest on the same bounds test, and copying all of them
         // cost more than the trace itself.
+        let voxel = crate::voxel::active_for(&self.content.data.clip_brushes);
         let geoms: Vec<EntityCollisionTraceGeom> = self
             .entity_collision_capabilities
             .iter()
+            .filter(|_| !voxel)
             .filter(|capabilities| {
                 capabilities.ray_may_hit(&self.content.data.clip_cmodels, query.start, query.end)
                     && self.objectives.collision_active(capabilities.owner)
@@ -3884,6 +3889,10 @@ pub(crate) fn clip_trace(
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> trace_iw4::Trace {
     use std::cell::Cell;
+
+    if crate::voxel::active_for(brushes) {
+        return crate::voxel::trace(start, end, mins, maxs);
+    }
 
     let map = clipmap_iw4::ClipMapRef {
         nodes: &bsp.nodes,

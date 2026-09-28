@@ -760,7 +760,11 @@ fn game_map_pages(maps: &[String]) -> Vec<GameMapPage<'_>> {
     let mut iw4_base = Vec::new();
     let mut iw4_dlc = Vec::new();
     let mut iw4_other = Vec::new();
-    let mut foreign = [("iw5", Vec::new()), ("t5", Vec::new())];
+    let mut foreign = [
+        ("iw5", Vec::new()),
+        ("t5", Vec::new()),
+        ("minecraft", Vec::new()),
+    ];
     for map in maps {
         let Some((game, zone)) = map.split_once(':') else {
             continue;

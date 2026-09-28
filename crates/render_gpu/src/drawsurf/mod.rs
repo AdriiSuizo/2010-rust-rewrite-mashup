@@ -10,6 +10,7 @@ mod gpu_prepare;
 mod gpu_resources;
 mod hud_blood;
 mod iw_tess;
+mod minecraft_world;
 mod model_lighting_tiles;
 mod postfx;
 mod postfx_dof;
@@ -61,6 +62,9 @@ pub use colour_submit::{
 pub(crate) use draw::register_drawsurf_render;
 pub use geometry_diagnostic::{ExtractedDiagnosticGeometry, geometry_diagnostic_enabled};
 pub use gpu_resources::*;
+pub use minecraft_world::{
+    MINECRAFT_VERTEX_BYTES, MinecraftAtlasImage, MinecraftSectionUpload, MinecraftWorldFrame,
+};
 pub use model_lighting_tiles::{ModelLightingTileUpload, ModelLightingTileUploads};
 pub use postfx::{ExtractedBlood, ExtractedFilm, ExtractedPostFx};
 pub use postfx_dof::{DepthOfField, DofFrame, GLOW_APPLY_MATERIAL, GLOW_SETUP_MATERIAL, GlowFrame};
