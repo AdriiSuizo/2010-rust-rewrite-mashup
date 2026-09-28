@@ -871,14 +871,25 @@ pub fn sample_client_input(
     // action slots give way to the gun its selection asks for.
     let hotbar = minecraft.as_ref().is_some_and(|ui| ui.active);
     if hotbar {
-        actions.client.action_slots.clear();
-        // Switching weapon steps the hotbar.
+        // Switching weapon swaps between the first two hotbar slots; action
+        // slots 3 and 4 (the D-pad's left and right) step along it.
+        let slots = std::mem::take(&mut actions.client.action_slots);
         let cycles = std::mem::take(&mut actions.client.weapon_cycles);
-        if let Some(ui) = minecraft.as_mut()
-            && let Some(next) = cycles.last()
-        {
-            let step = if *next { 1 } else { 8 };
-            ui.select = Some((ui.selected + step) % 9);
+        if let Some(ui) = minecraft.as_mut() {
+            let mut selected = ui.select.unwrap_or(ui.selected);
+            if !cycles.is_empty() {
+                selected = if selected == 0 { 1 } else { 0 };
+            }
+            for slot in slots {
+                match slot {
+                    2 => selected = (selected + 8) % 9,
+                    3 => selected = (selected + 1) % 9,
+                    _ => {}
+                }
+            }
+            if selected != ui.selected {
+                ui.select = Some(selected);
+            }
         }
         if let (Some(ps), Some(ui)) = (ps.filter(|_| !frozen), minecraft.as_mut())
             && let Some(target) = ui.weapon_request
