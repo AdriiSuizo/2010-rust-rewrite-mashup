@@ -42,59 +42,7 @@ impl Session {
         skate_data::input_config::StockGameplayConfig::load(root).map_err(|e| e.to_string())?;
         let assets = skate_data::GameAssets::load(root).map_err(|e| e.to_string())?;
         let graphs = StockGraphs::load(root, &assets)?;
-        let map = SkateMap {
-            version: 14,
-            name: "IW4L collision".into(),
-            spawn,
-            heading,
-            environment: vec![],
-            materials: vec![skate_data::skate_map::Material {
-                name: "MW2".into(),
-                flags: 0,
-                friction: 0.8,
-                restitution: 0.,
-                color: [1.; 3],
-                roughness: 1.,
-                emissive: 0.,
-                textures: [0; 5],
-                indirect_strength: 1.,
-                alpha_mode: 0,
-                alpha_cutoff: 0.5,
-                audio: 0,
-                physics: 0,
-                pattern: 0,
-                depth_layer: None,
-                retail_definition: None,
-            }],
-            textures: vec![],
-            geometry: Geometry {
-                vertices: vec![],
-                indices: vec![],
-                collision: triangles
-                    .into_iter()
-                    .map(|points| Collision {
-                        points,
-                        surface: 0,
-                        material: 1,
-                        native_edges: None,
-                    })
-                    .collect(),
-            },
-            rails: rails
-                .into_iter()
-                .enumerate()
-                .map(|(i, p)| Rail {
-                    name: format!("iw4_edge_{i}"),
-                    closed: false,
-                    points: p,
-                    native: None,
-                })
-                .collect(),
-            doors: vec![],
-            lights: vec![],
-            routes: vec![],
-            extensions: vec![],
-        };
+        let map = collision_map(triangles, rails, spawn, heading);
         eprintln!("IW4L_SKATE_LOAD graphs {}ms", started.elapsed().as_millis());
         let physics = GamePhysics::load_with_map(root, Some(&map))?;
         eprintln!(
@@ -112,6 +60,20 @@ impl Session {
             camera: CameraRuntime::load(root)?,
             markers: crate::session_marker::Runtime::load(root)?,
         })
+    }
+    /// A builder for collision to swap in later, usable on another thread.
+    pub fn collision_builder(&self) -> CollisionBuilder {
+        CollisionBuilder {
+            material: self.physics.floor_material(),
+        }
+    }
+    /// Swaps in collision built by `collision_builder`: the world the skater
+    /// rides, climbs and grinds from the next tick.
+    pub fn install_collision(&mut self, prepared: PreparedCollision) -> Result<(), String> {
+        self.physics
+            .install_world(prepared.world, std::sync::Arc::clone(&prepared.grind))?;
+        self.skater.trajectory.bind_grind_world(prepared.grind);
+        Ok(())
     }
     pub fn period(&self) -> f32 {
         self.physics.period().as_secs_f32()
@@ -222,6 +184,93 @@ impl Session {
             tick: self.physics.ticks,
             state: format!("{:?}", self.skater.player_state.current()),
         }
+    }
+}
+
+/// Collision for `Session::install_collision`, built off the simulation.
+pub struct PreparedCollision {
+    world: skate_core::physics::board_world::BoardWorld,
+    grind: std::sync::Arc<crate::grind_world::StaticProvider>,
+}
+
+#[derive(Clone, Copy)]
+pub struct CollisionBuilder {
+    material: skate_core::physics::contact::RetailContactMaterial,
+}
+
+impl CollisionBuilder {
+    pub fn build(
+        &self,
+        triangles: Vec<[[f32; 3]; 3]>,
+        rails: Vec<Vec<[f32; 3]>>,
+    ) -> Result<PreparedCollision, String> {
+        let map = collision_map(triangles, rails, [0.; 3], 0.);
+        Ok(PreparedCollision {
+            world: crate::skate_world::collision_world(&map, self.material)?,
+            grind: std::sync::Arc::new(crate::grind_world::StaticProvider::new(Some(&map))?),
+        })
+    }
+}
+
+/// IW4L's collision as a Skate map: one material, the triangles and rails.
+fn collision_map(
+    triangles: Vec<[[f32; 3]; 3]>,
+    rails: Vec<Vec<[f32; 3]>>,
+    spawn: [f32; 3],
+    heading: f32,
+) -> SkateMap {
+    SkateMap {
+            version: 14,
+            name: "IW4L collision".into(),
+            spawn,
+            heading,
+            environment: vec![],
+            materials: vec![skate_data::skate_map::Material {
+                name: "MW2".into(),
+                flags: 0,
+                friction: 0.8,
+                restitution: 0.,
+                color: [1.; 3],
+                roughness: 1.,
+                emissive: 0.,
+                textures: [0; 5],
+                indirect_strength: 1.,
+                alpha_mode: 0,
+                alpha_cutoff: 0.5,
+                audio: 0,
+                physics: 0,
+                pattern: 0,
+                depth_layer: None,
+                retail_definition: None,
+            }],
+            textures: vec![],
+            geometry: Geometry {
+                vertices: vec![],
+                indices: vec![],
+                collision: triangles
+                    .into_iter()
+                    .map(|points| Collision {
+                        points,
+                        surface: 0,
+                        material: 1,
+                        native_edges: None,
+                    })
+                    .collect(),
+            },
+            rails: rails
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| Rail {
+                    name: format!("iw4_edge_{i}"),
+                    closed: false,
+                    points: p,
+                    native: None,
+                })
+                .collect(),
+            doors: vec![],
+            lights: vec![],
+            routes: vec![],
+            extensions: vec![],
     }
 }
 

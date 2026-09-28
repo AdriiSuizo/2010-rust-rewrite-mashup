@@ -38,6 +38,17 @@ pub struct VoxelWorld {
 }
 
 static WORLD: RwLock<Option<VoxelWorld>> = RwLock::new(None);
+/// Bumped whenever the block world's collision changes.
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn bump() {
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Changes with every change to the block world's collision.
+pub fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// What the authoritative game did to the block world this tick, for the
 /// world's owner to apply.
@@ -211,6 +222,7 @@ pub fn set_block_shape(x: i32, y: i32, z: i32, shape: u16) {
             let index = ((ly * 16 + (z & 15)) * 16 + (x & 15)) as usize;
             if let Some(slot) = chunk.shapes.get_mut(index) {
                 *slot = shape;
+                bump();
             }
         }
     }
@@ -227,6 +239,7 @@ pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]
             shapes,
         });
     }
+    bump();
 }
 
 pub fn deactivate() {
@@ -253,6 +266,7 @@ pub fn set_chunk(x: i32, z: i32, chunk: VoxelChunk) {
     {
         world.chunks.insert((x, z), chunk);
     }
+    bump();
 }
 
 pub fn remove_chunk(x: i32, z: i32) {
@@ -261,6 +275,83 @@ pub fn remove_chunk(x: i32, z: i32) {
     {
         world.chunks.remove(&(x, z));
     }
+    bump();
+}
+
+/// The faces of the block world's collision boxes within `radius` blocks
+/// across and `depth` blocks up or down of map point `centre`, as triangles
+/// in map units wound counterclockwise seen from outside. A face against a
+/// full neighbouring block is left out; blocks without collision (grass,
+/// flowers) have none.
+pub fn collision_triangles(centre: [f32; 3], radius: i32, depth: i32) -> Vec<[[f32; 3]; 3]> {
+    let Ok(world) = WORLD.read() else {
+        return Vec::new();
+    };
+    let Some(world) = world.as_ref() else {
+        return Vec::new();
+    };
+    let full: Vec<bool> = world.shapes.iter().map(|b| b.len() == 1 && b[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).collect();
+    let is_full = |x: i32, y: i32, z: i32| -> bool {
+        let Some(chunk) = world.chunks.get(&(x >> 4, z >> 4)) else {
+            return false;
+        };
+        let ly = y - chunk.min_y;
+        if ly < 0 || ly >= chunk.height {
+            return false;
+        }
+        let id = chunk.shapes[((ly * 16 + (z & 15)) * 16 + (x & 15)) as usize];
+        full.get(usize::from(id)).copied().unwrap_or(false)
+    };
+    let c = to_block(world.origin, centre);
+    let (cx, cy, cz) = (c[0].floor() as i32, c[1].floor() as i32, c[2].floor() as i32);
+    let mut out = Vec::new();
+    for x in cx - radius..=cx + radius {
+        for z in cz - radius..=cz + radius {
+            for y in cy - depth..=cy + depth {
+                let boxes = world.shape_at(x, y, z);
+                if boxes.is_empty() {
+                    continue;
+                }
+                let base = [f64::from(x), f64::from(y), f64::from(z)];
+                for b in boxes {
+                    let lo = [f64::from(b[0]), f64::from(b[1]), f64::from(b[2])];
+                    let hi = [f64::from(b[3]), f64::from(b[4]), f64::from(b[5])];
+                    for axis in 0..3 {
+                        // Tangents whose cross product is the axis.
+                        let (u, v) = [(1, 2), (2, 0), (0, 1)][axis];
+                        for high in [false, true] {
+                            let at = if high { hi[axis] } else { lo[axis] };
+                            let mut step = [0; 3];
+                            step[axis] = if high { 1 } else { -1 };
+                            let on_edge = if high { at >= 1.0 } else { at <= 0.0 };
+                            if on_edge && is_full(x + step[0], y + step[1], z + step[2]) {
+                                continue;
+                            }
+                            let corner = |a: f64, b: f64| {
+                                let mut p = [0.0; 3];
+                                p[axis] = at;
+                                p[u] = a;
+                                p[v] = b;
+                                to_map(world.origin, std::array::from_fn(|k| base[k] + p[k]))
+                            };
+                            let mut quad = [
+                                corner(lo[u], lo[v]),
+                                corner(hi[u], lo[v]),
+                                corner(hi[u], hi[v]),
+                                corner(lo[u], hi[v]),
+                            ];
+                            if !high {
+                                quad.reverse();
+                            }
+                            out.push([quad[0], quad[1], quad[2]]);
+                            out.push([quad[0], quad[2], quad[3]]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Whether traces against `brushes` go to the block world.

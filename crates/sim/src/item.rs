@@ -192,7 +192,14 @@ pub(crate) fn sustain_block_world_arsenal(world: &mut FrameWorld) {
             if clip_r < facts.clip_size || clip_l < full_l || stock < full_stock {
                 set_ammo_on_ps(world, &mut ps, weapon, facts.clip_size, full_l, full_stock);
             }
+            // The match's own ledger, which grenades are thrown from.
+            let meta = world.client_meta_mut(id);
+            let (clip, stock) = meta.ammo_for(weapon);
+            if clip < facts.clip_size || stock < full_stock {
+                meta.set_ammo(weapon, facts.clip_size, full_stock);
+            }
         }
+        world.client_meta_mut(id).mirror_held_ammo(ps.weapon);
         if ps != before
             && let Some(slot) = world.player_mut(id)
         {

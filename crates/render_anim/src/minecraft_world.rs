@@ -307,6 +307,7 @@ fn update(
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
+    (skate, cameras): (Res<frame::SkateMode>, Query<&Transform, With<render_scene::FlyCamera>>),
 ) {
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
@@ -728,13 +729,24 @@ fn update(
         .single()
         .map(|w| w.width() / w.height().max(1.0))
         .unwrap_or(16.0 / 9.0);
+    // Culled from the camera that draws: the player's eye, or while
+    // skating the Skate camera (a frame behind, so with room to spare).
+    let skate_camera = cameras.iter().next().filter(|_| skate.active).map(|t| {
+        let at = sim::voxel::to_block(origin, t.translation.to_array());
+        let ahead = t.rotation * Vec3::NEG_Z;
+        (
+            glam::DVec3::new(at[0], at[1], at[2]),
+            glam::Vec3::new(ahead.x, ahead.z, -ahead.y).normalize_or(forward),
+        )
+    });
+    let (cull_at, cull_forward) = skate_camera.unwrap_or((glam::DVec3::new(eye[0], eye[1], eye[2]), forward));
     let camera = CullCamera {
-        position: glam::DVec3::new(eye[0], eye[1], eye[2]),
-        forward,
-        fov_degrees: 90.0,
+        position: cull_at,
+        forward: cull_forward,
+        fov_degrees: if skate_camera.is_some() { 120.0 } else { 90.0 },
         aspect,
-        yaw_degrees: (-forward.x).atan2(forward.z).to_degrees(),
-        pitch_degrees: (-forward.y).asin().to_degrees(),
+        yaw_degrees: (-cull_forward.x).atan2(cull_forward.z).to_degrees(),
+        pitch_degrees: (-cull_forward.y).asin().to_degrees(),
     };
     let update = world
         .stream

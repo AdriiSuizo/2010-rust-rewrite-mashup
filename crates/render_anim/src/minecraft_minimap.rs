@@ -18,9 +18,19 @@ const SIZE: i32 = 256;
 const REDRAW_SECONDS: f64 = 2.0;
 const RECENTRE: i32 = 16;
 
+/// Frames a new picture waits before it shows, so its texture has reached
+/// the GPU by the time its corners move with it.
+const SWAP_FRAMES: u8 = 3;
+
+/// Two pictures: the one shown and the next one being drawn, which takes
+/// over together with its own corners so the map never jumps.
 #[derive(Default)]
 pub(crate) struct Minimap {
-    handle: Option<Handle<Image>>,
+    handles: [Option<Handle<Image>>; 2],
+    /// The picture shown and its north-west corner block.
+    shown: Option<(usize, [i32; 2])>,
+    /// The next picture, its corner, and frames until it shows.
+    pending: Option<(usize, [i32; 2], u8)>,
     centre: Option<(i32, i32)>,
     since: f64,
     colours: HashMap<String, Option<[f32; 3]>>,
@@ -39,9 +49,17 @@ impl Minimap {
         images: &mut Assets<Image>,
     ) -> Option<(Handle<Image>, [i32; 2])> {
         self.since += dt;
+        if let Some((index, corner, frames)) = self.pending.as_mut() {
+            if *frames == 0 {
+                self.shown = Some((*index, *corner));
+                self.pending = None;
+            } else {
+                *frames -= 1;
+            }
+        }
         let here = (feet[0].floor() as i32, feet[2].floor() as i32);
         let moved = self.centre.is_none_or(|(x, z)| (x - here.0).abs() >= RECENTRE || (z - here.1).abs() >= RECENTRE);
-        if moved || self.since >= REDRAW_SECONDS || self.handle.is_none() {
+        if self.pending.is_none() && (moved || self.since >= REDRAW_SECONDS) {
             self.since = 0.0;
             let centre = (here.0.div_euclid(RECENTRE) * RECENTRE, here.1.div_euclid(RECENTRE) * RECENTRE);
             self.centre = Some(centre);
@@ -53,15 +71,17 @@ impl Minimap {
                 TextureFormat::Rgba8UnormSrgb,
                 RenderAssetUsages::default(),
             );
-            match self.handle.as_ref() {
+            let index = self.shown.map_or(0, |(shown, _)| 1 - shown);
+            match self.handles[index].as_ref() {
                 Some(handle) => {
                     let _ = images.insert(handle.id(), image);
                 }
-                None => self.handle = Some(images.add(image)),
+                None => self.handles[index] = Some(images.add(image)),
             }
+            self.pending = Some((index, [centre.0 - SIZE / 2, centre.1 - SIZE / 2], SWAP_FRAMES));
         }
-        let (cx, cz) = self.centre?;
-        Some((self.handle.clone()?, [cx - SIZE / 2, cz - SIZE / 2]))
+        let (index, corner) = self.shown?;
+        Some((self.handles[index].clone()?, corner))
     }
 
     fn draw(&mut self, (cx, cz): (i32, i32), scene: &HandcraftedScene, packs: &PackStack, atlas: &Atlas) -> Vec<u8> {

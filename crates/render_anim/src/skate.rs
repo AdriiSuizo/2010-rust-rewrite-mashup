@@ -4,7 +4,7 @@ pub mod rails;
 pub mod rig;
 use bevy::prelude::*;
 use frame::{AppScreen, SkateMode};
-use skate_host::bridge::{ControllerTransport, InputFrame, Pose, Session};
+use skate_host::bridge::{CollisionBuilder, ControllerTransport, InputFrame, Pose, PreparedCollision, Session};
 use std::sync::{Arc, Mutex, mpsc};
 
 enum Job {
@@ -71,6 +71,26 @@ fn preload_assets(mut mode: ResMut<SkateMode>) {
     }
 }
 
+/// Blocks across either way of the skater that a Minecraft world's collision
+/// covers, blocks up and down, and how far the skater goes before it is
+/// rebuilt around them.
+const BLOCK_RADIUS: i32 = 40;
+const BLOCK_DEPTH: i32 = 20;
+const BLOCK_RECENTRE: f32 = 14.0;
+
+/// A Minecraft world's collision around map point `centre`, for Skate.
+fn block_collision(builder: &CollisionBuilder, centre: Vec3) -> Result<(PreparedCollision, usize), String> {
+    let triangles: Vec<[[f32; 3]; 3]> = sim::voxel::collision_triangles(centre.to_array(), BLOCK_RADIUS, BLOCK_DEPTH)
+        .into_iter()
+        .map(|t| t.map(|p| collision::to_skate(Vec3::from_array(p)).to_array()))
+        .collect();
+    if triangles.is_empty() {
+        return Err("no blocks around the skater yet".into());
+    }
+    let n = triangles.len();
+    Ok((builder.build(triangles, Vec::new())?, n))
+}
+
 /// One retained session per map. Leaving skating only pauses this worker;
 /// collision, decoded animation banks, graphs and the rig remain resident.
 fn preload_map(host: &mut Host, clip: Arc<assets::ClipCollision>) -> Result<(), String> {
@@ -103,6 +123,31 @@ fn preload_map(host: &mut Host, clip: Arc<assets::ClipCollision>) -> Result<(), 
                 if publish.send(Reply::Ready).is_err() {
                     return Ok(());
                 }
+                // On a Minecraft world the collision streams: built around
+                // the skater off this thread and swapped in as they move or
+                // the blocks change.
+                let builder = session.collision_builder();
+                let (build_send, build_jobs) = mpsc::channel::<Vec3>();
+                let (built_send, built) = mpsc::channel::<(u64, Vec3, Result<(PreparedCollision, usize), String>)>();
+                std::thread::Builder::new()
+                    .name("iw4l-skate-blocks".into())
+                    .spawn(move || {
+                        while let Ok(mut centre) = build_jobs.recv() {
+                            while let Ok(newer) = build_jobs.try_recv() {
+                                centre = newer;
+                            }
+                            let revision = sim::voxel::revision();
+                            let prepared = block_collision(&builder, centre);
+                            if built_send.send((revision, centre, prepared)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+                let mut blocks: Option<(u64, Vec3)> = None;
+                let mut building = false;
+                let mut requested = std::time::Instant::now();
+                let mut skater_at: Option<Vec3> = None;
                 let mut accumulated = 0.;
                 let mut epoch = 0;
                 while let Ok(job) = receive.recv() {
@@ -112,6 +157,18 @@ fn preload_map(host: &mut Host, clip: Arc<assets::ClipCollision>) -> Result<(), 
                             accumulated = 0.;
                             let start = std::time::Instant::now();
                             session.set_aspect_ratio(aspect_ratio);
+                            if sim::voxel::active() {
+                                let revision = sim::voxel::revision();
+                                match block_collision(&session.collision_builder(), spawn) {
+                                    Ok((prepared, n)) => {
+                                        session.install_collision(prepared)?;
+                                        blocks = Some((revision, spawn));
+                                        diag::info!(World, "Skate: {n} block collision triangles around the spawn");
+                                    }
+                                    Err(e) => diag::warn!(World, "Skate block collision: {e}"),
+                                }
+                                skater_at = Some(spawn);
+                            }
                             let p = session.activate(
                                 collision::to_skate(spawn).to_array(),
                                 yaw.to_radians() + std::f32::consts::FRAC_PI_2,
@@ -131,6 +188,31 @@ fn preload_map(host: &mut Host, clip: Arc<assets::ClipCollision>) -> Result<(), 
                             if request != epoch {
                                 continue;
                             }
+                            if let Ok((revision, centre, prepared)) = built.try_recv() {
+                                building = false;
+                                match prepared {
+                                    Ok((prepared, _)) => {
+                                        session.install_collision(prepared)?;
+                                        blocks = Some((revision, centre));
+                                    }
+                                    Err(e) => diag::warn!(World, "Skate block collision: {e}"),
+                                }
+                            }
+                            if sim::voxel::active()
+                                && !building
+                                && let Some(at) = skater_at
+                            {
+                                let far = blocks.is_none_or(|(_, centre)| {
+                                    let d = (at - centre) / sim::voxel::BLOCK;
+                                    d.truncate().length() > BLOCK_RECENTRE || d.z.abs() > BLOCK_DEPTH as f32 * 0.5
+                                });
+                                let changed = blocks.is_some_and(|(revision, _)| revision != sim::voxel::revision())
+                                    && requested.elapsed().as_secs_f32() > 0.25;
+                                if (far || changed) && build_send.send(at).is_ok() {
+                                    building = true;
+                                    requested = std::time::Instant::now();
+                                }
+                            }
                             session.set_aspect_ratio(aspect_ratio);
                             session.collect(input, dt);
                             accumulated = (accumulated + dt).min(0.15);
@@ -146,6 +228,7 @@ fn preload_map(host: &mut Host, clip: Arc<assets::ClipCollision>) -> Result<(), 
                                 if !p.root.is_finite() || p.bones.iter().any(|b| !b.is_finite()) {
                                     return Err("Skate published a non-finite pose".into());
                                 }
+                                skater_at = Some(collision::from_skate(p.root.w_axis.truncate()));
                                 if publish.send(Reply::Pose(epoch, p)).is_err() {
                                     break;
                                 }

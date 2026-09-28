@@ -344,6 +344,24 @@ impl GamePhysics {
         })
     }
 
+    /// The material new collision is built with.
+    pub(crate) fn floor_material(&self) -> skate_core::physics::contact::RetailContactMaterial {
+        self.settings.floor_material
+    }
+
+    /// Replaces the static world, as a streamed world's collision around
+    /// the skater changes.
+    pub(crate) fn install_world(
+        &mut self,
+        world: BoardWorld,
+        grind_world: std::sync::Arc<crate::grind_world::StaticProvider>,
+    ) -> Result<(), String> {
+        self.offboard_grab_scene = offboard::grab_scene::Registry::new(&world, Vec::new(), Vec::new())?;
+        self.world = world;
+        self.grind_world = grind_world;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn advance_board(&mut self) -> Result<(), String> {
         self.board.clear_forces();
