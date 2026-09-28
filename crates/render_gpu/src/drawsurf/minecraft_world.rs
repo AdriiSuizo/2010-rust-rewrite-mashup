@@ -74,6 +74,12 @@ pub struct MinecraftWorldFrame {
     /// First block, then sky and block light as unorm pairs.
     pub light_volume: Option<Arc<([i32; 3], Vec<u8>)>>,
     pub eye_light: [f32; 2],
+    /// Break particles: section vertex bytes and indices.
+    pub particles: (Vec<u8>, Vec<u32>),
+    /// Destroy stage cubes: position and strip uv, and indices.
+    pub cracks: (Vec<[f32; 5]>, Vec<u32>),
+    /// The ten destroy stages side by side.
+    pub crack_texture: Option<Arc<MinecraftAtlasImage>>,
 }
 
 #[repr(C)]
@@ -90,6 +96,7 @@ struct TerrainView {
 
 const VIEW_SIZE: u64 = std::mem::size_of::<TerrainView>() as u64;
 const CLOUD_VERTEX_BYTES: u64 = 28;
+const CRACK_VERTEX_BYTES: u64 = 20;
 
 struct SectionGpu {
     vertices: Buffer,
@@ -105,11 +112,15 @@ struct TerrainGpu {
     atlas: Option<(Arc<MinecraftAtlasImage>, TextureView)>,
     celestial: Option<(Arc<MinecraftAtlasImage>, TextureView)>,
     clouds: Option<(Arc<MinecraftClouds>, Buffer, Buffer, u32)>,
+    crack_texture: Option<(Arc<MinecraftAtlasImage>, TextureView)>,
+    /// This frame's particles and cracks: vertices, indices, index count.
+    particles: Option<(Buffer, Buffer, u32)>,
+    cracks: Option<(Buffer, Buffer, u32)>,
     sampler: Option<Sampler>,
     bind: Option<BindGroup>,
     sections: HashMap<[i32; 3], SectionGpu>,
     visible: Vec<[i32; 3]>,
-    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 4]>,
+    pipelines: HashMap<(TextureFormat, u32), [RenderPipeline; 5]>,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -144,6 +155,9 @@ fn layout() -> BindGroupLayoutDescriptor {
             texture_2d(TextureSampleType::Float { filterable: true })
                 .visibility(ShaderStages::FRAGMENT)
                 .build(3, ShaderStages::FRAGMENT),
+            texture_2d(TextureSampleType::Float { filterable: true })
+                .visibility(ShaderStages::FRAGMENT)
+                .build(4, ShaderStages::FRAGMENT),
         ],
     )
 }
@@ -195,6 +209,48 @@ fn prepare_terrain(
         gpu.celestial = Some((celestial, view));
         gpu.bind = None;
     }
+    if let Some(cracks) = frame.crack_texture.clone()
+        && gpu
+            .crack_texture
+            .as_ref()
+            .is_none_or(|(held, _)| !Arc::ptr_eq(held, &cracks))
+    {
+        let view = upload_atlas(&device, &queue, &cracks);
+        gpu.crack_texture = Some((cracks, view));
+        gpu.bind = None;
+    }
+    let (particle_vertices, particle_indices) = std::mem::take(&mut frame.particles);
+    gpu.particles = (!particle_indices.is_empty()).then(|| {
+        (
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4l_minecraft_particle_vertices"),
+                contents: &particle_vertices,
+                usage: BufferUsages::VERTEX,
+            }),
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4l_minecraft_particle_indices"),
+                contents: bytemuck::cast_slice(&particle_indices),
+                usage: BufferUsages::INDEX,
+            }),
+            particle_indices.len() as u32,
+        )
+    });
+    let (crack_vertices, crack_indices) = std::mem::take(&mut frame.cracks);
+    gpu.cracks = (!crack_indices.is_empty()).then(|| {
+        (
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4l_minecraft_crack_vertices"),
+                contents: bytemuck::cast_slice(&crack_vertices),
+                usage: BufferUsages::VERTEX,
+            }),
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4l_minecraft_crack_indices"),
+                contents: bytemuck::cast_slice(&crack_indices),
+                usage: BufferUsages::INDEX,
+            }),
+            crack_indices.len() as u32,
+        )
+    });
     match frame.clouds.clone() {
         Some(clouds) if gpu.clouds.as_ref().is_none_or(|(held, ..)| !Arc::ptr_eq(held, &clouds)) => {
             gpu.clouds = (!clouds.indices.is_empty()).then(|| {
@@ -233,10 +289,11 @@ fn prepare_terrain(
         }));
     }
     if gpu.bind.is_none()
-        && let (Some(view), Some((_, atlas)), Some((_, celestial)), Some(sampler)) = (
+        && let (Some(view), Some((_, atlas)), Some((_, celestial)), Some((_, cracks)), Some(sampler)) = (
             gpu.view.as_ref(),
             gpu.atlas.as_ref(),
             gpu.celestial.as_ref(),
+            gpu.crack_texture.as_ref(),
             gpu.sampler.as_ref(),
         )
     {
@@ -264,6 +321,10 @@ fn prepare_terrain(
                 BindGroupEntry {
                     binding: 3,
                     resource: BindingResource::TextureView(celestial),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: BindingResource::TextureView(cracks),
                 },
             ],
         );
@@ -381,7 +442,7 @@ fn draw_terrain(
     let (target, depth, extracted_view, msaa) = view.into_inner();
     let format = target.main_texture_format();
     let samples = msaa.map_or(1, Msaa::samples);
-    let [sky, opaque, translucent, clouds] = gpu
+    let [sky, opaque, translucent, clouds, crack] = gpu
         .pipelines
         .entry((format, samples))
         .or_insert_with(|| pipelines(&device, &registry, format, samples))
@@ -412,6 +473,11 @@ fn draw_terrain(
         pass.set_index_buffer(section.indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..section.transparent_start, 0, 0..1);
     }
+    if let Some((vertices, indices, count)) = gpu.particles.as_ref() {
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(0..*count, 0, 0..1);
+    }
     // Sky wherever nothing has been drawn yet: a full-screen triangle at the
     // cleared depth.
     pass.set_viewport(vp.x as f32, vp.y as f32, vp.z as f32, vp.w as f32, 0.0, 0.0);
@@ -429,6 +495,12 @@ fn draw_terrain(
         pass.set_vertex_buffer(0, section.vertices.slice(..));
         pass.set_index_buffer(section.indices.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(section.transparent_start..section.count, 0, 0..1);
+    }
+    if let Some((vertices, indices, count)) = gpu.cracks.as_ref() {
+        pass.set_render_pipeline(&crack);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(0..*count, 0, 0..1);
     }
     if let Some((_, vertices, indices, count)) = gpu.clouds.as_ref() {
         pass.set_render_pipeline(&clouds);
@@ -460,6 +532,7 @@ struct TerrainView {
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
 @group(0) @binding(3) var celestials: texture_2d<f32>;
+@group(0) @binding(4) var cracks: texture_2d<f32>;
 
 // Map units per block, as `sim::voxel::BLOCK`.
 const BLOCK: f32 = 36.0;
@@ -666,6 +739,30 @@ fn cloud_fragment(in: CloudOut) -> @location(0) vec4<f32> {
     let alpha = 0.8 * (1.0 - clamp(in.distance / 1024.0, 0.0, 1.0));
     return vec4<f32>(view.environment.cloud.rgb * in.colour.rgb, alpha);
 }
+
+// viewer/src/block_overlay.wgsl `fs_crack`, blended as the crumbling render
+// type: source times destination, twice.
+struct CrackOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn crack_vertex(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> CrackOut {
+    var out: CrackOut;
+    out.clip = view.clip_from_rel * vec4<f32>(rel_from_block(position), 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn crack_fragment(in: CrackOut) -> @location(0) vec4<f32> {
+    let colour = textureSample(cracks, atlas_sampler, in.uv);
+    if colour.a < 0.1 {
+        discard;
+    }
+    return colour;
+}
 "#;
 
 fn pipelines(
@@ -673,7 +770,7 @@ fn pipelines(
     registry: &ExactPipelineRegistry,
     format: TextureFormat,
     samples: u32,
-) -> [RenderPipeline; 4] {
+) -> [RenderPipeline; 5] {
     let shader = unsafe {
         device.create_shader_module(ShaderModuleDescriptor {
             label: Some("iw4l_minecraft_terrain"),
@@ -734,6 +831,35 @@ fn pipelines(
         step_mode: VertexStepMode::Vertex,
         attributes: &cloud_attributes,
     }];
+    let crack_attributes = [
+        VertexAttribute {
+            format: VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        VertexAttribute {
+            format: VertexFormat::Float32x2,
+            offset: 12,
+            shader_location: 1,
+        },
+    ];
+    let crack_buffers = [RawVertexBufferLayout {
+        array_stride: CRACK_VERTEX_BYTES,
+        step_mode: VertexStepMode::Vertex,
+        attributes: &crack_attributes,
+    }];
+    let crumbling = BlendState {
+        color: bevy::render::render_resource::BlendComponent {
+            src_factor: bevy::render::render_resource::BlendFactor::Dst,
+            dst_factor: bevy::render::render_resource::BlendFactor::Src,
+            operation: bevy::render::render_resource::BlendOperation::Add,
+        },
+        alpha: bevy::render::render_resource::BlendComponent {
+            src_factor: bevy::render::render_resource::BlendFactor::One,
+            dst_factor: bevy::render::render_resource::BlendFactor::Zero,
+            operation: bevy::render::render_resource::BlendOperation::Add,
+        },
+    };
     let make = |vertex: &str, fragment: &str, buffers: &[RawVertexBufferLayout], depth_write: bool, compare: CompareFunction, blend: Option<BlendState>| {
         device.create_render_pipeline(&RawRenderPipelineDescriptor {
             label: Some("iw4l_minecraft_terrain"),
@@ -791,6 +917,14 @@ fn pipelines(
             false,
             CompareFunction::GreaterEqual,
             Some(BlendState::ALPHA_BLENDING),
+        ),
+        make(
+            "crack_vertex",
+            "crack_fragment",
+            &crack_buffers,
+            false,
+            CompareFunction::GreaterEqual,
+            Some(crumbling),
         ),
     ]
 }

@@ -39,6 +39,70 @@ pub struct VoxelWorld {
 
 static WORLD: RwLock<Option<VoxelWorld>> = RwLock::new(None);
 
+/// What the authoritative game did to the block world this tick, for the
+/// world's owner to apply.
+#[derive(Clone, Copy, Debug)]
+pub enum VoxelEvent {
+    /// A bullet struck this block.
+    Shot { block: [i32; 3] },
+    /// An explosion went off here, in blocks.
+    Explosion { center: [f64; 3] },
+}
+
+static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::new());
+
+/// A bullet impact at map point `end` on a surface facing `normal`: the
+/// block behind the surface.
+pub fn push_shot(end: [f32; 3], normal: [f32; 3]) {
+    let Ok(world) = WORLD.read() else {
+        return;
+    };
+    let Some(world) = world.as_ref() else {
+        return;
+    };
+    let p = to_block(world.origin, end);
+    // Into the surface, past the trace's pull-back.
+    let n = [f64::from(normal[0]), f64::from(normal[2]), -f64::from(normal[1])];
+    let block = std::array::from_fn(|k| (p[k] - n[k] * 0.05).floor() as i32);
+    if let Ok(mut events) = EVENTS.lock() {
+        events.push(VoxelEvent::Shot { block });
+    }
+}
+
+/// An explosion at map point `origin`.
+pub fn push_explosion(origin: [f32; 3]) {
+    let Ok(world) = WORLD.read() else {
+        return;
+    };
+    let Some(world) = world.as_ref() else {
+        return;
+    };
+    let center = to_block(world.origin, origin);
+    if let Ok(mut events) = EVENTS.lock() {
+        events.push(VoxelEvent::Explosion { center });
+    }
+}
+
+pub fn take_events() -> Vec<VoxelEvent> {
+    EVENTS.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default()
+}
+
+/// Sets one block's collision shape id, as `set_chunk` lays them out.
+pub fn set_block_shape(x: i32, y: i32, z: i32, shape: u16) {
+    if let Ok(mut world) = WORLD.write()
+        && let Some(world) = world.as_mut()
+        && let Some(chunk) = world.chunks.get_mut(&(x >> 4, z >> 4))
+    {
+        let ly = y - chunk.min_y;
+        if ly >= 0 && ly < chunk.height {
+            let index = ((ly * 16 + (z & 15)) * 16 + (x & 15)) as usize;
+            if let Some(slot) = chunk.shapes.get_mut(index) {
+                *slot = shape;
+            }
+        }
+    }
+}
+
 /// Starts replacing world collision for the map whose brush table is
 /// `brushes`, with the block world's `origin` block at map origin.
 pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]>>) {
@@ -56,6 +120,7 @@ pub fn deactivate() {
     if let Ok(mut world) = WORLD.write() {
         *world = None;
     }
+    let _ = take_events();
 }
 
 /// Adds shape ids to the table and returns the first new id.

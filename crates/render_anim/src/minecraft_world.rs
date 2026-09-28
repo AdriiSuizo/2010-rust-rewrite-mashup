@@ -48,6 +48,12 @@ pub struct MinecraftWorldView {
     pub light_volume: Option<Arc<([i32; 3], Vec<u8>)>>,
     /// Sky and block light at the eye, for the view model.
     pub eye_light: [f32; 2],
+    /// Break particles as section vertices and indices, rebuilt each frame.
+    pub particles: (Vec<u8>, Vec<u32>),
+    /// Destroy stage cubes over blocks being mined: position, strip uv.
+    pub cracks: (Vec<[f32; 5]>, Vec<u32>),
+    /// The ten destroy stages side by side.
+    pub crack_texture: Option<Arc<image::RgbaImage>>,
 }
 
 struct Loaded {
@@ -60,6 +66,7 @@ struct Loaded {
     environment: DimensionEnvironment,
     celestial: Arc<image::RgbaImage>,
     cloud_mask: Option<CloudMask>,
+    crack_texture: Arc<image::RgbaImage>,
 }
 
 #[derive(Default)]
@@ -73,6 +80,7 @@ struct Runtime {
     light_volume_at: Option<[i32; 3]>,
     light_volume_age: u32,
     cloud_center: Option<(i32, i32)>,
+    mining: crate::minecraft_mining::Mining,
     /// Shape id of each block state already seen.
     shapes: HashMap<BlockStateId, u16>,
     /// Boxes of each shape id, to reuse an id for a repeated shape.
@@ -112,6 +120,7 @@ fn load(seed: i64) -> Result<Loaded, String> {
         DimensionEnvironment::load(&registries, Dimension::Overworld.dimension_type())?;
     let celestial = Arc::new(celestial_image(&packs).map_err(|e| e.to_string())?);
     let cloud_mask = CloudMask::from_pack(&packs).ok();
+    let crack_texture = Arc::new(crate::minecraft_mining::crack_strip(&packs).map_err(|e| e.to_string())?);
     Ok(Loaded {
         stream,
         scene,
@@ -122,6 +131,7 @@ fn load(seed: i64) -> Result<Loaded, String> {
         environment,
         celestial,
         cloud_mask,
+        crack_texture,
     })
 }
 
@@ -209,6 +219,8 @@ fn update(
                 view.origin = [x, y, z];
                 view.atlas = Some(world.atlas.clone());
                 view.celestial = Some(world.celestial.clone());
+                view.crack_texture = Some(world.crack_texture.clone());
+                runtime.mining = Default::default();
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -260,6 +272,7 @@ fn update(
         light_volume_at,
         light_volume_age,
         cloud_center,
+        mining,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -330,6 +343,19 @@ fn update(
         sim::voxel::remove_chunk(pos.x, pos.z);
     }
 
+    // Shots and explosions from the authoritative game.
+    mining.apply(
+        sim::voxel::take_events(),
+        &mut crate::minecraft_mining::WorldRefs {
+            stream: &mut world.stream,
+            scene: &mut world.scene,
+            packs: &world.packs,
+            atlas: &world.atlas,
+            registries: &world.registries,
+        },
+        time.elapsed_secs_f64(),
+    );
+
     let eye = sim::voxel::to_block(origin, [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current]);
     let (pitch, yaw) = (ps.viewangles[0].to_radians(), ps.viewangles[1].to_radians());
     let map_forward = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin()];
@@ -361,6 +387,9 @@ fn update(
 
     // The Overworld clock and the environment attributes of MinecraftOSS.
     let dt = time.delta_secs_f64();
+    let partial = mining.tick(&world.scene, dt);
+    view.particles = mining.particle_mesh(&world.atlas, forward, partial, light);
+    view.cracks = mining.crack_mesh();
     day.advance(dt);
     let eye_block = (eye[0].floor() as i32, eye[1].floor() as i32, eye[2].floor() as i32);
     view.eye_light = [
@@ -511,6 +540,9 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
         view.removed.clear();
         view.visible.clear();
         view.celestial = None;
+        view.crack_texture = None;
+        view.particles = Default::default();
+        view.cracks = Default::default();
         view.clouds = None;
         view.light_volume = None;
         view.generation += 1;

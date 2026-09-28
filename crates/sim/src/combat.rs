@@ -1125,6 +1125,13 @@ pub(crate) fn phase_trace(
                 Some(ColliderId::Player { client, .. }) => Some(client),
                 _ => None,
             };
+            if matches!(segment.collider, None | Some(ColliderId::World { .. }))
+                && !exit
+                && world.publishes_snapshot()
+                && crate::voxel::active()
+            {
+                crate::voxel::push_shot(segment.end, segment.normal);
+            }
             if bullet_process_on_hit(segment.collider) {
                 if let Some(world_event) = entity_iw4::bg_bullet_hit_event(facts.impact_type, false)
                 {

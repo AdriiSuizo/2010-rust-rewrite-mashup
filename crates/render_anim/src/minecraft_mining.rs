@@ -1,0 +1,254 @@
+//! Breaking the Minecraft world with MW2 weapons. Bullets mine the block they
+//! strike the way a tool does in survival: each adds progress in inverse
+//! proportion to the block's hardness, the destroy stages show it, and at full
+//! progress the block breaks with MinecraftOSS's break particles. Explosions
+//! are vanilla TNT: MinecraftOSS's `ServerExplosion` rays pick the blocks,
+//! stopped by each block's explosion resistance.
+use std::collections::HashMap;
+
+use minecraft_terrain::block_particles::BlockParticles;
+use minecraft_terrain::mesh::{Atlas, ChunkMesh, SectionVertex};
+use minecraft_terrain::pack::{PackStack, ResourceId};
+use minecraft_terrain::scene::{HandcraftedScene, Scene};
+use minecraft_terrain::terrain::TerrainStream;
+use minecraftoss_core::registries::Registries;
+
+type BlockPos = (i32, i32, i32);
+
+/// Mining progress one bullet adds to a block of hardness 1: dirt, of
+/// hardness 0.5, breaks on the second.
+const BULLET_POWER: f32 = 0.25;
+/// TNT's explosion power.
+const TNT_POWER: f32 = 4.0;
+/// Progress on a block no longer being shot is forgotten after this long.
+const PROGRESS_SECONDS: f64 = 6.0;
+const TICK_SECONDS: f64 = 1.0 / 20.0;
+
+pub(crate) struct Mining {
+    /// Progress in 0..1 of each block being shot, and when it was last hit.
+    progress: HashMap<BlockPos, (f32, f64)>,
+    particles: Option<BlockParticles>,
+    tick_clock: f64,
+    rng: u64,
+}
+
+impl Default for Mining {
+    fn default() -> Self {
+        Self {
+            progress: HashMap::new(),
+            particles: None,
+            tick_clock: 0.0,
+            rng: 0x2545_f491_4f6c_dd1d,
+        }
+    }
+}
+
+/// The world pieces mining reads and edits.
+pub(crate) struct WorldRefs<'a> {
+    pub stream: &'a mut TerrainStream,
+    pub scene: &'a mut HandcraftedScene,
+    pub packs: &'a PackStack,
+    pub atlas: &'a Atlas,
+    pub registries: &'a Registries,
+}
+
+impl Mining {
+    fn next_f32(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        ((self.rng >> 40) as u32 as f32) / ((1u32 << 24) as f32)
+    }
+
+    /// Applies this tick's shots and explosions.
+    pub(crate) fn apply(&mut self, events: Vec<sim::voxel::VoxelEvent>, world: &mut WorldRefs<'_>, now: f64) {
+        if self.particles.is_none() {
+            self.particles = BlockParticles::new(world.packs).ok();
+        }
+        let mut broken = Vec::new();
+        for event in events {
+            match event {
+                sim::voxel::VoxelEvent::Shot { block } => {
+                    let pos = (block[0], block[1], block[2]);
+                    let Some(hardness) = hardness(world, pos) else {
+                        continue;
+                    };
+                    let entry = self.progress.entry(pos).or_insert((0.0, now));
+                    entry.0 += if hardness <= 0.0 { 1.0 } else { BULLET_POWER / hardness };
+                    entry.1 = now;
+                    if entry.0 >= 1.0 {
+                        self.progress.remove(&pos);
+                        if let Some(block) = Scene::block(&*world.scene, pos).cloned()
+                            && let Some(particles) = self.particles.as_mut()
+                        {
+                            let _ = particles.spawn(world.packs, &*world.scene, pos, &block, world.atlas);
+                        }
+                        broken.push(pos);
+                    }
+                }
+                sim::voxel::VoxelEvent::Explosion { center } => {
+                    for pos in self.exploded_positions(world, center, TNT_POWER) {
+                        if hardness(world, pos).is_some() {
+                            self.progress.remove(&pos);
+                            broken.push(pos);
+                        }
+                    }
+                }
+            }
+        }
+        self.progress.retain(|_, (_, at)| now - *at < PROGRESS_SECONDS);
+        if broken.is_empty() {
+            return;
+        }
+        broken.sort_unstable();
+        broken.dedup();
+        for &pos in &broken {
+            world.scene.set(pos, None);
+            sim::voxel::set_block_shape(pos.0, pos.1, pos.2, 0);
+        }
+        world.stream.record_edits(world.scene, &broken);
+        world.stream.mark_edited(world.scene, &broken);
+    }
+
+    /// `ServerExplosion.calculateExplodedPositions`: rays from the centre
+    /// through the surface of a 16³ grid, each losing strength with distance
+    /// and with the explosion resistance of the blocks it passes.
+    fn exploded_positions(&mut self, world: &WorldRefs<'_>, center: [f64; 3], radius: f32) -> Vec<BlockPos> {
+        let range = world.stream.states.vertical_range();
+        let mut seen = std::collections::HashSet::new();
+        let mut inserted = Vec::new();
+        for xx in 0..16 {
+            for yy in 0..16 {
+                for zz in 0..16 {
+                    if !(xx == 0 || xx == 15 || yy == 0 || yy == 15 || zz == 0 || zz == 15) {
+                        continue;
+                    }
+                    let unit = |i: i32| f64::from(i as f32 / 15.0f32 * 2.0f32 - 1.0f32);
+                    let (mut xd, mut yd, mut zd) = (unit(xx), unit(yy), unit(zz));
+                    let d = (xd * xd + yd * yd + zd * zd).sqrt();
+                    xd /= d;
+                    yd /= d;
+                    zd /= d;
+                    let mut remaining = radius * (0.7f32 + self.next_f32() * 0.6f32);
+                    let [mut xp, mut yp, mut zp] = center;
+                    let step = f64::from(0.3f32);
+                    while remaining > 0.0 {
+                        let pos = (xp.floor() as i32, yp.floor() as i32, zp.floor() as i32);
+                        if !range.contains(&pos.1) {
+                            break;
+                        }
+                        if let Some(resistance) = explosion_resistance(world, pos) {
+                            remaining -= (resistance + 0.3f32) * 0.3f32;
+                        }
+                        if remaining > 0.0 && seen.insert(pos) {
+                            inserted.push(pos);
+                        }
+                        xp += xd * step;
+                        yp += yd * step;
+                        zp += zd * step;
+                        remaining -= 0.225_000_01_f32;
+                    }
+                }
+            }
+        }
+        inserted
+    }
+
+    /// Steps the break particles at 20 ticks a second.
+    pub(crate) fn tick(&mut self, scene: &HandcraftedScene, dt: f64) -> f32 {
+        self.tick_clock += dt;
+        while self.tick_clock >= TICK_SECONDS {
+            self.tick_clock -= TICK_SECONDS;
+            if let Some(particles) = self.particles.as_mut() {
+                particles.tick(scene);
+            }
+        }
+        (self.tick_clock / TICK_SECONDS) as f32
+    }
+
+    /// The break particles as section vertices, facing `forward`.
+    pub(crate) fn particle_mesh(
+        &self,
+        atlas: &Atlas,
+        forward: glam::Vec3,
+        partial: f32,
+        light: &minecraft_terrain::lighting::SkyLight,
+    ) -> (Vec<u8>, Vec<u32>) {
+        let Some(particles) = self.particles.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut mesh = ChunkMesh::default();
+        particles.append_mesh(&mut mesh, atlas, forward, partial, light);
+        let vertices: Vec<SectionVertex> = mesh.vertices.iter().map(SectionVertex::from_vertex).collect();
+        (bytemuck::cast_slice(&vertices).to_vec(), mesh.indices)
+    }
+
+    /// A cube a hair larger than each block being mined, textured with its
+    /// destroy stage from a strip of the ten: position then uv.
+    pub(crate) fn crack_mesh(&self) -> (Vec<[f32; 5]>, Vec<u32>) {
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        for (&(x, y, z), &(progress, _)) in &self.progress {
+            let stage = ((progress * 10.0) as i32).clamp(0, 9) as f32;
+            let a = [x as f32 - 0.002, y as f32 - 0.002, z as f32 - 0.002];
+            let b = [x as f32 + 1.002, y as f32 + 1.002, z as f32 + 1.002];
+            let p = [
+                [a[0], a[1], a[2]],
+                [b[0], a[1], a[2]],
+                [b[0], b[1], a[2]],
+                [a[0], b[1], a[2]],
+                [a[0], a[1], b[2]],
+                [b[0], a[1], b[2]],
+                [b[0], b[1], b[2]],
+                [a[0], b[1], b[2]],
+            ];
+            // The viewer's `interaction_mesh` faces.
+            for face in [[0, 3, 2, 1], [5, 6, 7, 4], [4, 7, 3, 0], [1, 2, 6, 5], [3, 7, 6, 2], [4, 0, 1, 5]] {
+                let first = vertices.len() as u32;
+                for (index, uv) in face.into_iter().zip([[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]) {
+                    let q = p[index];
+                    vertices.push([q[0], q[1], q[2], (stage + uv[0]) / 10.0, uv[1]]);
+                }
+                indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+            }
+        }
+        (vertices, indices)
+    }
+}
+
+/// The destroy speed of a breakable block, or `None` for air, fluids and
+/// unbreakable blocks.
+fn hardness(world: &WorldRefs<'_>, pos: BlockPos) -> Option<f32> {
+    let block = Scene::block(&*world.scene, pos)?;
+    if matches!(block.id.path.as_str(), "water" | "lava" | "air" | "cave_air" | "void_air") {
+        return None;
+    }
+    let state = world.stream.states.state_of(block)?;
+    let speed = world.registries.blocks.state(state).destroy_speed;
+    (speed >= 0.0).then_some(speed)
+}
+
+/// `ExplosionDamageCalculator.getBlockExplosionResistance`: none for air.
+fn explosion_resistance(world: &WorldRefs<'_>, pos: BlockPos) -> Option<f32> {
+    let block = Scene::block(&*world.scene, pos)?;
+    let state = world.stream.states.state_of(block)?;
+    let blocks = &world.registries.blocks;
+    if blocks.is_air(state) {
+        return None;
+    }
+    let fluid = if matches!(block.id.path.as_str(), "water" | "lava") { 100.0f32 } else { 0.0 };
+    Some(blocks.state(state).explosion_resistance.max(fluid))
+}
+
+/// The ten destroy stages side by side, 16 pixels each.
+pub(crate) fn crack_strip(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
+    let mut strip = image::RgbaImage::new(16 * 10, 16);
+    for stage in 0..10u32 {
+        let id = ResourceId::parse(&format!("minecraft:block/destroy_stage_{stage}"))?;
+        if let Some(bytes) = packs.texture(&id)? {
+            let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?.to_rgba8();
+            let tile = image::imageops::resize(&img, 16, 16, image::imageops::FilterType::Nearest);
+            image::imageops::replace(&mut strip, &tile, i64::from(stage) * 16, 0);
+        }
+    }
+    Ok(strip)
+}

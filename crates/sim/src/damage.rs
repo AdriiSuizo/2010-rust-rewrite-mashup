@@ -126,6 +126,9 @@ pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &
     if !world.publishes_snapshot() {
         return;
     }
+    if crate::voxel::active() {
+        crate::voxel::push_explosion(blast.origin);
+    }
     let attempts = radius_player_attempts(world, blast);
     let glass = radius_glass_hits(world, blast);
     for attempt in &attempts {

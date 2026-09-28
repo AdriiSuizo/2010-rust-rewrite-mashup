@@ -938,6 +938,7 @@ pub fn extract_minecraft_world(
     mut atlas_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
     mut celestial_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
     mut clouds_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftClouds>)>>,
+    mut cracks_of: Local<Option<(usize, std::sync::Arc<render_gpu::MinecraftAtlasImage>)>>,
 ) {
     let Some(mut view) = main_world.get_resource_mut::<render_anim::minecraft_world::MinecraftWorldView>() else {
         return;
@@ -979,6 +980,23 @@ pub fn extract_minecraft_world(
     frame.environment = view.environment;
     frame.eye_light = view.eye_light;
     frame.light_volume = view.light_volume.clone();
+    frame.particles = std::mem::take(&mut view.particles);
+    frame.cracks = std::mem::take(&mut view.cracks);
+    frame.crack_texture = view.crack_texture.as_ref().map(|image| {
+        let key = std::sync::Arc::as_ptr(image) as usize;
+        if let Some((held, converted)) = cracks_of.as_ref()
+            && *held == key
+        {
+            return converted.clone();
+        }
+        let converted = std::sync::Arc::new(render_gpu::MinecraftAtlasImage {
+            width: image.width(),
+            height: image.height(),
+            levels: vec![image.as_raw().clone()],
+        });
+        *cracks_of = Some((key, converted.clone()));
+        converted
+    });
     frame.celestial = view.celestial.as_ref().map(|image| {
         let key = std::sync::Arc::as_ptr(image) as usize;
         if let Some((held, converted)) = celestial_of.as_ref()

@@ -287,7 +287,9 @@ fn mc_lightmap(sky_level: f32, block_level: f32) -> vec3<f32> {
     let greatest = max(color.r, max(color.g, color.b));
     let inverted = 1.0 - greatest;
     let gamma = color * ((1.0 - inverted * inverted * inverted * inverted) / max(greatest, 0.00001));
-    return mix(color, gamma, mc_light.environment[10].w);
+    // Models take the Moody brightness, which leaves daylight alone and keeps
+    // dark places dark; the terrain keeps the default brightness.
+    return mix(color, gamma, 0.0);
 }
 
 fn mc_linear_fog(distance: f32, start: f32, end: f32) -> f32 {
