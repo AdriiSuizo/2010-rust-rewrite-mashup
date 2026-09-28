@@ -507,7 +507,11 @@ fn publish_client_action_input(
         let sticks = crate::gamepad::sticks(pad, &settings);
         let ads = out.client.using_ads || out.client.kb.speed.active;
         out.pad_move = [sticks.movement.x, sticks.movement.y];
-        out.pad_look_rate = crate::gamepad::look_rates(sticks.look, &settings, ads, &mut boost_time, time.delta_secs());
+        // The view's zoom against the hip field of view: `fov_scale` is the
+        // mouse's zoom sensitivity against 65 degrees.
+        let hip = (settings.fov.to_radians() * 0.5).tan() / (65f32.to_radians() * 0.5).tan();
+        let zoom = out.fov_scale / hip.max(0.01);
+        out.pad_look_rate = crate::gamepad::look_rates(sticks.look, &settings, ads, zoom, &mut boost_time, time.delta_secs());
     }
     let inputs = BindInputs::new(&keys, &mouse_buttons).with_pad(pad);
     for (button, id) in binds.iter() {

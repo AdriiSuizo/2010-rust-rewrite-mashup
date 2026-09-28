@@ -9,8 +9,9 @@ use bevy::prelude::*;
 /// Turn rates, degrees a second, at full deflection and look sensitivity 3.
 const YAW_RATE: f32 = 170.0;
 const PITCH_RATE: f32 = 100.0;
-/// Aiming down the sight turns slower, before the ADS sensitivity.
-const ADS_RATE_SCALE: f32 = 0.55;
+/// Aiming down the sight turns slower, on top of the sight's zoom and
+/// before the ADS sensitivity.
+const ADS_RATE_SCALE: f32 = 0.75;
 /// Held at full horizontal deflection, the turn speeds up to this much
 /// faster, after `BOOST_DELAY` over `BOOST_RAMP` seconds.
 const BOOST: f32 = 0.6;
@@ -63,7 +64,17 @@ fn curve(deflection: f32, kind: u8) -> f32 {
 
 /// Turn rates, pitch and yaw in degrees a second, for a look stick.
 /// `boost_time` is how long the stick has been held fully sideways.
-pub(crate) fn look_rates(look: Vec2, settings: &frame::GameSettings, ads: bool, boost_time: &mut f32, dt: f32) -> [f32; 2] {
+/// `zoom` is how much narrower the view is than the player's field of
+/// view (1 at the hip), as the mouse is slowed by it: a scope turns
+/// slower in proportion to its magnification.
+pub(crate) fn look_rates(
+    look: Vec2,
+    settings: &frame::GameSettings,
+    ads: bool,
+    zoom: f32,
+    boost_time: &mut f32,
+    dt: f32,
+) -> [f32; 2] {
     let deflection = look.length();
     if deflection <= f32::EPSILON {
         *boost_time = 0.0;
@@ -77,6 +88,7 @@ pub(crate) fn look_rates(look: Vec2, settings: &frame::GameSettings, ads: bool, 
     }
     let boost = 1.0 + BOOST * ((*boost_time - BOOST_DELAY) / BOOST_RAMP).clamp(0.0, 1.0);
     let mut scale = settings.pad_sensitivity / frame::GameSettings::PAD_SENSITIVITY_DEFAULT;
+    scale *= zoom.clamp(0.02, 1.0);
     if ads {
         scale *= ADS_RATE_SCALE * settings.pad_ads_sensitivity;
     }
