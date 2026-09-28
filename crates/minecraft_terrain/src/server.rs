@@ -218,12 +218,19 @@ impl ServerSim {
         self.entity_loot = minecraftoss_entities::loot::EntityLootBook::from_jar(jar, seed).map_err(|e| eprintln!("server entity loot unavailable: {e:#}")).ok();
         self.shearing_loot = minecraftoss_entities::loot::ShearingLootBook::from_jar(jar, seed).map_err(|e| eprintln!("server shearing loot unavailable: {e:#}")).ok();
         // The trade sets read the items' enchantability and stack sizes
-        // from the exported item catalog.
-        let catalog = ["artifacts/item-catalog/26.3.json", concat!(env!("CARGO_MANIFEST_DIR"), "/../../artifacts/item-catalog/26.3.json")]
-            .into_iter()
-            .map(std::path::Path::new)
-            .find(|path| path.is_file());
-        match catalog.map(|path| minecraftoss_entities::trading::TradeBook::from_jar(jar, path)) {
+        // from the exported item catalog: beside a JAR fetched into a
+        // MinecraftOSS-shaped folder, in a checkout, or under the working
+        // directory.
+        const CATALOG: &str = "artifacts/item-catalog/26.3.json";
+        let catalog = [
+            jar.parent().map(|root| root.join(CATALOG)),
+            std::env::var_os("MINECRAFTOSS_ROOT").map(|root| std::path::Path::new(&root).join(CATALOG)),
+            Some(std::path::PathBuf::from(CATALOG)),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file());
+        match catalog.map(|path| minecraftoss_entities::trading::TradeBook::from_jar(jar, &path)) {
             Some(Ok(book)) => self.mobs.set_trades(Arc::new(book), seed),
             Some(Err(e)) => eprintln!("server villager trades unavailable: {e:#}"),
             None => eprintln!("server villager trades unavailable: no item catalog"),
