@@ -44,7 +44,9 @@ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, Stri
             // A first run straight into this map waits for Mojang's files.
             crate::minecraft_setup::begin();
             diag::info!(World, "Minecraft map: waiting for Minecraft's files from Mojang");
-            crate::minecraft_setup::wait(std::time::Duration::from_secs(600))
+            // Briefly: a load held much longer does not come back cleanly,
+            // and the fetch carries on for the next try.
+            crate::minecraft_setup::wait(std::time::Duration::from_secs(90))
                 .ok_or_else(crate::minecraft_setup::status)?
         }
     };

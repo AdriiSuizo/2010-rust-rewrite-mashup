@@ -140,7 +140,7 @@ fn step(text: impl Into<String>) {
 }
 
 fn run(dir: &Path) -> Result<(), String> {
-    let staging = dir.with_extension("partial");
+    let staging = dir.with_file_name(format!("minecraft-{VERSION}.partial"));
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
 
     step("version metadata");
