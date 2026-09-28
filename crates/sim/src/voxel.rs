@@ -84,6 +84,45 @@ pub fn push_explosion(origin: [f32; 3]) {
     }
 }
 
+/// The clients that play the world's monsters, and the spots Minecraft's
+/// natural spawner has picked for them, in map space with a yaw.
+#[derive(Default)]
+struct Mobs {
+    clients: std::collections::HashSet<u32>,
+    spots: std::collections::VecDeque<([f32; 3], f32)>,
+}
+
+static MOBS: std::sync::Mutex<Option<Mobs>> = std::sync::Mutex::new(None);
+/// Spots waiting for a mob; older ones give way to fresh ones.
+const MOB_SPOTS: usize = 16;
+
+pub fn set_mob_clients(clients: impl IntoIterator<Item = u32>) {
+    if let Ok(mut mobs) = MOBS.lock() {
+        mobs.get_or_insert_default().clients = clients.into_iter().collect();
+    }
+}
+
+pub fn is_mob_client(client: u32) -> bool {
+    MOBS.lock()
+        .ok()
+        .is_some_and(|mobs| mobs.as_ref().is_some_and(|m| m.clients.contains(&client)))
+}
+
+/// A spot the natural spawner picked, for the next mob waiting to spawn.
+pub fn offer_mob_spawn(origin: [f32; 3], yaw: f32) {
+    if let Ok(mut mobs) = MOBS.lock() {
+        let spots = &mut mobs.get_or_insert_default().spots;
+        spots.push_back((origin, yaw));
+        while spots.len() > MOB_SPOTS {
+            spots.pop_front();
+        }
+    }
+}
+
+pub(crate) fn take_mob_spawn() -> Option<([f32; 3], f32)> {
+    MOBS.lock().ok()?.as_mut()?.spots.pop_front()
+}
+
 pub fn take_events() -> Vec<VoxelEvent> {
     EVENTS.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default()
 }
@@ -122,6 +161,9 @@ pub fn deactivate() {
         *world = None;
     }
     let _ = take_events();
+    if let Ok(mut mobs) = MOBS.lock() {
+        *mobs = None;
+    }
 }
 
 /// Adds shape ids to the table and returns the first new id.

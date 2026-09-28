@@ -67,6 +67,8 @@ struct Loaded {
     celestial: Arc<image::RgbaImage>,
     cloud_mask: Option<CloudMask>,
     crack_texture: Arc<image::RgbaImage>,
+    /// The dimension's natural spawn rules, when its data loads.
+    creature_spawns: Option<Arc<minecraftoss_world::natural_spawner::CreatureSpawns>>,
 }
 
 #[derive(Default)]
@@ -81,6 +83,9 @@ struct Runtime {
     light_volume_age: u32,
     cloud_center: Option<(i32, i32)>,
     mining: crate::minecraft_mining::Mining,
+    mobs: Option<crate::minecraft_mobs::Mobs>,
+    /// The bots that play the monsters have been asked for.
+    mob_bots_requested: bool,
     /// Shape id of each block state already seen.
     shapes: HashMap<BlockStateId, u16>,
     /// Boxes of each shape id, to reuse an id for a repeated shape.
@@ -121,6 +126,17 @@ fn load(seed: i64) -> Result<Loaded, String> {
     let celestial = Arc::new(celestial_image(&packs).map_err(|e| e.to_string())?);
     let cloud_mask = CloudMask::from_pack(&packs).ok();
     let crack_texture = Arc::new(crate::minecraft_mining::crack_strip(&packs).map_err(|e| e.to_string())?);
+    let creature_spawns = match minecraftoss_world::natural_spawner::CreatureSpawns::load(
+        registries.clone(),
+        Dimension::Overworld.dimension_type(),
+        false,
+    ) {
+        Ok(spawns) => Some(Arc::new(spawns)),
+        Err(error) => {
+            diag::warn!(World, "Minecraft natural spawning unavailable: {error}");
+            None
+        }
+    };
     Ok(Loaded {
         stream,
         scene,
@@ -132,6 +148,7 @@ fn load(seed: i64) -> Result<Loaded, String> {
         celestial,
         cloud_mask,
         crack_texture,
+        creature_spawns,
     })
 }
 
@@ -184,6 +201,7 @@ fn update(
     presented: Res<net::PresentedSnapshot>,
     authority: Option<ResMut<net::AuthorityWorld>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    (mut bot_queue, roster): (Option<ResMut<bots::BotAddQueue>>, Option<Res<bots::BotRoster>>),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
 ) {
@@ -221,6 +239,11 @@ fn update(
                 view.celestial = Some(world.celestial.clone());
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
+                runtime.mobs = world
+                    .creature_spawns
+                    .clone()
+                    .map(|spawns| crate::minecraft_mobs::Mobs::new(spawns, world.seed));
+                runtime.mob_bots_requested = false;
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -273,6 +296,8 @@ fn update(
         light_volume_age,
         cloud_center,
         mining,
+        mobs,
+        mob_bots_requested,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -470,6 +495,43 @@ fn update(
             sky.block_factor,
         ],
     ];
+
+    // Monsters: MW2 bots on the spots Minecraft's natural spawner picks.
+    let mob_ids: Vec<sim::ClientId> = roster.as_ref().map(|r| r.bots.iter().map(|b| b.id).collect()).unwrap_or_default();
+    sim::voxel::set_mob_clients(mob_ids.iter().map(|id| id.0));
+    if !*mob_bots_requested
+        && alive
+        && mobs.is_some()
+        && let Some(queue) = bot_queue.as_mut()
+    {
+        let wanted = crate::minecraft_mobs::MOB_BOTS.saturating_sub(mob_ids.len() as u32);
+        if wanted > 0 {
+            queue.push(wanted);
+        }
+        *mob_bots_requested = true;
+        diag::info!(World, "Minecraft mobs: {wanted} bots to play the monsters");
+    }
+    if let Some(mobs) = mobs.as_mut() {
+        let alive_mobs: Vec<[f64; 3]> = mob_ids
+            .iter()
+            .filter_map(|&id| presented.alive_player(id))
+            .map(|mob| sim::voxel::to_block(origin, mob.origin))
+            .collect();
+        mobs.tick(
+            dt,
+            &crate::minecraft_mobs::MobWorld {
+                stream: &world.stream,
+                scene: &world.scene,
+                light,
+                sky_darken: (15.0 - world.environment.sky_light_level()) as i32,
+                overworld_time: day.ticks as i64,
+                day: day.day_count(),
+                origin,
+            },
+            feet,
+            &alive_mobs,
+        );
+    }
 
     // Clouds, rebuilt when the camera crosses a cloud cell.
     if let Some(mask) = &world.cloud_mask {
