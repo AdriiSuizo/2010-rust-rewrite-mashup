@@ -600,7 +600,7 @@ mod tests {
     const META: &str = r#"{"pack":{"description":"test","min_format":[97,1],"max_format":[97,1]}}"#;
     #[test]
     fn override_fallback_filter_reload_and_namespace() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_dir::tempdir().unwrap();
         let a = tmp.path().join("a");
         let b = tmp.path().join("b");
         pack(
@@ -643,7 +643,7 @@ mod tests {
     }
     #[test]
     fn overlay_and_malformed() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_dir::tempdir().unwrap();
         let p = tmp.path().join("pack");
         pack(
             &p,
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn zip_and_traversal() {
         use std::io::Write;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_dir::tempdir().unwrap();
         let p = tmp.path().join("p.zip");
         let mut z = zip::ZipWriter::new(File::create(&p).unwrap());
         z.start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
@@ -704,7 +704,7 @@ mod tests {
     }
     #[test]
     fn type_specific_merges_and_sound_replace() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_dir::tempdir().unwrap();
         let a = tmp.path().join("a");
         let b = tmp.path().join("b");
         pack(

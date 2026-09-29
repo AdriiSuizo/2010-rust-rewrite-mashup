@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn sprint_fragment_uses_the_ground_block_material_and_particle_setting() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_dir::tempdir().unwrap();
         let root = temp.path();
         for (name, contents) in [
             (

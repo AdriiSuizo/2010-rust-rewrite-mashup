@@ -845,7 +845,7 @@ mod tests {
     }
     #[test]
     fn generated_item_uses_sprite_edges_and_inherited_first_person_display() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_dir::tempdir().unwrap();
         let root = temp.path();
         fs::write(
             root.join("pack.mcmeta"),
@@ -940,7 +940,7 @@ mod tests {
     }
     #[test]
     fn omitted_uv_uses_element_bounds_and_stays_in_tile() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_dir::tempdir().unwrap();
         let root = temp.path();
         fs::write(
             root.join("pack.mcmeta"),
@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn weighted_variants_keep_each_rotation_and_weight() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_dir::tempdir().unwrap();
         let root = temp.path();
         fs::write(
             root.join("pack.mcmeta"),

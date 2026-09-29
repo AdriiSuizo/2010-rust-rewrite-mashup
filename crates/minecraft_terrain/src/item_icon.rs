@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn glass_sprite_object_resolves_to_full_cube_item_model() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_dir::tempdir().unwrap();
         let root = temp.path();
         fs::write(
             root.join("pack.mcmeta"),
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn multi_element_pack_model_renders_with_item_tint() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_dir::tempdir().unwrap();
         let root = temp.path();
         fs::write(
             root.join("pack.mcmeta"),

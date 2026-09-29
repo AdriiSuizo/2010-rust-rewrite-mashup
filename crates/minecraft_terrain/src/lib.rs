@@ -3,6 +3,8 @@
 //! (`engine/viewer`, commit 9e4108d) with its GPU binding code left out.
 pub use minecraftoss_core::fast_hash;
 pub mod block_particles;
+#[cfg(test)]
+mod test_dir;
 pub mod clouds;
 pub mod day_cycle;
 pub mod environment;
