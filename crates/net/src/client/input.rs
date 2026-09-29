@@ -66,10 +66,11 @@ pub struct ClientActionInput {
     pub pad_look_delta: [f32; 2],
     /// Aim assist: 0 off, 1 slowdown and lock-on, 2 with auto aim.
     pub pad_aim_assist: u8,
-    /// The target lock-on follows, and the one auto aim closes on.
+    /// The target lock-on follows, and the one auto aim closes on with the
+    /// seconds it has left.
     pub pad_lockon: Option<u64>,
-    pub pad_autoaim: Option<u64>,
-    /// Aiming down the sight last frame, for the snap on raising it.
+    pub pad_autoaim: Option<(u64, f32)>,
+    /// Aiming down the sight last frame, for auto aim on raising it.
     pub pad_was_ads: bool,
 }
 

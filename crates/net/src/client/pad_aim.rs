@@ -22,12 +22,14 @@ const SLOWDOWN_ADS: f32 = 0.5;
 const SLOWDOWN_REGION: [f32; 2] = [90.0, 90.0];
 const LOCKON_REGION: [f32; 2] = [90.0, 90.0];
 const AUTOAIM_REGION: [f32; 2] = [160.0, 120.0];
-/// Lock-on follows a target's motion this strongly, once a stick is past
-/// this deflection.
+/// Lock-on follows a target's motion this strongly, once the look stick or
+/// strafing is past this deflection.
 const LOCKON_STRENGTH: f32 = 0.6;
 const LOCKON_DEFLECTION: f32 = 0.05;
-/// Auto aim closes on its target at this rate.
+/// Auto aim closes on its target at this many degrees a second, and gives
+/// up after this long.
 const AUTOAIM_LERP: f32 = 40.0;
+const AUTOAIM_TIME: f32 = 0.5;
 
 /// Ranges for weapons whose data sets none.
 const FALLBACK_RANGE: f32 = 1500.0;
@@ -196,8 +198,8 @@ pub fn pad_look_frame(input: &mut ClientActionInput, view: &AimView, targets: &[
         delta[1] *= slow;
     }
 
-    // Lock-on: while a stick is moving, the view follows the target's
-    // motion against the player's.
+    // Lock-on: while the player aims or strafes, the view follows the
+    // target's motion against the player's. Auto aim takes over from it.
     let kept = input
         .pad_lockon
         .and_then(|key| screen.iter().find(|s| s.target.key == key))
@@ -205,6 +207,7 @@ pub fn pad_look_frame(input: &mut ClientActionInput, view: &AimView, targets: &[
     let lock = kept.or_else(|| best(&screen, assist_range, LOCKON_REGION, 1.0));
     input.pad_lockon = lock.map(|s| s.target.key);
     if let Some(lock) = lock
+        && input.pad_autoaim.is_none()
         && input.pad_deflection > LOCKON_DEFLECTION
     {
         let t = lock.target;
@@ -220,27 +223,29 @@ pub fn pad_look_frame(input: &mut ClientActionInput, view: &AimView, targets: &[
     }
 
     // Auto aim: raising the sight picks the target nearest the crosshair
-    // within the weapon's auto aim range, and the view closes on it.
+    // within the weapon's auto aim range, and the view turns onto it at a
+    // fixed rate, a pull rather than a snap.
     if mode == 2 && ads && !input.pad_was_ads {
         let auto_range = if view.ranges.auto_aim > 0.0 { view.ranges.auto_aim } else { FALLBACK_RANGE };
-        input.pad_autoaim =
-            best(&screen, auto_range, AUTOAIM_REGION, (1.0 / zoom).max(1.0)).map(|s| s.target.key);
+        input.pad_autoaim = best(&screen, auto_range, AUTOAIM_REGION, (1.0 / zoom).max(1.0))
+            .map(|s| (s.target.key, AUTOAIM_TIME));
     }
     if !ads {
         input.pad_autoaim = None;
     }
-    if let Some(key) = input.pad_autoaim {
-        match screen.iter().find(|s| s.target.key == key) {
+    if let Some((key, left)) = input.pad_autoaim {
+        match screen.iter().find(|s| s.target.key == key).filter(|_| left > 0.0) {
             Some(s) => {
                 let goal = angles_to(view.eye, s.target.aim);
-                let step = (AUTOAIM_LERP * dt).min(1.0);
                 let pitch = angle_delta(goal[0], view.angles[0]);
                 let yaw = angle_delta(goal[1], view.angles[1]);
-                delta[0] += pitch * step;
-                delta[1] += yaw * step;
-                if pitch.abs() < 0.25 && yaw.abs() < 0.25 {
-                    input.pad_autoaim = None;
+                let length = pitch.hypot(yaw);
+                let step = (AUTOAIM_LERP * dt).min(length);
+                if length > 1e-4 {
+                    delta[0] += pitch / length * step;
+                    delta[1] += yaw / length * step;
                 }
+                input.pad_autoaim = (length > 0.25).then_some((key, left - dt));
             }
             None => input.pad_autoaim = None,
         }

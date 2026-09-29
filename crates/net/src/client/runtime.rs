@@ -854,15 +854,22 @@ pub fn sample_client_input(
                     velocity: other.velocity,
                 });
             }
-            for (key, (centre, half)) in sim::voxel::mob_targets().into_iter().enumerate() {
-                if !in_front(centre, half) || !visible(centre) {
+            for (key, mins, maxs) in sim::voxel::mob_targets() {
+                // The upper body, as for players.
+                let aim = [
+                    (mins[0] + maxs[0]) * 0.5,
+                    (mins[1] + maxs[1]) * 0.5,
+                    mins[2] + (maxs[2] - mins[2]) * 0.75,
+                ];
+                let radius = (maxs[0] - mins[0]).max(maxs[1] - mins[1]) * 0.5;
+                if !in_front(aim, radius) || !visible(aim) {
                     continue;
                 }
                 targets.push(crate::client::pad_aim::AimTarget {
-                    key: 1 << 40 | key as u64,
-                    mins: [centre[0] - half, centre[1] - half, centre[2] - half],
-                    maxs: [centre[0] + half, centre[1] + half, centre[2] + half],
-                    aim: centre,
+                    key: 1 << 40 | key,
+                    mins,
+                    maxs,
+                    aim,
                     velocity: [0.0; 3],
                 });
             }

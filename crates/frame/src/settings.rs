@@ -49,7 +49,8 @@ pub struct GameSettings {
     pub pad_invert: bool,
     /// Controller look response: 0 standard, 1 linear, 2 dynamic.
     pub pad_curve: u8,
-    /// Aim assist: 0 off, 1 slowdown, 2 slowdown and aim snap.
+    /// Aim assist: 0 off, 1 slowdown and lock-on, 2 with auto aim on
+    /// raising the sight.
     pub pad_aim_assist: u8,
     pub pad_vibration: bool,
     pub pad_deadzone_left: f32,
@@ -79,7 +80,7 @@ impl Default for GameSettings {
             pad_ads_sensitivity: 1.0,
             pad_invert: false,
             pad_curve: 0,
-            pad_aim_assist: 2,
+            pad_aim_assist: 1,
             pad_vibration: true,
             pad_deadzone_left: 0.12,
             pad_deadzone_right: 0.12,

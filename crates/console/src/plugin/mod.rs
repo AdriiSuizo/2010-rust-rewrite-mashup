@@ -378,7 +378,8 @@ fn publish_client_action_input(
         let look = crate::gamepad::shaped_look(sticks.look, &settings);
         out.pad_move = [sticks.movement.x, sticks.movement.y];
         out.pad_look = [look.x, look.y];
-        out.pad_deflection = sticks.movement.length().max(sticks.look.length());
+        // Lock-on wakes on the look stick or strafing, not walking forward.
+        out.pad_deflection = sticks.movement.x.abs().max(sticks.look.length());
     }
     let inputs = BindInputs::new(&keys, &mouse_buttons).with_pad(pad);
     for (button, id) in binds.iter() {
