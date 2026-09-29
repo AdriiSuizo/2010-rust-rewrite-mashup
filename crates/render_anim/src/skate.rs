@@ -22,7 +22,7 @@ enum Reply {
 struct Host {
     send: Option<mpsc::Sender<Job>>,
     receive: Option<Mutex<mpsc::Receiver<Reply>>>,
-    clip: Option<Arc<assets::ClipCollision>>,
+    clip: Option<Arc<asset_world::ClipCollision>>,
     ready: bool,
     enter_requested: bool,
     activating: bool,
@@ -93,7 +93,7 @@ fn block_collision(builder: &CollisionBuilder, centre: Vec3) -> Result<(Prepared
 
 /// One retained session per map. Leaving skating only pauses this worker;
 /// collision, decoded animation banks, graphs and the rig remain resident.
-fn preload_map(host: &mut Host, clip: Arc<assets::ClipCollision>) -> Result<(), String> {
+fn preload_map(host: &mut Host, clip: Arc<asset_world::ClipCollision>) -> Result<(), String> {
     let root =
         std::env::var_os("IW4L_SKATE_ASSETS").ok_or("IW4L_SKATE_ASSETS is not configured")?;
     rig::reference().ok_or("Skate rig.json could not be loaded")?;
@@ -342,11 +342,7 @@ fn update(
     }
     let input = host.transport.poll();
     mode.controller = input.controller();
-    let buttons = input.buttons();
-    if mode.active && buttons & 0x10 != 0 && host.previous_buttons & 0x10 == 0 {
-        mode.pause_requested = true;
-    }
-    host.previous_buttons = buttons;
+    host.previous_buttons = input.buttons();
 
     let mut replies = Vec::new();
     if let Some(receiver) = &host.receive {
@@ -438,7 +434,7 @@ fn update(
     if !mode.active {
         return;
     }
-    if mode.input_blocked || mode.pause_requested {
+    if mode.input_blocked {
         if !host.input_suspended {
             if let Some(send) = &host.send {
                 let _ = send.send(Job::Suspend);

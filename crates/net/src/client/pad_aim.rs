@@ -54,7 +54,7 @@ pub struct AimView {
     pub ads_lerp: f32,
     /// The view's zoom against a 65 degree field of view.
     pub fov_scale: f32,
-    pub ranges: sim::AimAssistRanges,
+    pub ranges: weapon_iw4::AimAssistRanges,
     pub dt: f32,
 }
 

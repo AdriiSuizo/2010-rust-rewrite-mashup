@@ -1,5 +1,6 @@
 //! Optional local, preconverted character mesh. Assets remain outside the game archives.
-use crate::{AssetRef, AuthoredImage, MaterialCatalog};
+use asset_core::AssetRef;
+use asset_material::{AuthoredImage, MaterialCatalog};
 use bevy::{
     asset::RenderAssetUsages,
     prelude::*,

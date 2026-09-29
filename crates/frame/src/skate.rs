@@ -8,7 +8,6 @@ pub struct SkateMode {
     pub preloaded: bool,
     pub preload_pending: bool,
     pub controller: Option<usize>,
-    pub pause_requested: bool,
     pub toggle_requested: bool,
     pub input_blocked: bool,
     pub client: u32,

@@ -219,8 +219,6 @@ fn exec_cell_dyn_brush_cmds(
             }
         })
         .collect();
-    // Nothing admitted is the usual frame: skip the tables and the surface
-    // set this would otherwise build over every drawn world surface.
     if admitted.iter().all(|&brush_model| brush_model == 0) {
         return;
     }
@@ -284,10 +282,6 @@ fn size_scene_ent_cell_bits(scene: Option<Res<WorldScene>>, mut bits: ResMut<Sce
     bits.ensure(cull.dpvs.cell_count);
 }
 
-/// The cells each scene entity was filtered into, kept while its bounds and
-/// the BSP it was walked through stay the same. Most scene entities are
-/// placed script models that never move, and re-walking the tree for every
-/// one of them each frame was most of the linking cost.
 #[derive(Default)]
 struct SceneEntCellCache {
     tree: (usize, usize),
@@ -306,8 +300,6 @@ impl SceneEntCellCache {
             half[1].to_bits(),
             half[2].to_bits(),
         ];
-        // A second pose for the same id replaces the first, as a fresh
-        // filter would by unfiltering the entity before it walks.
         if !self.linked.insert(ent_id) {
             dpvs_iw4::unfilter_scene_ent_from_cells_view0(bits, dpvs.cell_count as usize, ent_id);
         }
@@ -391,8 +383,6 @@ fn link_scene_ents(
     }
 }
 
-/// The box a scene entity is linked by: its posed bounds, or a cube of its
-/// radius about its origin.
 fn scene_ent_pose_bounds(
     origin: [f32; 3],
     radius: Option<f32>,

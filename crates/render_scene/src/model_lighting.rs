@@ -6,6 +6,8 @@ use bevy::prelude::*;
 pub enum ModelLightingOwner {
     Eye,
     RemoteClient(u16),
+    /// A remote player drawn with the local character import (CJ), which
+    /// tunes its own ambient response.
     LocalBotOverride(u16),
     Corpse(Entity),
     ScriptModel(Entity),
@@ -83,7 +85,10 @@ impl ResolvedModelLightingTable {
         self.by_owner.remove(&owner);
     }
 
-    pub fn retain_glass(&mut self, live: &bevy::platform::collections::HashSet<ModelLightingOwner>) {
+    pub fn retain_glass(
+        &mut self,
+        live: &bevy::platform::collections::HashSet<ModelLightingOwner>,
+    ) {
         self.by_owner.retain(|owner, _| {
             !matches!(owner, ModelLightingOwner::Glass(_)) || live.contains(owner)
         });

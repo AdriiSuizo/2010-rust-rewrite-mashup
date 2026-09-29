@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use assets::{ensure_artifacts_dir, games_root_from_env};
+use asset_transport::{ensure_artifacts_dir, games_root_from_env};
 
 #[cfg(windows)]
 mod first_run;

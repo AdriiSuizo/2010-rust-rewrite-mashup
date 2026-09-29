@@ -250,9 +250,8 @@ fn filter_scene_ent_into_cells_r(
     }
 }
 
-/// The cells `filter_scene_ent_into_cells` would mark for `bounds`, in walk
-/// order, handed to `on_cell`: the same walk, for callers that keep the
-/// answer for an entity that has not moved.
+/// Must walk exactly as `filter_scene_ent_into_cells_r` does: callers cache
+/// its cells in place of filtering.
 pub fn scene_ent_cells(planes: &DpvsPlanes<'_>, bounds: Bounds, on_cell: &mut impl FnMut(u32)) {
     if planes.nodes.is_empty() || planes.cell_count == 0 {
         return;

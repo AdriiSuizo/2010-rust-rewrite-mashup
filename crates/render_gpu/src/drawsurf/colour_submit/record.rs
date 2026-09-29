@@ -143,7 +143,7 @@ pub(super) fn draw_exact_colour(
     let emissive = products.0.product(FrameProductKind::Emissive);
     scratch.skinned_tess.upload(&device, &queue);
     shadow_scratch.skinned_tess.upload(&device, &queue);
-    // Handles, not the caches: the skinned surfaces are kept for later frames.
+    // Handles only: taking the caches would drop the kept skinned surfaces.
     let tess_vertex = scratch.skinned_tess.vertex_buffer().cloned();
     let tess_index = scratch.skinned_tess.index_buffer().cloned();
     let shadow_tess_vertex = shadow_scratch.skinned_tess.vertex_buffer().cloned();

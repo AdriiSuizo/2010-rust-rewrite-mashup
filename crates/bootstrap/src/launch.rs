@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
+use asset_audio::load_mp_sound_bank;
+use asset_game::{load_mp_localized_strings, load_ui_menu_catalog};
+use asset_transport::{LoadProgress, find_runtime_common_mp};
+// The Minecraft world is found and listed as a map of its own.
+use assets::{find_zone_file, list_mp_map_packs};
 use assets::{
-    LoadProgress, LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceSoundIwd,
-    NamespaceTrees, decode_menu_background, find_runtime_common_mp, find_zone_file, list_mp_maps,
-    load_mp_localized_strings, load_mp_sound_bank, load_ui_menu_catalog,
+    LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceSoundIwd, NamespaceTrees,
 };
 use audio::{SoundBank, SoundIwd};
 use bevy::prelude::*;
@@ -16,8 +19,8 @@ use render_frontend::prepare::scene::world::WorldScene;
 use replay::{Playback, ReplayPlayback};
 use session::StartupCommands;
 use ui::{
-    AppScreen, ClassLoadoutCatalog, LaunchIdentity, LaunchReport, MenuEnabled, MenuFrontend,
-    MenuMapList, MenuShotPlan, PendingMenuBgPixels, UiAssetRoot, UiDraw, UiLayer, UiLayers,
+    AppScreen, ClassLoadoutCatalog, LaunchIdentity, LaunchReport, MenuMapList, UiAssetRoot, UiDraw,
+    UiLayer, UiLayers,
 };
 
 use crate::args::{AcceptanceLaunch, LaunchMode};
@@ -27,6 +30,7 @@ use crate::plugins::{add_runtime_plugins, add_runtime_plugins_with_role};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
     Listen,
+    Dedicated,
     Client,
     Replay,
 }
@@ -58,11 +62,16 @@ fn launch_report(
 #[derive(Resource)]
 struct ShellCommonTask {
     task: bevy::tasks::Task<assets::ShellCommon>,
-    perk_table: Option<assets::CapturedStringTable>,
+    perk_table: Option<asset_game::CapturedStringTable>,
     started: std::time::Instant,
 }
 
-fn install_class_catalog(mut commands: Commands, shell: Option<ResMut<ShellCommonTask>>) {
+fn install_class_catalog(
+    mut commands: Commands,
+    shell: Option<ResMut<ShellCommonTask>>,
+    mut strings: ResMut<asset_game::LocalizeCatalog>,
+    menus: Res<asset_game::MenuCatalog>,
+) {
     use bevy::tasks::futures_lite::future;
     let Some(mut shell) = shell else {
         return;
@@ -89,6 +98,12 @@ fn install_class_catalog(mut commands: Commands, shell: Option<ResMut<ShellCommo
         class_catalog.excluded.len(),
         shell.started.elapsed().as_secs_f32() * 1000.0,
     );
+    for (key, preview) in &mut class_catalog.previews {
+        if key.contains('+') && menus.material_images.contains_key(&preview.image) {
+            preview.image = format!("iw4:material/{}", preview.image);
+        }
+    }
+    strings.absorb(common.strings);
     commands.insert_resource(class_catalog);
     commands.remove_resource::<ShellCommonTask>();
 }
@@ -107,12 +122,12 @@ fn fatal(msg: &str) -> ! {
 }
 
 pub fn launch(
-    games: assets::GamesRoot,
+    games: asset_transport::GamesRoot,
     artifacts: PathBuf,
     mode: LaunchMode,
     acceptance: Option<AcceptanceLaunch>,
 ) {
-    diag::info!(Launch, "{}", assets::games_root_report(&games));
+    diag::info!(Launch, "{}", asset_transport::games_root_report(&games));
 
     if let Some(plan) = crate::frame_owner::prefer_performance_cores() {
         assets::publish_process_cpus(plan.allowed.clone());
@@ -135,6 +150,7 @@ pub fn launch(
             run_menu(games, artifacts);
         }
         LaunchMode::Map(zone) => run_map(games, artifacts, zone, acceptance, Role::Listen, None),
+        LaunchMode::Serve(zone) => run_map(games, artifacts, zone, None, Role::Dedicated, None),
         LaunchMode::ExportGltf(zone) => {
             if acceptance.is_some() {
                 fatal("render acceptance is not available for export-gltf");
@@ -148,12 +164,12 @@ pub fn launch(
     }
 }
 
-fn run_export_gltf(games: assets::GamesRoot, artifacts: PathBuf, zone_arg: String) {
+fn run_export_gltf(games: asset_transport::GamesRoot, artifacts: PathBuf, zone_arg: String) {
     let found = find_zone_file(&games, &zone_arg)
         .unwrap_or_else(|error| fatal(&format!("export-gltf: {error}")));
-    let game = assets::zone_game_for_path(&found.path)
+    let game = asset_transport::zone_game_for_path(&found.path)
         .unwrap_or_else(|| fatal("export-gltf: source game could not be identified"));
-    if game != assets::ZoneGame::Iw4 {
+    if game != asset_core::ZoneGame::Iw4 {
         fatal(&format!(
             "export-gltf P1a supports native IW4 only; {} is {}",
             found.zone_name,
@@ -165,7 +181,7 @@ fn run_export_gltf(games: assets::GamesRoot, artifacts: PathBuf, zone_arg: Strin
     let prepared = match bevy::tasks::futures_lite::future::block_on(assets::load_prepared_match(
         Ok(found.path),
         common_mp,
-        assets::LoadProgress::default(),
+        asset_transport::LoadProgress::default(),
     )) {
         assets::MatchLoadOutcome::Ready(prepared) => prepared,
         assets::MatchLoadOutcome::Canceled => fatal("export-gltf: map walk canceled"),
@@ -181,10 +197,10 @@ fn run_export_gltf(games: assets::GamesRoot, artifacts: PathBuf, zone_arg: Strin
     diag::announce_stdout(&summary.report_line());
 }
 
-fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
+fn run_menu(games: asset_transport::GamesRoot, artifacts: PathBuf) {
     start_perf(None, "menu");
-    let ui_games = assets::ui_games_root(&games).unwrap_or_else(|error| {
-        let content = assets::games_content_report(&games).join("\n");
+    let ui_games = asset_game::ui_games_root(&games).unwrap_or_else(|error| {
+        let content = asset_transport::games_content_report(&games).join("\n");
         fatal(&format!(
             "Cannot start the IW4 menu: base MW2 Multiplayer assets were not found.\n\n\
              {content}\n\n\
@@ -195,7 +211,8 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
         ))
     });
     let shell_common = assets::load_pool().spawn(assets::load_shell_common(games.clone()));
-    let (menus, menu_report) = load_ui_menu_catalog(&ui_games);
+    let (mut menus, menu_report) = load_ui_menu_catalog(&ui_games);
+    ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
     for line in &menu_report {
         diag::info!(Launch, "{line}");
     }
@@ -213,10 +230,11 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
             menu_report.join("\n")
         ));
     }
-    let maps = list_mp_maps(&games);
+    let maps = list_mp_map_packs(&games);
     diag::info!(
         Launch,
-        "menu: {} maps under {}",
+        "menu: {} maps in {} packs under {}",
+        maps.iter().map(|pack| pack.maps.len()).sum::<usize>(),
         maps.len(),
         games.0.display()
     );
@@ -252,20 +270,6 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
             ..default()
         },
     ));
-    let menu_bg = match decode_menu_background(&ui_games.0) {
-        Ok(Some(v)) => {
-            diag::info!(Launch, "menu: background ready");
-            Some(v)
-        }
-        Ok(None) => {
-            diag::info!(Launch, "menu: no menu_mp_image in IWD");
-            None
-        }
-        Err(error) => {
-            diag::warn!(Launch, "menu: background: {error}");
-            None
-        }
-    };
     app.insert_resource(ShellCommonTask {
         task: shell_common,
         perk_table: menus.string_table("mp/perkTable.csv").cloned(),
@@ -314,10 +318,6 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
     }
     app.insert_resource(launch_identity(&config))
         .insert_resource(MenuMapList(maps))
-        .insert_resource(MenuEnabled(true))
-        .insert_resource(MenuFrontend {
-            game_mode: Some("mp".into()),
-        })
         .insert_resource(AppScreen::MainMenu)
         .insert_resource(UiAssetRoot(Some(ui_games.0)))
         .insert_resource(StartupCommands {
@@ -331,13 +331,7 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
             layers
         });
     add_runtime_plugins(&mut app);
-    if let Some(decoded) = menu_bg {
-        app.insert_resource(PendingMenuBgPixels(decoded));
-    }
-    if let Some(plan) = MenuShotPlan::from_env() {
-        diag::info!(Launch, "menu-shots: {}", plan.dir.display());
-        app.insert_resource(plan);
-    } else if let Some(capture) = CaptureRequest::from_env() {
+    if let Some(capture) = CaptureRequest::from_env() {
         queue_launch_capture(
             &mut app,
             CaptureRequest {
@@ -351,7 +345,7 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
 }
 
 fn run_play(
-    games: assets::GamesRoot,
+    games: asset_transport::GamesRoot,
     artifacts: PathBuf,
     name: String,
     zone_override: Option<String>,
@@ -377,7 +371,7 @@ fn run_play(
 }
 
 fn run_map(
-    games: assets::GamesRoot,
+    games: asset_transport::GamesRoot,
     artifacts: PathBuf,
     zone_arg: String,
     acceptance: Option<AcceptanceLaunch>,
@@ -387,7 +381,7 @@ fn run_map(
     let found = find_zone_file(&games, &zone_arg);
     let zone_alias = found.as_ref().ok().and_then(|z| z.alias_note.clone());
     let zone_arg_lc = zone_arg.trim().to_ascii_lowercase();
-    let (parsed_game, requested_stem) = assets::split_zone_key(&zone_arg_lc);
+    let (parsed_game, requested_stem) = asset_transport::split_zone_key(&zone_arg_lc);
     let zone = found
         .as_ref()
         .ok()
@@ -406,9 +400,9 @@ fn run_map(
         found
             .as_ref()
             .ok()
-            .and_then(|z| assets::zone_game_for_path(&z.path))
+            .and_then(|z| asset_transport::zone_game_for_path(&z.path))
     });
-    let loading_title = assets::map_load_title(&zone_arg_lc, game);
+    let loading_title = asset_transport::map_load_title(&zone_arg_lc, game);
     let namespace_trees = NamespaceTrees::discover(&games);
     let have = content_flags(&namespace_trees);
     let requires = net::content_required_by_map(&zone_arg_lc)
@@ -440,7 +434,8 @@ fn run_map(
         artifacts,
     };
     start_perf(Some(zone.clone()), role_name(config.role));
-    let (menus, menu_report) = load_ui_menu_catalog(&games);
+    let (mut menus, menu_report) = load_ui_menu_catalog(&games);
+    ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
     for line in &menu_report {
         diag::info!(Launch, "{line}");
     }
@@ -457,12 +452,22 @@ fn run_map(
         app.insert_resource(ui::PresentModeOverride(present_mode));
     }
     app.insert_resource(master_intent);
+    let dedicated = config.role == Role::Dedicated;
+    if dedicated {
+        app.insert_resource(bevy::winit::WinitSettings::continuous())
+            .insert_resource(frame::Headless);
+    }
     app.add_plugins(crate::plugins::default_plugins_with_quiet_log(
         WindowPlugin {
-            primary_window: Some(Window {
+            exit_condition: if dedicated {
+                bevy::window::ExitCondition::DontExit
+            } else {
+                bevy::window::ExitCondition::OnAllClosed
+            },
+            primary_window: (!dedicated).then(|| Window {
                 title: match config.role {
                     Role::Replay => format!("iw4l — play {}", config.zone),
-                    Role::Listen => format!("iw4l — {}", config.zone),
+                    Role::Listen | Role::Dedicated => format!("iw4l — {}", config.zone),
                     Role::Client => format!("iw4l — join {}", config.zone),
                 },
                 resolution: (ACCEPTANCE_WIDTH, ACCEPTANCE_HEIGHT).into(),
@@ -479,7 +484,7 @@ fn run_map(
             request_id: 0,
         });
     }
-    let ui_games_root = assets::ui_games_root(&games).ok().map(|root| root.0);
+    let ui_games_root = asset_game::ui_games_root(&games).ok().map(|root| root.0);
     app.insert_resource(launch_identity(&config))
         .insert_resource(probe)
         .insert_resource(menus)
@@ -496,7 +501,6 @@ fn run_map(
             loading_title,
             sim::host_game_mode_kind().display_name().to_owned(),
         ))
-        .insert_resource(MenuEnabled(false))
         .insert_resource(UiAssetRoot(ui_games_root))
         .insert_resource(StartupCommands {
             lines: console::startup_commands(),
@@ -524,9 +528,9 @@ fn run_map(
         app.insert_resource(run);
     }
     match config.role {
-        Role::Replay => add_runtime_plugins_with_role(&mut app, net::RuntimeRole::Replay),
-        Role::Listen => add_runtime_plugins(&mut app),
-        Role::Client => add_runtime_plugins_with_role(&mut app, net::RuntimeRole::Client),
+        Role::Replay => add_runtime_plugins_with_role(&mut app, frame::RuntimeRole::Replay),
+        Role::Listen | Role::Dedicated => add_runtime_plugins(&mut app),
+        Role::Client => add_runtime_plugins_with_role(&mut app, frame::RuntimeRole::Client),
     }
     // The demo, before the playback moves into the world: it names the workload
     // in the bench manifest, and "same demo" is what makes two runs comparable
@@ -560,11 +564,11 @@ fn run_map(
     }
 }
 
-fn content_flags(trees: &NamespaceTrees) -> net::ContentFlags {
+fn content_flags(trees: &NamespaceTrees) -> master_protocol::ContentFlags {
     net::content_inventory(
-        trees.get(assets::AssetNamespace::Iw4).is_some(),
-        trees.get(assets::AssetNamespace::Iw5).is_some(),
-        trees.get(assets::AssetNamespace::T5).is_some(),
+        trees.get(asset_core::AssetNamespace::Iw4).is_some(),
+        trees.get(asset_core::AssetNamespace::Iw5).is_some(),
+        trees.get(asset_core::AssetNamespace::T5).is_some(),
     )
 }
 
@@ -598,6 +602,7 @@ fn queue_launch_capture(app: &mut App, request: CaptureRequest) {
 const fn role_name(role: Role) -> &'static str {
     match role {
         Role::Listen => "listen",
+        Role::Dedicated => "dedicated",
         Role::Client => "client",
         Role::Replay => "replay",
     }

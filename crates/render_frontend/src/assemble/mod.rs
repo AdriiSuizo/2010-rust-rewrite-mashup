@@ -12,8 +12,6 @@ fn prepare_static_sun_and_fx(world: &mut World) {
     world.run_schedule(StaticSunAndFx);
 }
 
-/// The three draw lanes rebuild from separate inputs into separate lanes, so
-/// they run as one island on the compute pool rather than one after another.
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DrawLaneRebuild;
 
@@ -91,16 +89,13 @@ impl Plugin for RenderAssemblePlugin {
         .add_systems(
             Update,
             rebuild_draw_lanes
-                // rebuild_xmodel_draw_lane
                 .after(crate::adapters::anim::fpv_present::FpvPlacementSet)
                 .after(crate::adapters::anim::fpv_present::FpvGeometrySet)
                 .after(frame::WorkerCmdSet::AddSceneEnt)
                 .after(crate::assemble::drawsurf::tess::xmodel::apply_resolved_fx_model_lighting)
                 .after(crate::adapters::anim::script_model::ScriptModelDrawSet)
-                // rebuild_fx_draw_lane
                 .after(frame::WorkerCmdSet::FxVerts)
                 .after(crate::assemble::drawsurf::tess::glass::apply_glass_model_lighting)
-                // rebuild_static_draw_lane
                 .after(crate::prepare::scene::cull::apply_dpvs_cull)
                 .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting)
                 .after(frame::WorkerCmdSet::SmodelCache)

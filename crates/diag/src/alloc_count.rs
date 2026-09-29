@@ -112,9 +112,6 @@ pub fn release_freed_heap() -> std::time::Duration {
     at.elapsed()
 }
 
-/// What the counting allocator hands the memory to. Windows gets mimalloc: the
-/// process heap takes a lock on every call, and the frame's many short-lived
-/// buffers spent more time there than in the code that used them.
 #[cfg(windows)]
 static BACKING: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(not(windows))]

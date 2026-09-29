@@ -180,10 +180,8 @@ impl PackedCodeConstants {
 }
 
 fn hash_packed_code_constants(lanes: &[PackedCodeConstantLane]) -> u64 {
-    // Every draw pass hashes its constants every frame, so the rows are taken a
-    // row at a time rather than a byte at a time. The id keys packed constant
-    // caches with no second comparison, so each step is a full 64x64->128
-    // multiply fold, not a cheaper mix.
+    // The id keys packed constant caches with no second comparison: keep a
+    // full-strength mix.
     let mut hash = fold_mix(FOLD_SEED, lanes.len() as u64);
     for lane in lanes {
         let stage = match lane.stage {
@@ -208,8 +206,6 @@ fn hash_packed_code_constants(lanes: &[PackedCodeConstantLane]) -> u64 {
 const FOLD_SEED: u64 = 0x243f_6a88_85a3_08d3;
 const FOLD_MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
 
-/// One step of a folded-multiply hash: mix `word` into `hash` through a full
-/// 128-bit product and fold its halves back together.
 fn fold_mix(hash: u64, word: u64) -> u64 {
     let product = u128::from(hash ^ word) * u128::from(FOLD_MULTIPLIER);
     (product as u64) ^ ((product >> 64) as u64)

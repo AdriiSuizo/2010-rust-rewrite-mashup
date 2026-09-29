@@ -5,7 +5,7 @@ use bevy::prelude::*;
 /// same animated skin matrices as its weapon and game-side pose.
 pub(super) fn skin(
     model: &assets::bot_model::BotModel,
-    skel: &assets::ModelSkel,
+    skel: &asset_model::ModelSkel,
     matrices: &[Mat4],
     geom: &mut CpuBodyGeom,
 ) -> Result<(), String> {

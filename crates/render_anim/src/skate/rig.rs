@@ -57,7 +57,7 @@ fn convert(m: Mat4) -> Mat4 {
 /// Align each soldier bind segment to the reference skater, then apply the
 /// game's solved pose. Unmapped fingers, equipment and helper bones inherit
 /// the nearest mapped ancestor, preserving their original local offsets.
-pub fn pose(dobj: &assets::DObj, mode: &frame::SkateMode) -> Vec<Mat4> {
+pub fn pose(dobj: &xmodel_runtime::DObj, mode: &frame::SkateMode) -> Vec<Mat4> {
     let Some(reference) = reference() else {
         return dobj.bones.iter().map(|b| b.bind_world).collect();
     };
@@ -148,7 +148,7 @@ pub fn pose(dobj: &assets::DObj, mode: &frame::SkateMode) -> Vec<Mat4> {
         .map(|(b, s)| s * b.bind_world)
         .collect()
 }
-fn p_from(dobj: &assets::DObj, index: Option<usize>) -> Option<Vec3> {
+fn p_from(dobj: &xmodel_runtime::DObj, index: Option<usize>) -> Option<Vec3> {
     Some(dobj.bones.get(index?)?.bind_world.w_axis.truncate())
 }
 

@@ -20,4 +20,4 @@ pub use fpv_present::{
 };
 pub use remote_body::{RemoteFxBolts, RemotePlayer};
 pub use script_model::{RenderFocus, ScriptModelDrawSet, ScriptModelSkinSet};
-pub use view_kick::{CgGunOffset, PendingViewHurt, sync_camera_from_presented};
+pub use view_kick::{GunOffset, PendingViewHurt, sync_camera_from_presented};

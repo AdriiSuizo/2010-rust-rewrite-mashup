@@ -2,7 +2,33 @@ use bevy::tasks::{ComputeTaskPool, TaskPool};
 use dpvs_iw4::GfxDrawSurf;
 use render_backend::MaterialRunCensus;
 
-use super::*;
+use super::{
+    BTreeMap, COLOUR_PREPARE_LANES, Camera3d, CameraPrepareState, CameraWorldPretess,
+    ColourPackPlan, ColourPrepareLane, ColourRowPlan, ColourSubmitScratch, DrawRefusalCensus,
+    ExactColourBindingCache, ExactColourGeometry, ExactColourPipeline, ExactColourSubmitCensus,
+    ExactConstantArena, ExactFloatZResolve, ExactPipelineRegistry, ExactPrepare,
+    ExactPrepareTarget, ExactShadowBindingCache, ExactTessBind, ExtractedColourRefs,
+    ExtractedRenderFrameProducts, ExtractedView, FrameProduct, FrameProductKind,
+    FrameProductStatus, GpuConstantArena, GpuSubmitRefusal, HashSet, InstalledRenderWorld, Mat4,
+    MaterialExecView, MaterialRefusal, MaterialRunExecutor, Msaa, PipelineCache, PortId,
+    PrepareCost, PrepareTextureTables, PreparedColourRow, PublishedRenderFrame, Query,
+    RenderDevice, RenderQueue, Res, ResMut, ResidentShadowStaticDraws, Resource, RetainedDrawKind,
+    RuntimeShaderStage, RuntimeUploadedImageRegistry, SCENE_DEPTH_FORMAT, SamplerTable,
+    SceneDepthTexture, SceneTextureState, SceneTextureTables, ShadowSubmitScratch,
+    ShadowTextureTable, ShadowmapSpotArena, ShadowmapSpotGpu, ShadowmapSunArena, ShadowmapSunGpu,
+    SmodelCacheGpu, SpecializedRenderPipelines, UnsupportedStateCensus, Vec3, Vec4, ViewTarget,
+    With, WorldPretessLayout, as_u32, bind_world_packed_rows, bsp_draw_source, bsp_kind_index,
+    build_colour_row_plan, colour_census_clock, colour_census_ms, colour_draw_at, colour_pack_key,
+    colour_tech_at, draw_surf_list_work_colour, empty_world_run_gather, exec_tables,
+    execution_binds_code_texture, floatz, gather_world_run_indices, is_viewmodel_colour_draw,
+    material_refusal_class, open_scene_table_epoch, open_shadow_table_epoch,
+    pack_sun_shadow_frontend, prepare_shadowmap_spot, prepare_shadowmap_sun,
+    publish_this_frame_spot_shadow_views, publish_this_frame_sun_shadow_view,
+    record_pipeline_not_ready, reset_exact_colour_census, smodel_skinned, spot_rt_for_light,
+    spot_shadow_view_missing, submit_refusal_class, submit_refusal_family, sun_shadow_view_missing,
+    upload_constant_arena, viewmodel_colour_submits_when_pipelines_ready, world_material_sorted,
+    world_packed_row_meta, world_pretess_dest_ib, world_pretess_key,
+};
 
 fn run_colour_lanes(camera: CameraLane<'_>, shadow: ShadowLane<'_>) {
     let _prepare = perf::Span::RenderColourPrepareMs.enter();
@@ -243,7 +269,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
             &geometry.xmodel_surface_ranges,
             &mut scratch.pack_draws,
         );
-        let work = r_draw_surf_list_work_colour(&packed);
+        let work = draw_surf_list_work_colour(&packed);
         let skinned = (
             packed.smodel_skinned.len(),
             work.smodel_skinned_unconsumed as usize,
@@ -414,8 +440,8 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         .into_inner()
         .expect("skinned static model cache is never poisoned");
 
-    // Lanes hold contiguous shares of the ordered rows: laid end to end in
-    // lane order, their draws are the order a single pass would have made.
+    // Draw order is row order only while lanes take contiguous shares and are
+    // concatenated in lane order.
     let mut tally = CameraRowTally::new(census_on);
     for lane_tally in tallies.into_iter().flatten() {
         tally.absorb(lane_tally);
@@ -927,9 +953,6 @@ fn install_shared_colour_resources(
     })
 }
 
-/// The side planes of a view, and the plane through the eye it looks down,
-/// from its world-to-clip transform: each `n.p + d >= 0` inside, normalised so
-/// the value is a distance.
 fn view_cull_planes(clip_from_world: Option<Mat4>) -> Option<[Vec4; 5]> {
     let m = clip_from_world?;
     let (x, y, w) = (m.row(0), m.row(1), m.row(3));
@@ -950,8 +973,6 @@ fn sphere_outside(planes: &[Vec4; 5], centre: Vec3, radius: f32) -> bool {
         .any(|plane| plane.truncate().dot(centre) + plane.w < -radius)
 }
 
-/// What every camera prepare lane reads. Nothing in it is written by a lane
-/// except through the two locks.
 struct CameraRowsInput<'a> {
     extracted: ExtractedColourRefs<'a>,
     products: &'a ExtractedRenderFrameProducts,
@@ -965,7 +986,7 @@ struct CameraRowsInput<'a> {
     device: &'a RenderDevice,
     queue: &'a RenderQueue,
     uploaded: &'a RuntimeUploadedImageRegistry,
-    sampler_table: &'a RetailSamplerTable,
+    sampler_table: &'a SamplerTable,
     textures: &'a std::sync::Mutex<SceneTextureState>,
     skinned: &'a std::sync::Mutex<smodel_skinned::SmodelSkinnedTess>,
     exec_view: Option<MaterialExecView<'a>>,
@@ -981,7 +1002,6 @@ fn lane_rows(rows: &[ColourRowPlan], share: usize, index: usize) -> &[ColourRowP
     &rows[start..end]
 }
 
-/// One lane's account of the rows it prepared, merged in lane order.
 struct CameraRowTally {
     ready_draws: u32,
     refused_draws: u32,
@@ -1063,8 +1083,6 @@ impl CameraRowTally {
         }
     }
 
-    /// Fold in the lane after this one: counts add, a "last" is the later
-    /// lane's when it saw one, a "first" stays the earlier lane's.
     fn absorb(&mut self, next: Self) {
         fn add_counts<K: Ord>(into: &mut BTreeMap<K, u32>, from: BTreeMap<K, u32>) {
             for (key, n) in from {
@@ -1156,9 +1174,6 @@ fn add_run_census(a: MaterialRunCensus, b: MaterialRunCensus) -> MaterialRunCens
     }
 }
 
-/// Prepare one lane's share of the camera rows: execute each row's material,
-/// prepare its passes against this lane's pack cache and arena, then upload
-/// the arena. Every draw it leaves in `lane` indexes arena `lane_index`.
 fn prepare_camera_rows(
     input: &CameraRowsInput<'_>,
     rows: &[ColourRowPlan],
@@ -1255,9 +1270,6 @@ fn prepare_camera_rows(
         else {
             continue;
         };
-        // Glass is one draw per pane across the whole map and reaches here
-        // unculled; a pane wholly outside the view costs a full material
-        // execution and a draw call for nothing.
         if let RetainedDrawKind::Glass { draw, .. } = live.kind
             && let Some(planes) = glass_cull.as_ref()
             && let Some(&[x, y, z, radius]) = extracted.frame.glass_mesh_bounds.get(draw as usize)
@@ -1540,8 +1552,6 @@ fn prepare_camera_rows(
     let run_census = executor.census();
     lane.executor = executor;
 
-    // The arena is this lane's own, so it is uploaded here, alongside the other
-    // lanes, with the viewmodel draws the merge may hold back or keep.
     let mut arena_ms = 0.0f32;
     let (mut arena_share, mut arena_vertex_n, mut arena_pixel_n) = (0u32, 0usize, 0usize);
     if !prepared.is_empty() || !pending_viewmodel_prepared.is_empty() {

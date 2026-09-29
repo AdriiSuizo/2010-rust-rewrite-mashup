@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use assets::LoadProgress;
+use asset_transport::LoadProgress;
 use bevy::prelude::*;
 use render::diag::capture::{CaptureQueue, CaptureRequest};
 
@@ -50,7 +50,7 @@ static REPORTED: AtomicBool = AtomicBool::new(false);
 /// later code pays for a `getenv` per span.
 pub fn arm() {
     perf::stats::arm();
-    assets::load_jobs::arm(enabled());
+    asset_transport::load_jobs::arm(enabled());
     if !enabled() {
         return;
     }
@@ -137,9 +137,8 @@ pub fn insert(
     app.add_systems(PostUpdate, report_on_app_exit);
 }
 
-/// `std::process::exit` on Windows is `ExitProcess`, which runs no `atexit`
-/// handler, so the report is written when the exit is asked for instead —
-/// `PostUpdate` of the frame that sent `AppExit`, before `Last` acts on it.
+/// `std::process::exit` on Windows runs no `atexit` handler: report from
+/// `PostUpdate` of the frame that sent `AppExit`, before `Last` exits.
 #[cfg(not(unix))]
 fn report_on_app_exit(mut exit: MessageReader<AppExit>) {
     if exit.read().last().is_none() {
@@ -335,7 +334,7 @@ fn write_run_package(artifacts: &Path, lines: &[String]) -> Vec<String> {
         }
     }
 
-    let jobs = assets::load_jobs::snapshot();
+    let jobs = asset_transport::load_jobs::snapshot();
     let path = dir.join("load_jobs.csv");
     if jobs.rows.is_empty() {
         out.push("run package: load_jobs.csv not written — no load job was recorded".to_owned());

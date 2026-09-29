@@ -10,9 +10,6 @@ use lighting_iw4::{
     MODEL_LIGHTING_ATLAS_DEPTH, MODEL_LIGHTING_TILE_BYTES, MODEL_LIGHTING_TILE_DIM,
 };
 
-/// Model lighting tiles the main world wrote into an atlas image without
-/// marking it changed. Each one is copied into the atlas texture as its own
-/// 4x4x4 region, where a tracked change would re-create the whole texture.
 #[derive(Resource, Default)]
 pub struct ModelLightingTileUploads {
     pub tiles: Vec<ModelLightingTileUpload>,
@@ -21,7 +18,6 @@ pub struct ModelLightingTileUploads {
 pub struct ModelLightingTileUpload {
     pub image: AssetId<Image>,
     pub origin: (u32, u32),
-    /// Slice-major, row-major RGBA texels.
     pub texels: [u8; MODEL_LIGHTING_TILE_BYTES],
 }
 
@@ -37,10 +33,8 @@ pub(super) fn register(app: &mut App) {
         );
 }
 
-/// Runs after `PrepareAssets`, so an atlas created this frame already holds
-/// every tile in its initial data and the copy below is redundant, not wrong.
-/// A tile for an atlas with no texture yet is dropped for the same reason: the
-/// texture will be created from image data the tile was already written into.
+/// Must run after `PrepareAssets`: a tile for an atlas with no texture yet is
+/// dropped, relying on the texture being created from data that holds it.
 fn upload_model_lighting_tiles(
     mut uploads: ResMut<ModelLightingTileUploads>,
     images: Res<RenderAssets<GpuImage>>,

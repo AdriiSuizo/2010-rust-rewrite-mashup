@@ -8,16 +8,11 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use super::{ExtractedColourRefs, GpuSubmitRefusal};
 use crate::drawsurf::gpu_resources::padded_upload_len;
 
-/// Static models drawn through the skinned path, transformed on the CPU into
-/// their own vertices. A static model never moves, so each placed surface is
-/// skinned once per installed world and kept: the buffers only grow, and a
-/// frame uploads just the surfaces it saw for the first time.
 #[derive(Default)]
 pub(super) struct SmodelSkinnedTess {
     verts: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
     indices: Vec<u32>,
     spans: HashMap<(u32, u32), SkinnedSpan>,
-    /// The static geometry the kept vertices were skinned from.
     geometry: Option<Arc<super::ExtractedStaticGeometry>>,
     vertex: Option<Buffer>,
     index: Option<Buffer>,
@@ -103,7 +98,7 @@ impl SmodelSkinnedTess {
             .resize(dest_base.saturating_add(packed_n_us), [0u8; 32]);
         let m = world_from_local.to_cols_array();
         let fixed = lighting_iw4::setup_transform_unit_vec(&m);
-        if lighting_iw4::r_skin_xsurface_unique_verts(&mut self.verts[dest_base..], src, &m, &fixed)
+        if lighting_iw4::skin_xsurface_unique_verts(&mut self.verts[dest_base..], src, &m, &fixed)
             .is_err()
         {
             self.verts.truncate(dest_base);
@@ -127,8 +122,6 @@ impl SmodelSkinnedTess {
         Ok(span)
     }
 
-    /// Upload what the GPU does not hold yet. A buffer that has to grow is
-    /// re-created and refilled whole; otherwise only the new tail is written.
     pub(super) fn upload(&mut self, device: &RenderDevice, queue: &RenderQueue) {
         if self.verts.is_empty() || self.indices.is_empty() {
             return;

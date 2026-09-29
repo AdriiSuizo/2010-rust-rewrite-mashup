@@ -19,7 +19,7 @@ pub struct World {
 
 /// Use collision, not visible triangles: invisible player clips and solid props
 /// must remain solid when the local character changes movement controller.
-pub fn extract(clip: &assets::ClipCollision) -> World {
+pub fn extract(clip: &asset_world::ClipCollision) -> World {
     let mut out = Vec::<[Vec3; 3]>::new();
     let mut push = |p: [Vec3; 3]| {
         if p.iter().all(|v| v.is_finite())

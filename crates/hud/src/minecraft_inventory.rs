@@ -4,11 +4,13 @@
 //! publishes in `frame::MinecraftUi` and hands back the player's clicks.
 use std::collections::HashMap;
 
-use assets::{AssetNamespace, FontDef, MenuCatalog, PreparedLocalizedStrings, PreparedWeapons};
+use asset_core::{AssetNamespace, AssetRef};
+use asset_game::{FontDef, MenuCatalog};
+use assets::{PreparedLocalizedStrings, PreparedWeapons};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use frame::{McClick, McSlot, McStack, MinecraftUi};
-use hud_iw4::{r_normalized_text_scale, ui_text_height};
+use hud_iw4::{normalized_text_scale as r_normalized_text_scale, ui_text_height};
 
 use crate::chrome::ui_text_width;
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate_fonts};
@@ -180,7 +182,7 @@ impl Canvas<'_> {
             s1: 1.0,
             t1: 1.0,
             color,
-            material: assets::AssetRef::bare_name(&def.material).to_owned(),
+            material: AssetRef::bare_name(&def.material).to_owned(),
             material_namespace: HUD_CHROME_NAMESPACE,
             op: Draw2dOp::TextRun {
                 font: font.to_owned(),
@@ -371,7 +373,7 @@ pub(crate) fn update_minecraft_hud(
     let fonts = canvas.fonts;
     let (quads, _) = tessellate_fonts(&list, &fonts);
     for font in fonts.values() {
-        let _ = hud_images.get(HUD_CHROME_NAMESPACE, assets::AssetRef::bare_name(&font.material), &mut images);
+        let _ = hud_images.get(HUD_CHROME_NAMESPACE, AssetRef::bare_name(&font.material), &mut images);
     }
     pass.minecraft = if quads.is_empty() { TessJob::Hide } else { TessJob::Quads(quads) };
 }

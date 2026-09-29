@@ -65,7 +65,7 @@ pub fn fail(message: &str) -> ! {
 
 fn mw2_ready(path: &Path) -> bool {
     path.is_dir()
-        && assets::find_zone_file(&assets::GamesRoot(path.to_owned()), "iw4:mp_rust").is_ok()
+        && assets::find_zone_file(&asset_transport::GamesRoot(path.to_owned()), "iw4:mp_rust").is_ok()
 }
 
 fn locate_mw2() -> Result<PathBuf, String> {

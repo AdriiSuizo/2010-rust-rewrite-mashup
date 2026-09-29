@@ -111,8 +111,8 @@ pub(crate) struct PadMenuKeys {
 pub(crate) fn drive_menus_with_pad(
     gamepads: Query<&Gamepad>,
     active: Res<frame::ActivePad>,
-    menu: Res<ui::MenuEnabled>,
-    pending: Res<crate::user_settings::PendingMenuBinding>,
+    script_menus: Option<Res<hud::ScriptMenus>>,
+    capture: Res<frame::UiBindingCapture>,
     time: Res<Time>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut state: Local<PadMenuKeys>,
@@ -121,13 +121,15 @@ pub(crate) fn drive_menus_with_pad(
         keys.release(key);
     }
     let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
-    let capturing = pending.capturing_pad();
+    // A binding being listened for takes the controller's buttons itself.
+    let capturing = capture.command.is_some();
+    let menu_open = script_menus.is_some_and(|menus| menus.captures_input());
     let mut wanted: Vec<KeyCode> = Vec::new();
     if let Some(pad) = pad.filter(|_| !capturing) {
         if pad.pressed(GamepadButton::Start) {
             wanted.push(KeyCode::Escape);
         }
-        if menu.0 {
+        if menu_open {
             if pad.pressed(GamepadButton::South) {
                 wanted.push(KeyCode::Enter);
             }
