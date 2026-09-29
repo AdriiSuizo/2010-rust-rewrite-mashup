@@ -309,7 +309,14 @@ fn publish_client_action_input(
     }
     let script_menu = script_menus.is_some_and(|m| m.captures_input());
     skate.input_blocked = console.open || script_menu;
-    if !skate.input_blocked && keys.just_pressed(KeyCode::KeyJ) {
+    // J, or clicking both sticks in together, toggles skating.
+    let sticks_clicked = pad.is_some_and(|pad| {
+        use bevy::input::gamepad::GamepadButton::{LeftThumb, RightThumb};
+        pad.pressed(LeftThumb)
+            && pad.pressed(RightThumb)
+            && (pad.just_pressed(LeftThumb) || pad.just_pressed(RightThumb))
+    });
+    if !skate.input_blocked && (keys.just_pressed(KeyCode::KeyJ) || sticks_clicked) {
         skate.toggle_requested = true;
     }
     if binds.is_changed() || hud_input.use_key.is_none() {
