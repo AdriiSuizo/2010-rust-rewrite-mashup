@@ -325,6 +325,7 @@ fn update(
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
     }
+    ui.loading_world = runtime.loading.is_some();
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
         if assets::minecraft_map::is_minecraft(&match_.zone) {

@@ -52,6 +52,9 @@ pub enum McClick {
 pub struct MinecraftUi {
     /// A Minecraft world is in play and the player is alive.
     pub active: bool,
+    /// The match's Minecraft world is still being generated; the loading
+    /// screen holds until it is in, so its setup never lands mid-match.
+    pub loading_world: bool,
     /// The inventory screen is open (the HUD's to change).
     pub inventory_open: bool,
     /// The selected hotbar slot.

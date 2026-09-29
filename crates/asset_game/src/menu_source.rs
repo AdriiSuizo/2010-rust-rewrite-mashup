@@ -72,73 +72,22 @@ pub(crate) fn load(source: &str, catalog: &MenuCatalog) -> Result<Vec<MenuDef>, 
         let def = match definition {
             Definition::Complete(def) => def,
             Definition::Variant(variant) => {
-                let base = resolved
+                // Game releases ship different builds of the same menu. A
+                // variant written against one it does not fit is left out,
+                // and the game's own menu stands in for it.
+                let name = variant.name.clone();
+                let built = resolved
                     .get(&variant.base)
                     .or_else(|| catalog.get(&variant.base))
-                    .ok_or_else(|| {
-                        format!(
-                            "Menu `{}` requires missing base `{}`",
-                            variant.name, variant.base
-                        )
-                    })?;
-                let mut value = serde_json::to_value(base).map_err(|error| error.to_string())?;
-                merge(&mut value, variant.fields)?;
-                let mut def: MenuDef = serde_json::from_value(value)
-                    .map_err(|error| format!("Menu `{}`: {error}", variant.name))?;
-                def.name = variant.name;
-                for item in variant.item_overrides {
-                    let index = match (item.name.as_ref(), item.index) {
-                        (Some(name), None) => {
-                            let matches: Vec<_> = def
-                                .items
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, item)| &item.name == name)
-                                .map(|(index, _)| index)
-                                .collect();
-                            match matches.as_slice() {
-                                [index] => *index,
-                                _ => {
-                                    return Err(format!(
-                                        "Menu `{}` has no unique item `{name}`",
-                                        def.name
-                                    ));
-                                }
-                            }
-                        }
-                        (None, Some(index)) => index,
-                        _ => {
-                            return Err(format!(
-                                "Menu `{}` item override requires one selector",
-                                def.name
-                            ));
-                        }
-                    };
-                    let target = def
-                        .items
-                        .get_mut(index)
-                        .ok_or_else(|| format!("Menu `{}` has no item {index}", def.name))?;
-                    let mut value =
-                        serde_json::to_value(&*target).map_err(|error| error.to_string())?;
-                    merge(&mut value, item.fields)?;
-                    *target = serde_json::from_value(value)
-                        .map_err(|error| format!("Menu `{}` item {index}: {error}", def.name))?;
+                    .ok_or_else(|| format!("requires missing base `{}`", variant.base))
+                    .and_then(|base| build_variant(variant, base));
+                match built {
+                    Ok(def) => def,
+                    Err(error) => {
+                        diag::warn!(Zone, "menu `{name}` left out: {error}");
+                        continue;
+                    }
                 }
-                for copy in variant.item_copies {
-                    let source = base.items.get(copy.index).ok_or_else(|| {
-                        format!("Menu `{}` has no source item {}", variant.base, copy.index)
-                    })?;
-                    let mut value =
-                        serde_json::to_value(source).map_err(|error| error.to_string())?;
-                    merge(&mut value, copy.fields)?;
-                    def.items
-                        .push(serde_json::from_value(value).map_err(|error| {
-                            format!("Menu `{}` copied item: {error}", def.name)
-                        })?);
-                }
-                def.items.extend(variant.append_items);
-                def.handlers.open.splice(0..0, variant.open_prefix);
-                def
             }
         };
         if def.name.is_empty() || resolved.contains_key(&def.name) {
@@ -147,4 +96,52 @@ pub(crate) fn load(source: &str, catalog: &MenuCatalog) -> Result<Vec<MenuDef>, 
         resolved.insert(def.name.clone(), def);
     }
     Ok(resolved.into_values().collect())
+}
+
+fn build_variant(variant: Variant, base: &MenuDef) -> Result<MenuDef, String> {
+    let mut value = serde_json::to_value(base).map_err(|error| error.to_string())?;
+    merge(&mut value, variant.fields)?;
+    let mut def: MenuDef = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    def.name = variant.name;
+    for item in variant.item_overrides {
+        let index = match (item.name.as_ref(), item.index) {
+            (Some(name), None) => {
+                let matches: Vec<_> = def
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| &item.name == name)
+                    .map(|(index, _)| index)
+                    .collect();
+                match matches.as_slice() {
+                    [index] => *index,
+                    _ => return Err(format!("has no unique item `{name}`")),
+                }
+            }
+            (None, Some(index)) => index,
+            _ => return Err("item override requires one selector".to_owned()),
+        };
+        let target = def
+            .items
+            .get_mut(index)
+            .ok_or_else(|| format!("has no item {index}"))?;
+        let mut value = serde_json::to_value(&*target).map_err(|error| error.to_string())?;
+        merge(&mut value, item.fields)?;
+        *target =
+            serde_json::from_value(value).map_err(|error| format!("item {index}: {error}"))?;
+    }
+    for copy in variant.item_copies {
+        let source = base
+            .items
+            .get(copy.index)
+            .ok_or_else(|| format!("has no source item {}", copy.index))?;
+        let mut value = serde_json::to_value(source).map_err(|error| error.to_string())?;
+        merge(&mut value, copy.fields)?;
+        def.items.push(
+            serde_json::from_value(value).map_err(|error| format!("copied item: {error}"))?,
+        );
+    }
+    def.items.extend(variant.append_items);
+    def.handlers.open.splice(0..0, variant.open_prefix);
+    Ok(def)
 }

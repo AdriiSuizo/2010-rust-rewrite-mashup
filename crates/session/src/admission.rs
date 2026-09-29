@@ -17,6 +17,7 @@ pub fn update_admission(
     audio: Option<Res<audio::AudioReady>>,
     mut live: Option<ResMut<LiveWorldIdentity>>,
     headless: Option<Res<frame::Headless>>,
+    minecraft: Option<Res<frame::MinecraftUi>>,
 ) {
     if let (Some(live), Some(installed)) = (live.as_mut(), admission.core.installed())
         && live.load_key.local_load_request_id == installed.local_load_request_id
@@ -29,8 +30,12 @@ pub fn update_admission(
     // not perform loading after the player has entered the game.
     let skate_ready =
         *role != RuntimeRole::Listen || skate.is_none_or(|skate| !skate.preload_pending);
+    let minecraft_ready = minecraft.is_none_or(|ui| !ui.loading_world);
     let presentation_ready = headless.is_some()
-        || (scene.is_some_and(|scene| scene.spawned) && audio_ready && skate_ready);
+        || (scene.is_some_and(|scene| scene.spawned)
+            && audio_ready
+            && skate_ready
+            && minecraft_ready);
     if presentation_ready && let Some(live) = live.as_ref() {
         admission.core.apply_presentation(live.load_key);
     }
