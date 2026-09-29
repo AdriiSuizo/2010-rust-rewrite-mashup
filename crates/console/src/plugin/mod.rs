@@ -281,10 +281,16 @@ fn publish_client_action_input(
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
-    (gamepads, active): (Query<&bevy::input::gamepad::Gamepad>, Res<frame::ActivePad>),
+    (gamepads, active, mut aiming_with_pad): (
+        Query<&bevy::input::gamepad::Gamepad>,
+        Res<frame::ActivePad>,
+        Local<bool>,
+    ),
 ) {
     let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
-    out.pad_aim_assist = settings.pad_aim_assist;
+    // Aim assist is the controller's alone: whoever last aimed with the
+    // mouse gets none.
+    out.pad_aim_assist = if *aiming_with_pad && pad.is_some() { settings.pad_aim_assist } else { 0 };
     out.pad_move = [0.0; 2];
     out.pad_look = [0.0; 2];
     out.pad_deflection = 0.0;
@@ -380,6 +386,9 @@ fn publish_client_action_input(
         out.pad_look = [look.x, look.y];
         // Lock-on wakes on the look stick or strafing, not walking forward.
         out.pad_deflection = sticks.movement.x.abs().max(sticks.look.length());
+        if sticks.look.length() > 0.0 || sticks.movement.length() > 0.0 || pad.get_just_pressed().next().is_some() {
+            *aiming_with_pad = true;
+        }
     }
     let inputs = BindInputs::new(&keys, &mouse_buttons).with_pad(pad);
     for (button, id) in binds.iter() {
@@ -436,9 +445,14 @@ fn publish_client_action_input(
     let (rx, ry) = scripted.mouse_rate().unwrap_or((0.0, 0.0));
     out.mouse_x += sx + rx;
     out.mouse_y += sy + ry;
+    let mut moved = 0.0;
     for ev in motion.read() {
         out.mouse_x += ev.delta.x;
         out.mouse_y += ev.delta.y;
+        moved += ev.delta.x.abs() + ev.delta.y.abs();
+    }
+    if moved > 2.0 || mouse_buttons.get_just_pressed().next().is_some() {
+        *aiming_with_pad = false;
     }
 }
 
