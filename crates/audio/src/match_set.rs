@@ -116,7 +116,7 @@ fn queue_match_clips(
     mut prep: ResMut<MatchClipPrep>,
     mut announcer: ResMut<crate::match_voices::AnnouncerRoutes>,
     mut ready: ResMut<AudioReady>,
-    silent: Option<Res<AudioSilent>>,
+    (silent, failed): (Option<Res<AudioSilent>>, Option<Res<crate::ambient::SoundBankFailed>>),
 ) {
     if ready.0 || prep.submitted {
         return;
@@ -150,6 +150,18 @@ fn queue_match_clips(
         );
         return;
     };
+    // The bank failed to load: there is nothing to prepare, and waiting
+    // would hold the world's spawn forever.
+    if bank.is_none() && failed.is_some() {
+        ready.0 = true;
+        if let Some(loading) = loading.as_ref() {
+            loading
+                .progress
+                .record_skipped(asset_transport::StageId::Audio);
+        }
+        diag::warn!(Audio, "audio: AudioReady skipped — the sound bank failed to load");
+        return;
+    }
     let Some(weapons) = weapons else {
         return;
     };

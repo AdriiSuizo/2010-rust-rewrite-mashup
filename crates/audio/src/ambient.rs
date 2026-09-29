@@ -195,13 +195,14 @@ pub(crate) fn start_sound_bank_compose(
             let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
             IwdOpen::Opening(pool.spawn(async move {
                 let mut trees = NamespaceTrees::discover(&games);
-                if let Ok(zone) = asset_transport::find_zone_file(&games, &opened_zone) {
+                if let Ok(zone) = assets::find_zone_file(&games, &opened_zone) {
                     trees.adopt_zone(&zone.path);
                 }
                 NamespaceSoundIwd::open(&trees)
             }))
         }
     };
+    commands.remove_resource::<SoundBankFailed>();
     commands.insert_resource(SoundBankCompose {
         load_key: accepted.load_key,
         zone,
@@ -213,6 +214,10 @@ pub(crate) fn start_sound_bank_compose(
         stall_reported: false,
     });
 }
+
+/// The last sound bank load failed, so the match goes on without one.
+#[derive(Resource)]
+pub(crate) struct SoundBankFailed;
 
 pub(crate) fn install_sound_bank(
     mut compose: Option<ResMut<SoundBankCompose>>,
@@ -298,7 +303,8 @@ pub(crate) fn install_sound_bank(
                         };
                     };
                     let namespace = namespace_for_zone(&games, &zone);
-                    let loaded = asset_transport::find_zone_file(&games, &zone).map(|found| {
+                    // The Minecraft map sounds as the map it stands in for.
+                    let loaded = assets::find_zone_file(&games, &zone).map(|found| {
                         let sources = gather_sound_sources(&games, &found.path);
                         let LoadedSoundBank { catalog, gaps, .. } =
                             compose_sound_bank(sources, &zone, namespace, map);
@@ -408,6 +414,7 @@ pub(crate) fn install_sound_bank(
                 "audio: sound bank load failed for {}: {e}",
                 compose.zone
             );
+            commands.insert_resource(SoundBankFailed);
         }
     }
 }
