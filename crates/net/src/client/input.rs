@@ -49,17 +49,24 @@ pub struct ClientActionInput {
 
     /// The controller's move stick, forward and right, -1 to 1.
     pub pad_move: [f32; 2],
-    /// The controller's look stick as turn rates, pitch and yaw, degrees a
-    /// second.
-    pub pad_look_rate: [f32; 2],
-    /// This frame's controller turn, pitch and yaw, degrees: the rates
-    /// over the frame, after aim assist.
+    /// The controller's look stick after its response curve and
+    /// inversion: right and up, -1 to 1.
+    pub pad_look: [f32; 2],
+    /// The larger of the two sticks' deflections, 0 to 1.
+    pub pad_deflection: f32,
+    /// Look sensitivity against the default, and its multiplier down the
+    /// sight.
+    pub pad_sensitivity: f32,
+    pub pad_ads_sensitivity: f32,
+    /// The turn rates reached so far, pitch and yaw, degrees a second.
+    pub pad_turn_rate: [f32; 2],
+    /// This frame's controller turn, pitch and yaw, degrees.
     pub pad_look_delta: [f32; 2],
-    /// Aim assist: 0 off, 1 slowdown, 2 slowdown and aim snap.
+    /// Aim assist: 0 off, 1 slowdown and lock-on, 2 with auto aim.
     pub pad_aim_assist: u8,
-    /// An aim snap under way: the yaw and pitch still to turn, and the
-    /// seconds left to turn them in.
-    pub pad_snap: Option<(f32, f32, f32)>,
+    /// The target lock-on follows, and the one auto aim closes on.
+    pub pad_lockon: Option<u64>,
+    pub pad_autoaim: Option<u64>,
     /// Aiming down the sight last frame, for the snap on raising it.
     pub pad_was_ads: bool,
 }
@@ -83,10 +90,15 @@ impl Default for ClientActionInput {
             now_msec: 16,
             frame_msec: 16,
             pad_move: [0.0; 2],
-            pad_look_rate: [0.0; 2],
+            pad_look: [0.0; 2],
+            pad_deflection: 0.0,
+            pad_sensitivity: 1.0,
+            pad_ads_sensitivity: 1.0,
+            pad_turn_rate: [0.0; 2],
             pad_look_delta: [0.0; 2],
             pad_aim_assist: 0,
-            pad_snap: None,
+            pad_lockon: None,
+            pad_autoaim: None,
             pad_was_ads: false,
         }
     }
@@ -176,82 +188,6 @@ pub fn build_usercmd(input: &mut ClientActionInput, look: &LookState, server_tim
         key_yaw_delta: 0,
         frozen: false,
     })
-}
-
-/// Aim assist for a controller: over a target the turn slows; raising the
-/// sight near one pulls the aim onto it (`mode` 2). `targets` are map
-/// points with a radius; `eye` and `angles` (pitch, yaw) are the view.
-pub fn pad_aim_assist(
-    input: &mut ClientActionInput,
-    eye: [f32; 3],
-    angles: [f32; 2],
-    targets: &[([f32; 3], f32)],
-    ads: bool,
-    dt: f32,
-) {
-    const SLOWDOWN_HIP: f32 = 0.55;
-    const SLOWDOWN_ADS: f32 = 0.4;
-    const PADDING_DEG: f32 = 1.5;
-    const SNAP_CONE_DEG: f32 = 7.0;
-    const SNAP_SECONDS: f32 = 0.12;
-    const RANGE: f32 = 4000.0;
-
-    let mut delta = [input.pad_look_rate[0] * dt, input.pad_look_rate[1] * dt];
-    let mode = input.pad_aim_assist;
-    // The closest target to the crosshair, by angle: its offset in yaw and
-    // pitch, and how far inside its padded size the crosshair is.
-    let best = (mode > 0)
-        .then(|| {
-            targets
-                .iter()
-                .filter_map(|&(point, radius)| {
-                    let d = [point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]];
-                    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    if !(1.0..RANGE).contains(&dist) {
-                        return None;
-                    }
-                    let yaw = d[1].atan2(d[0]).to_degrees();
-                    let pitch = -(d[2] / dist).asin().to_degrees();
-                    let dyaw = (yaw - angles[1] + 540.0).rem_euclid(360.0) - 180.0;
-                    let dpitch = pitch - angles[0];
-                    let off = (dyaw * dyaw + dpitch * dpitch).sqrt();
-                    let size = (radius / dist).atan().to_degrees() + PADDING_DEG;
-                    Some((dyaw, dpitch, off, size))
-                })
-                .min_by(|a, b| a.2.total_cmp(&b.2))
-        })
-        .flatten();
-    if let Some((_, _, off, size)) = best
-        && off <= size
-    {
-        let slow = if ads { SLOWDOWN_ADS } else { SLOWDOWN_HIP };
-        delta[0] *= slow;
-        delta[1] *= slow;
-    }
-    if mode == 2
-        && ads
-        && !input.pad_was_ads
-        && let Some((dyaw, dpitch, off, _)) = best
-        && off <= SNAP_CONE_DEG
-    {
-        input.pad_snap = Some((dyaw, dpitch, SNAP_SECONDS));
-    }
-    if !ads {
-        input.pad_snap = None;
-    }
-    if let Some((yaw_left, pitch_left, seconds)) = input.pad_snap.as_mut() {
-        let part = (dt / (*seconds).max(dt)).min(1.0);
-        delta[1] += *yaw_left * part;
-        delta[0] += *pitch_left * part;
-        *yaw_left *= 1.0 - part;
-        *pitch_left *= 1.0 - part;
-        *seconds -= dt;
-        if *seconds <= 0.0 {
-            input.pad_snap = None;
-        }
-    }
-    input.pad_was_ads = ads;
-    input.pad_look_delta = delta;
 }
 
 pub fn remote_control_axes(input: &ClientActionInput, mouse_x: f32, mouse_y: f32) -> [u8; 2] {

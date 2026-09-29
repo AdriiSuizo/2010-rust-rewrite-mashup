@@ -762,45 +762,91 @@ pub fn sample_client_input(
         actions.mouse_x = 0.0;
         actions.mouse_y = 0.0;
         actions.pad_move = [0.0; 2];
-        actions.pad_look_rate = [0.0; 2];
+        actions.pad_look = [0.0; 2];
     }
-    // The controller's turn this frame, eased over targets by aim assist:
-    // other players not on the local team, and a block world's mobs.
-    {
-        let dt = cls.frametime_secs();
-        let targets: Vec<([f32; 3], f32)> = ps
-            .filter(|_| actions.pad_aim_assist > 0)
-            .map(|_| {
-                let snapshot = presented.snapshot();
-                let team = |id: sim::ClientId| {
-                    snapshot.and_then(|s| s.meta.for_client(id)).map(|m| m.client_state_team)
+    // The controller's turn this frame, with aim assist over visible
+    // enemies: other players not on the local team, and a block world's
+    // mobs.
+    if let Some(ps) = ps {
+        let world = prediction.0.world();
+        let eye = [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current];
+        let visible = |point: [f32; 3]| {
+            let hit = world.trace_world(eye, point, [0.0; 3], [0.0; 3], hud_iw4::OVERHEAD_TRACE_MASK);
+            hit.fraction >= 1.0 && hit.startsolid == 0
+        };
+        let angles = [
+            look.angles[0] as f32 / input_iw4::ANGLE2SHORT,
+            look.angles[1] as f32 / input_iw4::ANGLE2SHORT,
+        ];
+        let (sp, cp) = angles[0].to_radians().sin_cos();
+        let (sy, cy) = angles[1].to_radians().sin_cos();
+        let forward = [cp * cy, cp * sy, -sp];
+        // In front of the player, allowing for the target's size.
+        let in_front = |origin: [f32; 3], radius: f32| {
+            let d = [origin[0] - ps.origin[0], origin[1] - ps.origin[1], origin[2] - ps.origin[2]];
+            d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2] + radius >= 0.0
+        };
+        let mut targets: Vec<crate::client::pad_aim::AimTarget> = Vec::new();
+        if actions.pad_aim_assist > 0 {
+            const RADIUS: f32 = 10.0;
+            let snapshot = presented.snapshot();
+            let team = |id: sim::ClientId| snapshot.and_then(|s| s.meta.for_client(id)).map(|m| m.client_state_team);
+            let teams = snapshot.is_some_and(|s| s.meta.kind.is_team());
+            let mine = team(local.0);
+            for id in snapshot.into_iter().flat_map(|s| s.players.iter().map(|(id, _)| *id)) {
+                if id == local.0 || (teams && team(id) == mine) {
+                    continue;
+                }
+                let Some(other) = presented.player(id).filter(|o| o.pm_type == 0) else {
+                    continue;
                 };
-                let teams = snapshot.is_some_and(|s| s.meta.kind.is_team());
-                let mine = team(local.0);
-                let mut targets: Vec<([f32; 3], f32)> = snapshot
-                    .into_iter()
-                    .flat_map(|s| s.players.iter().map(|(id, _)| *id))
-                    .filter(|id| *id != local.0)
-                    .filter(|id| !teams || team(*id) != mine)
-                    .filter_map(|id| presented.player(id))
-                    .filter(|other| other.pm_type == 0)
-                    .map(|other| ([other.origin[0], other.origin[1], other.origin[2] + 44.0], 16.0))
-                    .collect();
-                targets.extend(sim::voxel::mob_targets());
-                targets
-            })
+                let o = other.origin;
+                let head = [o[0], o[1], o[2] + other.view_height_current];
+                if !in_front(o, RADIUS) || !visible(head) {
+                    continue;
+                }
+                let top = other.view_height_current + 8.0;
+                targets.push(crate::client::pad_aim::AimTarget {
+                    key: u64::from(id.0),
+                    mins: [o[0] - RADIUS, o[1] - RADIUS, o[2]],
+                    maxs: [o[0] + RADIUS, o[1] + RADIUS, o[2] + top],
+                    aim: [o[0], o[1], o[2] + top * 0.75],
+                    velocity: other.velocity,
+                });
+            }
+            for (key, (centre, half)) in sim::voxel::mob_targets().into_iter().enumerate() {
+                if !in_front(centre, half) || !visible(centre) {
+                    continue;
+                }
+                targets.push(crate::client::pad_aim::AimTarget {
+                    key: 1 << 40 | key as u64,
+                    mins: [centre[0] - half, centre[1] - half, centre[2] - half],
+                    maxs: [centre[0] + half, centre[1] + half, centre[2] + half],
+                    aim: centre,
+                    velocity: [0.0; 3],
+                });
+            }
+        }
+        let ranges = world
+            .weapon_combat_row(playerstate_iw4::bg_get_viewmodel_weapon_index(ps))
+            .map(|facts| facts.aim_assist)
             .unwrap_or_default();
-        let (eye, angles) = ps.map_or(([0.0; 3], [0.0; 2]), |ps| {
-            (
-                [ps.origin[0], ps.origin[1], ps.origin[2] + ps.view_height_current],
-                [
-                    look.angles[0] as f32 / input_iw4::ANGLE2SHORT,
-                    look.angles[1] as f32 / input_iw4::ANGLE2SHORT,
-                ],
-            )
-        });
+        let view = crate::client::pad_aim::AimView {
+            eye,
+            angles,
+            velocity: ps.velocity,
+            ads_lerp: ps.f_weapon_pos_frac,
+            fov_scale: actions.fov_scale.max(0.01),
+            ranges,
+            dt: cls.frametime_secs(),
+        };
         let ads = actions.client.using_ads || actions.client.kb.speed.active;
-        crate::client::input::pad_aim_assist(&mut actions, eye, angles, &targets, ads, dt);
+        crate::client::pad_aim::pad_look_frame(&mut actions, &view, &targets, ads);
+    } else {
+        actions.pad_look_delta = [0.0; 2];
+    }
+    if frozen {
+        actions.pad_look_delta = [0.0; 2];
     }
     let remote_mouse = presented
         .snapshot()

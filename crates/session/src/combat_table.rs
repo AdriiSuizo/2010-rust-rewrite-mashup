@@ -142,6 +142,11 @@ pub fn from_registry(
             let mut facts = validated_facts(f, charge_anim, global_location)
                 .unwrap_or_else(|_| WeaponCombatFacts::none());
             facts.alternate_weapon = weapons.alternate_of(i as u32);
+            facts.aim_assist = sim::AimAssistRanges {
+                auto_aim: f.auto_aim_range,
+                hip: f.aim_assist_range,
+                ads: f.aim_assist_range_ads,
+            };
             facts
         })
         .collect()

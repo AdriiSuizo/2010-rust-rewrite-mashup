@@ -6,6 +6,7 @@ pub mod entity_event_dispatch;
 pub mod entity_event_registry;
 pub mod frame_census;
 pub mod input;
+pub mod pad_aim;
 pub mod predict;
 pub mod predicted_error;
 pub mod presented;

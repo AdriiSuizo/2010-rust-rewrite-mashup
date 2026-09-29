@@ -162,7 +162,7 @@ pub use use_object::{
 };
 pub use weapon_iw4::{
     BulletPenFacts, CapturedCombatInput, FireType, HITLOC_COUNT, LOCATION_DAMAGE_IDENTITY,
-    MissingCombatFacts, PERK_FASTRELOAD, PenetrationDepthTable, WeaponCombatFacts,
+    AimAssistRanges, MissingCombatFacts, PERK_FASTRELOAD, PenetrationDepthTable, WeaponCombatFacts,
     bake_location_damage, location_damage_is_valid, location_damage_scale,
 };
 pub use world::{

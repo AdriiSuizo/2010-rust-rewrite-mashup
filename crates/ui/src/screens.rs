@@ -1656,10 +1656,10 @@ fn controller_rows(settings: &frame::GameSettings) -> Vec<Widget> {
             "options/pad_aim_assist",
             row(6),
             "Aim Assist",
-            &["Off", "Slowdown", "Full"],
+            &["Off", "Standard", "Full"],
             usize::from(settings.pad_aim_assist),
             K::PadAimAssist,
-            "Slowdown eases the aim over targets; Full also pulls onto a close target when you aim down the sight.",
+            "Standard slows the aim over visible enemies and follows them as they move; Full also pulls onto one when you aim down the sight.",
         ),
         cycler(
             "options/pad_vibration",

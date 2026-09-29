@@ -111,7 +111,7 @@ pub use player_anim_type::{PLAYER_ANIM_TYPE_COUNT, PLAYER_ANIM_TYPE_NAMES};
 pub use pm_weapon::{
     BURST_COOLDOWN_DEFAULT_MS, BUTTON_ATTACK, BUTTON_RELOAD, BUTTON_THROW,
     CHECK_FIRING_AMMO_DRY_FIRE_MS, CapturedCombatInput, MissingCombatFacts, PERK_FASTRELOAD,
-    PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT, WeaponCmd, WeaponCombatFacts, WeaponHandState,
+    AimAssistRanges, PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT, WeaponCmd, WeaponCombatFacts, WeaponHandState,
     WeaponTickEvent, perk_fastreload_eligible, pm_get_weapon_fire_button, pm_weapon_hands,
     pm_weapon_ordinary, pm_weapon_time_adjust, spawn_clip_stock, spawn_weapon_hand,
 };

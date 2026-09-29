@@ -442,16 +442,13 @@ fn publish_client_action_input(
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
-    (gamepads, active, mut boost_time): (
-        Query<&bevy::input::gamepad::Gamepad>,
-        Res<frame::ActivePad>,
-        Local<f32>,
-    ),
+    (gamepads, active): (Query<&bevy::input::gamepad::Gamepad>, Res<frame::ActivePad>),
 ) {
     let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
     out.pad_aim_assist = settings.pad_aim_assist;
     out.pad_move = [0.0; 2];
-    out.pad_look_rate = [0.0; 2];
+    out.pad_look = [0.0; 2];
+    out.pad_deflection = 0.0;
     let inventory_open = minecraft.as_ref().is_some_and(|ui| ui.active && ui.inventory_open);
     skate.input_blocked = console.open || menu.0;
     if !skate.input_blocked && keys.just_pressed(KeyCode::KeyJ) { skate.toggle_requested = true; }
@@ -503,15 +500,14 @@ fn publish_client_action_input(
         return;
     }
 
+    out.pad_sensitivity = settings.pad_sensitivity / frame::GameSettings::PAD_SENSITIVITY_DEFAULT;
+    out.pad_ads_sensitivity = settings.pad_ads_sensitivity;
     if let Some(pad) = pad {
         let sticks = crate::gamepad::sticks(pad, &settings);
-        let ads = out.client.using_ads || out.client.kb.speed.active;
+        let look = crate::gamepad::shaped_look(sticks.look, &settings);
         out.pad_move = [sticks.movement.x, sticks.movement.y];
-        // The view's zoom against the hip field of view: `fov_scale` is the
-        // mouse's zoom sensitivity against 65 degrees.
-        let hip = (settings.fov.to_radians() * 0.5).tan() / (65f32.to_radians() * 0.5).tan();
-        let zoom = out.fov_scale / hip.max(0.01);
-        out.pad_look_rate = crate::gamepad::look_rates(sticks.look, &settings, ads, zoom, &mut boost_time, time.delta_secs());
+        out.pad_look = [look.x, look.y];
+        out.pad_deflection = sticks.movement.length().max(sticks.look.length());
     }
     let inputs = BindInputs::new(&keys, &mouse_buttons).with_pad(pad);
     for (button, id) in binds.iter() {
