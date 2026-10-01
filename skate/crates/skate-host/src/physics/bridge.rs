@@ -298,6 +298,17 @@ impl InputFrame {
             samples: std::array::from_fn(|_|Err(crate::input::platform::DeviceError::Disconnected)),
         }
     }
+    /// One controller in the first slot, already in XInput's layout:
+    /// button bits, trigger bytes and signed stick axes.
+    pub fn from_pad(buttons: u16, triggers: [u8; 2], left: [i16; 2], right: [i16; 2], packet: u32) -> Self {
+        let mut frame = Self::neutral();
+        frame.samples[0] = Ok(crate::input::platform::DevicePacket {
+            number: packet,
+            state: skate_core::input::xbox::XboxState { buttons, triggers, left, right },
+            subtype: 1,
+        });
+        frame
+    }
     pub fn controller(&self) -> Option<usize> {
         self.samples.iter().position(Result::is_ok)
     }

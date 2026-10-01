@@ -4,7 +4,7 @@ pub mod rails;
 pub mod rig;
 use bevy::prelude::*;
 use frame::{AppScreen, SkateMode};
-use skate_host::bridge::{CollisionBuilder, ControllerTransport, InputFrame, Pose, PreparedCollision, Session};
+use skate_host::bridge::{CollisionBuilder, InputFrame, Pose, PreparedCollision, Session};
 use std::sync::{Arc, Mutex, mpsc};
 
 enum Job {
@@ -27,7 +27,7 @@ struct Host {
     enter_requested: bool,
     activating: bool,
     epoch: u64,
-    transport: ControllerTransport,
+    pad_packet: u32,
     previous_buttons: u16,
     input_suspended: bool,
     logged_tick: u64,
@@ -302,6 +302,7 @@ fn update(
     mut authority: Option<ResMut<net::AuthorityWorld>>,
     mut mode: ResMut<SkateMode>,
     mut host: ResMut<Host>,
+    (gamepads, active): (Query<&bevy::input::gamepad::Gamepad>, Option<Res<frame::ActivePad>>),
 ) {
     let Some(authority) = authority.as_deref_mut() else {
         return;
@@ -340,7 +341,11 @@ fn update(
             mode.status = e;
         }
     }
-    let input = host.transport.poll();
+    // Skating reads the same controller as the rest of the game, whatever
+    // kind it is, converted to the Xbox layout the skate input expects.
+    let pad = active.and_then(|active| active.0).and_then(|entity| gamepads.get(entity).ok());
+    host.pad_packet = host.pad_packet.wrapping_add(1);
+    let input = pad.map_or_else(InputFrame::neutral, |pad| pad_frame(pad, host.pad_packet));
     mode.controller = input.controller();
     host.previous_buttons = input.buttons();
 
@@ -457,4 +462,45 @@ fn update(
             stop(&mut host, &mut mode, authority);
         }
     }
+}
+
+/// A controller's state in XInput's layout, for the skate input.
+fn pad_frame(pad: &bevy::input::gamepad::Gamepad, packet: u32) -> InputFrame {
+    use bevy::input::gamepad::GamepadButton as B;
+    const BITS: [(B, u16); 14] = [
+        (B::DPadUp, 0x0001),
+        (B::DPadDown, 0x0002),
+        (B::DPadLeft, 0x0004),
+        (B::DPadRight, 0x0008),
+        (B::Start, 0x0010),
+        (B::Select, 0x0020),
+        (B::LeftThumb, 0x0040),
+        (B::RightThumb, 0x0080),
+        (B::LeftTrigger, 0x0100),
+        (B::RightTrigger, 0x0200),
+        (B::South, 0x1000),
+        (B::East, 0x2000),
+        (B::West, 0x4000),
+        (B::North, 0x8000),
+    ];
+    let buttons = BITS
+        .iter()
+        .filter(|(button, _)| pad.pressed(*button))
+        .fold(0, |bits, (_, bit)| bits | bit);
+    // An analog trigger reports its travel; a digital one only pressed.
+    let trigger = |button: B| {
+        let value = pad
+            .get(button)
+            .unwrap_or(if pad.pressed(button) { 1.0 } else { 0.0 });
+        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    };
+    let axis = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+    let (left, right) = (pad.left_stick(), pad.right_stick());
+    InputFrame::from_pad(
+        buttons,
+        [trigger(B::LeftTrigger2), trigger(B::RightTrigger2)],
+        [axis(left.x), axis(left.y)],
+        [axis(right.x), axis(right.y)],
+        packet,
+    )
 }
