@@ -73,9 +73,20 @@ impl Jak {
         self.code.arrived = true;
     }
 
-    /// Waiting on an animation: after a suspend it first advances a frame.
-    /// True once it has played out.
-    fn ja_wait(&mut self) -> bool {
+    /// Waiting on an animation the way the game's do-while loops do: never
+    /// done on arrival; after each suspend it advances a frame and is done
+    /// once it has played out.
+    pub(crate) fn ja_wait(&mut self) -> bool {
+        if self.code.arrived {
+            return false;
+        }
+        self.chan.eval(&self.anims);
+        self.code.arrived = true;
+        self.chan.done(&self.anims)
+    }
+
+    /// Waiting that checks first: done on arrival if it already played out.
+    pub(crate) fn ja_while(&mut self) -> bool {
         if !self.code.arrived {
             self.chan.eval(&self.anims);
             self.code.arrived = true;
@@ -206,9 +217,9 @@ impl Jak {
     fn jump_code(&mut self) -> Option<State> {
         match self.code.pc {
             0 => {
-                let high = self.control.jump_height_min >= 20480.0;
+                self.code.flag = self.control.jump_height_min >= 20480.0;
                 self.ja_push(15);
-                let first = if high {
+                let first = if self.code.flag {
                     anim::BOARD_JUMP_HIGH
                 } else {
                     anim::BOARD_JUMP
@@ -218,9 +229,35 @@ impl Jak {
                 None
             }
             1 => {
+                // The jump plays on to its top at the rate the rise
+                // leaves, slower once falling.
+                let up = self.control.gravity_normal.dot(self.control.transv);
+                let (apex, rise, fall) = if self.code.flag {
+                    (25.0, 1.5, 0.8)
+                } else {
+                    (10.0, 0.5, 0.25)
+                };
+                let left = apex - self.chan.aframe_num(&self.anims);
+                let rate = if 0.0 < up && 0.0 < left {
+                    let to_apex = (up / (245760.0 / 300.0)).trunc();
+                    1.5f32.min(left).min(5.0 * left / to_apex)
+                } else if seconds(0.165) < self.time_to_ground() {
+                    rise
+                } else {
+                    fall
+                };
+                self.chan.eval_with(&self.anims, NumFunc::seek(rate));
+                self.code.pc = 2;
+                None
+            }
+            2 => {
+                if !self.chan.done(&self.anims) {
+                    self.code.pc = 1;
+                    return self.jump_code();
+                }
                 self.ja_push(15);
                 self.chan.anim = anim::BOARD_JUMP_LOOP;
-                self.goto(2);
+                self.goto(3);
                 None
             }
             _ => self.ja_loop(),
@@ -266,7 +303,7 @@ impl Jak {
                         .is_any(&[anim::BOARD_METHOD_END, anim::BOARD_NOSEGRAB_END])
                     {
                         self.chan.func = NumFunc::seek(1.5);
-                        self.goto(1);
+                        self.goto(2);
                     } else if self.chan.is(anim::BOARD_METHOD_LOOP) {
                         self.ja_push(seconds(0.08));
                         self.ja_play(anim::BOARD_METHOD_END, 1.5);
@@ -279,8 +316,14 @@ impl Jak {
                         return Some(State::BoardStance);
                     }
                 }
-                _ => {
+                1 => {
                     if !self.ja_wait() {
+                        return None;
+                    }
+                    return Some(State::BoardStance);
+                }
+                _ => {
+                    if !self.ja_while() {
                         return None;
                     }
                     return Some(State::BoardStance);
@@ -674,7 +717,7 @@ impl Jak {
                     }
                 }
                 3 => {
-                    if self.ja_wait() {
+                    if self.ja_while() {
                         self.goto(4);
                     } else if self.hit_ground_or_stuck() {
                         return Some(State::Falling);
