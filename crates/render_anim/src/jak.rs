@@ -444,6 +444,7 @@ fn update(
         let facing = dir_to_jak(Vec3::new(yaw.cos(), yaw.sin(), 0.0));
         let mut jak = Jak::new(to_jak(origin), jak_mode::math::y_angle(facing));
         jak.gun.endless_ammo = true;
+        jak.lightjak.eco = jak_mode::lightjak::ECO_MAX;
         if let Some(model) = assets::jak_model::local_jak() {
             jak.anims = Arc::new(anims_of(model));
         }
@@ -562,6 +563,9 @@ fn update(
                 sim::voxel::push_player_damage(local.0.0, damage, None);
                 diag::info!(World, "Jak: hard landing, {damage} damage");
             }
+            Event::LightJak { on } => {
+                diag::info!(World, "Jak: Light Jak {}", if on { "on" } else { "off" })
+            }
             Event::BoardOn => diag::info!(World, "Jak: on the board"),
             Event::BoardOff => diag::info!(World, "Jak: off the board"),
             _ => {}
@@ -592,6 +596,8 @@ fn update(
     }
     mode.speed = jak.velocity().length() / jak_mode::METER;
     mode.ammo = (!jak.gun.endless_ammo).then_some(jak.gun.ammo);
+    mode.light = jak.light();
+    mode.light_eco = jak.lightjak.eco;
     let (view, _) = follow_camera(&mut host.camera, jak, Vec2::ZERO, 0.0);
     mode.camera = Some((view, 70.0));
     authority
@@ -779,6 +785,7 @@ fn readout(jak: &Jak, interact: Option<&str>) -> String {
          cancel window {}  buffered [{}]  held [{}]\n\
          vel {:.1} {:.1} {:.1} m/s  {}  height {:.1} m  peak {:.1} m  last jump +{:.1} m/s {:.2}s ago\n\
          board {}  L1 {}  L2 {}  trick x {:.2} z {:.2}  flip {:.2}  spin {:.0}  flips {}\n\
+         light jak {}  ability {}\n\
          interact {}",
         jak.state.name(),
         t.prev,
@@ -816,6 +823,15 @@ fn readout(jak: &Jak, interact: Option<&str>) -> String {
         b.flip_control,
         b.roty_cum.abs() / 65536.0 * 360.0,
         b.flip_count,
+        jak.lightjak.describe(),
+        if jak.lightjak.swoop {
+            format!(
+                "flight, flap {:.1} m/s",
+                jak.lightjak.swoop_impulse / jak_mode::METER
+            )
+        } else {
+            "none".to_owned()
+        },
         interact.unwrap_or("-"),
     )
 }

@@ -22,6 +22,7 @@ pub mod flag {
     pub const TURN_WHEN_CENTERED: u32 = 1 << 15;
     pub const TURN_TO_ALT: u32 = 1 << 16;
     pub const SPIN: u32 = 1 << 17;
+    pub const GUN_OFF: u32 = 1 << 18;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -41,6 +42,8 @@ pub enum Name {
     Roll,
     RollFlip,
     Flop,
+    Swoop,
+    Lightjak,
     Other,
 }
 
@@ -971,7 +974,7 @@ pub mod foot {
     };
 
     pub const LIGHTJAK_SWOOP: Surface = Surface {
-        name: Name::Other,
+        name: Name::Swoop,
         turnv: 32768.0,
         turnvf: 90.0,
         turnvv: 18204.445,
@@ -999,7 +1002,7 @@ pub mod foot {
         slope_up_traction: 1.0,
         align_speed: 1.0,
         mode: Mode::Air,
-        flags: flag::CHECK_EDGE | flag::AIR,
+        flags: flag::CHECK_EDGE | flag::AIR | flag::GUN_OFF,
         ..ZERO
     };
 
@@ -1104,7 +1107,14 @@ pub mod foot {
 
     /// A hard landing: the walk without its looking around.
     pub const HIT_GROUND_HARD: Surface = Surface {
-        flags: 0,
+        flags: flag::GUN_OFF,
+        ..super::WALK
+    };
+
+    /// Changing into or out of Light Jak: the walk with the gun away.
+    pub const LIGHTJAK_TRANS: Surface = Surface {
+        name: Name::Lightjak,
+        flags: flag::GUN_OFF,
         ..super::WALK
     };
 

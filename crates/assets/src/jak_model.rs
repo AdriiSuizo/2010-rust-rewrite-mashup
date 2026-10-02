@@ -21,6 +21,10 @@ const BODY_FILES: [&str; 3] = ["jakb-normal-lod0.glb", "jakb-c-lod0.glb", "jakb-
 const CLIP_FILE: &str = "jakb-lod0.glb";
 const BOARD_FILE: &str = "board-lod0.glb";
 const GUN_FILE: &str = "gun-lod0.glb";
+/// Light Jak's wings. Their animations travel in [`CLIP_FILE`] under the
+/// wings' prefix, on the wings' own skeleton by node number.
+const WINGS_FILE: &str = "jakb-wings-wings-lod0.glb";
+const WINGS_PREFIX: &str = "jakb-wings-";
 const TEXTURE_LIMIT: u32 = 512;
 const DEFAULT_FOLDER: &str = "jak-assets";
 
@@ -63,6 +67,8 @@ pub struct Rig {
     pub joints: Vec<Joint>,
     /// Joints ordered so every parent comes before its children.
     order: Vec<usize>,
+    /// Each joint's node in its file.
+    nodes: Vec<usize>,
     /// One per joint: the skin's joints are the skeleton.
     pub inverse_binds: Vec<Mat4>,
     pub mesh: BotModel,
@@ -174,6 +180,7 @@ pub struct JakAssets {
     pub body: Rig,
     pub board: Option<Rig>,
     pub gun: Option<Rig>,
+    pub wings: Option<Rig>,
     /// Each of Jak's animations' timing.
     pub timing: Vec<AnimTiming>,
 }
@@ -191,6 +198,9 @@ pub struct AnimTiming {
     pub numbered: bool,
     /// The align joint's motion, frame by frame, when the art group has it.
     pub align: Option<Vec<[f32; 7]>>,
+    /// Where the prejoint puts the mesh, frame by frame, when the art group
+    /// moves it off the root.
+    pub prejoint: Option<Vec<[f32; 16]>>,
 }
 
 impl JakAssets {
@@ -198,6 +208,7 @@ impl JakAssets {
         std::iter::once(&self.body.mesh)
             .chain(self.board.as_ref().map(|r| &r.mesh))
             .chain(self.gun.as_ref().map(|r| &r.mesh))
+            .chain(self.wings.as_ref().map(|r| &r.mesh))
     }
 }
 
@@ -212,10 +223,11 @@ pub fn local_jak() -> Option<&'static JakAssets> {
                 Ok(assets) => {
                     diag::info!(
                         World,
-                        "Jak model: {} clips, board {}, gun {}, {} animations numbered from .go art groups, {} with their motion",
+                        "Jak model: {} clips, board {}, gun {}, wings {}, {} animations numbered from .go art groups, {} with their motion",
                         assets.body.clips.len(),
                         assets.board.is_some(),
                         assets.gun.is_some(),
+                        assets.wings.as_ref().map_or(0, |w| w.clips.len()),
                         assets.timing.iter().filter(|t| t.numbered).count(),
                         assets.timing.iter().filter(|t| t.align.is_some()).count()
                     );
@@ -237,21 +249,32 @@ pub fn load(root: &Path) -> Result<JakAssets, String> {
         .find(|path| path.is_file())
         .ok_or_else(|| format!("no {} in {}", BODY_FILES[0], root.display()))?;
     let mut body = rig(&body_file, "body")?;
-    let clip_file = root.join(CLIP_FILE);
-    if clip_file.is_file() {
-        let bytes = read(&clip_file)?;
-        let glb = Glb::parse(&bytes, CLIP_FILE)?;
-        body.clips = clips(&glb, &body.joints)?;
-    }
     let optional = |name: &str, label: &str| -> Result<Option<Rig>, String> {
         let path = root.join(name);
         path.is_file().then(|| rig(&path, label)).transpose()
     };
+    let mut wings = optional(WINGS_FILE, "wings")?;
+    let clip_file = root.join(CLIP_FILE);
+    if clip_file.is_file() {
+        let bytes = read(&clip_file)?;
+        let glb = Glb::parse(&bytes, CLIP_FILE)?;
+        body.clips = clips(&glb, |_, name| {
+            body.joints.iter().position(|j| j.name == name)
+        })?;
+        if let Some(wings) = &mut wings {
+            let nodes = wings.nodes.clone();
+            wings.clips = clips(&glb, |node, _| nodes.iter().position(|&n| n == node))?
+                .into_iter()
+                .filter(|(name, _)| name.starts_with(WINGS_PREFIX))
+                .collect();
+        }
+    }
     let timing = timing(&body.clips, &art_groups(root));
     Ok(JakAssets {
         body,
         board: optional(BOARD_FILE, "board")?,
         gun: optional(GUN_FILE, "gun")?,
+        wings,
         timing,
     })
 }
@@ -281,6 +304,7 @@ fn timing(clips: &HashMap<String, Clip>, numbering: &HashMap<String, ArtAnim>) -
                 artist_step,
                 numbered: numbered.is_some(),
                 align: numbered.and_then(|n| n.align.clone()),
+                prejoint: numbered.and_then(|n| n.prejoint.clone()),
             }
         })
         .collect();
@@ -362,10 +386,11 @@ fn rig(path: &Path, label: &str) -> Result<Rig, String> {
     let order = parents_first(&joints)?;
 
     let mesh = mesh(&glb, name, label, &joints)?;
-    let clips = clips(&glb, &joints)?;
+    let clips = clips(&glb, |_, name| joints.iter().position(|j| j.name == name))?;
     Ok(Rig {
         joints,
         order,
+        nodes: skin_nodes,
         inverse_binds,
         mesh,
         clips,
@@ -560,8 +585,12 @@ fn tinted(
     })
 }
 
-/// Every animation in `glb`, its channels matched to `joints` by node name.
-fn clips(glb: &Glb, joints: &[Joint]) -> Result<HashMap<String, Clip>, String> {
+/// Every animation in `glb`, each channel given to the joint `joint_of`
+/// names for its node (number and name).
+fn clips(
+    glb: &Glb,
+    joint_of: impl Fn(usize, &str) -> Option<usize>,
+) -> Result<HashMap<String, Clip>, String> {
     let nodes = &glb.json["nodes"];
     let mut out = HashMap::new();
     for animation in glb.json["animations"].as_array().into_iter().flatten() {
@@ -579,13 +608,11 @@ fn clips(glb: &Glb, joints: &[Joint]) -> Result<HashMap<String, Clip>, String> {
                 Some("scale") => Channel::Scale,
                 _ => continue,
             };
-            let Some(node_name) = target["node"]
-                .as_u64()
-                .and_then(|n| nodes[n as usize]["name"].as_str())
-            else {
+            let Some(node) = target["node"].as_u64().map(|n| n as usize) else {
                 continue;
             };
-            let Some(joint) = joints.iter().position(|j| j.name == node_name) else {
+            let node_name = nodes[node]["name"].as_str().unwrap_or("");
+            let Some(joint) = joint_of(node, node_name) else {
                 continue;
             };
             let sampler = &samplers[index(&channel["sampler"])?];

@@ -46,6 +46,11 @@ impl Jak {
             State::FlopHitGround { stuck } => self.flop_hit_ground_code(stuck),
             State::Roll => self.roll_code(),
             State::RollFlip { height, dist } => self.roll_flip_code(height, dist, world),
+            State::PowerJakGetOn
+            | State::LightJakGetOn { .. }
+            | State::LightJakGetOff
+            | State::LightJakSwoop { .. }
+            | State::LightJakSwoopFalling => self.lightjak_code(),
             _ => None,
         }
     }
@@ -97,6 +102,7 @@ impl Jak {
         loop {
             match self.code.pc {
                 0 => {
+                    self.code.count = 22;
                     if self.chan.is(anim::ROLL_FLIP) {
                         self.ja_play(anim::ROLL_FLIP_LAND, 1.0);
                         self.goto(1);
@@ -134,8 +140,11 @@ impl Jak {
                         let max = self.anims.max(anim::STANCE_TO_DUCK);
                         self.ja_set(anim::STANCE_TO_DUCK, NumFunc::seek_to(0.0, 1.2), max);
                         self.goto(3);
+                    } else if self.light() && self.chan.is(anim::LIGHTJAK_GET_ON_LAND) {
+                        self.code.count = 45;
+                        self.goto(9);
                     } else {
-                        self.goto(10);
+                        self.goto(9);
                     }
                 }
                 1 => {
@@ -150,19 +159,19 @@ impl Jak {
                     if !self.ja_wait() {
                         return None;
                     }
-                    self.goto(10);
+                    self.goto(9);
                 }
                 3 => {
                     if !self.ja_while() {
                         return None;
                     }
-                    self.goto(10);
+                    self.goto(9);
                 }
                 4 => {
                     if self.ja_wait() {
                         self.control.dir_targ = self.foot.saved_dir;
                         self.control.mod_surface = surface::WALK;
-                        self.goto(10);
+                        self.goto(9);
                         continue;
                     }
                     self.compute_delta_align();
@@ -174,19 +183,49 @@ impl Jak {
                         self.control.mod_surface = surface::WALK;
                         self.control.bend_target = 0.0;
                         self.control.dir_targ = self.control.quat;
-                        self.goto(10);
+                        self.goto(9);
                         continue;
                     }
                     let c = &mut self.control;
                     c.bend_target = seek(c.bend_target, 0.0, SECONDS_PER_FRAME);
                     return None;
                 }
+                9 => {
+                    if self.light_stance() == Some(true) {
+                        self.ja_push(seconds(0.05));
+                        self.ja_play(anim::LIGHTJAK_STANCE_TO_STANCE, 1.0);
+                        self.goto(12);
+                    } else {
+                        self.goto(10);
+                    }
+                }
                 10 => {
-                    if !self.chan.is(anim::STANCE_LOOP) {
-                        self.ja_push(22);
-                        self.chan.anim = anim::STANCE_LOOP;
+                    let stance = if self.light_stance().is_some() {
+                        anim::LIGHTJAK_STANCE
+                    } else {
+                        anim::STANCE_LOOP
+                    };
+                    if !self.chan.is(stance) || self.chan.mix.is_some() {
+                        self.ja_push(i64::from(self.code.count));
+                        self.chan.anim = stance;
+                        self.chan.mix = None;
                     }
                     self.goto(11);
+                }
+                12 => {
+                    if !self.code.arrived {
+                        self.chan.eval(&self.anims);
+                        self.code.arrived = true;
+                        if self.chan.done(&self.anims) {
+                            self.goto(10);
+                            continue;
+                        }
+                    }
+                    if !self.light() {
+                        self.goto(10);
+                        continue;
+                    }
+                    return None;
                 }
                 _ => return self.ja_loop(),
             }
@@ -658,7 +697,11 @@ impl Jak {
                 0 => {
                     let aframe = self.aframe_num();
                     let c = self.chan;
-                    if c.is_any(&[anim::JUMP_LOOP, anim::FLOP_JUMP])
+                    if self.landing_from_swoop() {
+                        self.ja_push(seconds(0.05));
+                        self.ja_play(anim::LIGHTJAK_SWOOP_LAND, 1.0);
+                        self.goto(3);
+                    } else if c.is_any(&[anim::JUMP_LOOP, anim::FLOP_JUMP])
                         || (c.is(anim::JUMP) && aframe >= 38.0)
                     {
                         self.ja_push(seconds(0.02));

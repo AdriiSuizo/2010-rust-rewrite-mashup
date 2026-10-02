@@ -18,6 +18,8 @@ pub enum Danger {
     Uppercut,
     Flop,
     FlopDown,
+    /// Changing into Light Jak.
+    GetOn,
 }
 
 /// A sphere the attack strikes with: at an offset from Jak's origin in his
@@ -54,7 +56,7 @@ const FLOP_DOWN: [HitSphere; 2] = [at(3276.8, 5734.4), at(9011.2, 5734.4)];
 impl Danger {
     pub fn spheres(self) -> &'static [HitSphere] {
         match self {
-            Danger::Spin | Danger::SpinAir => &SPIN,
+            Danger::Spin | Danger::SpinAir | Danger::GetOn => &SPIN,
             Danger::Punch => &PUNCH,
             Danger::Uppercut => &UPPERCUT,
             Danger::Flop => &FLOP,
@@ -65,7 +67,7 @@ impl Danger {
     /// Hit points it takes off what it strikes.
     pub fn damage(self) -> f32 {
         match self {
-            Danger::Spin | Danger::SpinAir | Danger::Punch => 3.0,
+            Danger::Spin | Danger::SpinAir | Danger::Punch | Danger::GetOn => 3.0,
             Danger::Uppercut | Danger::Flop | Danger::FlopDown => 2.0,
         }
     }
@@ -78,6 +80,7 @@ impl Danger {
             Danger::Uppercut => "uppercut",
             Danger::Flop => "flop",
             Danger::FlopDown => "flop-down",
+            Danger::GetOn => "get-on",
         }
     }
 }

@@ -15,6 +15,7 @@ pub mod collide;
 pub mod control;
 mod foot_code;
 pub mod gun;
+pub mod lightjak;
 pub mod math;
 pub mod pad;
 pub mod projectile;
@@ -35,6 +36,7 @@ pub use collide::{
 };
 pub use control::Control;
 pub use gun::Gun;
+pub use lightjak::LightJak;
 pub use math::{Basis, FRAME_TICKS, METER, SECONDS_PER_FRAME, TICKS_PER_SECOND};
 pub use pad::{Pad, PadInput, button};
 pub use projectile::{ActorWorld, Projectile, ProjectileHit};
@@ -141,6 +143,22 @@ pub enum State {
         height: f32,
         dist: f32,
     },
+    /// Holding the power button, ready to change.
+    PowerJakGetOn,
+    /// Changing into Light Jak; `swoop` brings the flight.
+    LightJakGetOn {
+        swoop: bool,
+    },
+    /// Changing back.
+    LightJakGetOff,
+    /// A flap of Light Jak's wings: the first of a flight, or another
+    /// `held` seconds after the last.
+    LightJakSwoop {
+        first: bool,
+        held: f32,
+    },
+    /// Falling between flaps.
+    LightJakSwoopFalling,
     BoardGetOn,
     BoardStance,
     BoardDuckStance,
@@ -221,6 +239,12 @@ impl State {
             State::FlopHitGround { .. } => "flop-hit-ground",
             State::Roll => "roll",
             State::RollFlip { .. } => "roll-flip",
+            State::PowerJakGetOn => "powerjak-get-on",
+            State::LightJakGetOn { .. } => "lightjak-get-on",
+            State::LightJakGetOff => "lightjak-get-off",
+            State::LightJakSwoop { first: true, .. } => "lightjak-swoop",
+            State::LightJakSwoop { first: false, .. } => "lightjak-swoop-again",
+            State::LightJakSwoopFalling => "lightjak-swoop-falling",
             State::BoardGetOn => "board-get-on",
             State::BoardStance => "board-stance",
             State::BoardDuckStance => "board-duck-stance",
@@ -303,6 +327,12 @@ pub enum Event {
     },
     /// The punch's fist met a wall and Jak bounced back.
     PunchWall,
+    /// Light Jak began, or ended.
+    LightJak {
+        on: bool,
+    },
+    /// A beat of Light Jak's wings.
+    Flap,
 }
 
 /// Where a state's code is: the step it resumes at and the locals it keeps
@@ -373,6 +403,7 @@ pub struct Jak {
     /// Jak's joints in his own frame as last posed (units), from the host
     /// when his model is there; the blows that strike from a hand use them.
     pub joints: Vec<Vec3>,
+    pub lightjak: LightJak,
 }
 
 impl Jak {
@@ -402,6 +433,7 @@ impl Jak {
             attack: Attack::default(),
             align: align::Align::default(),
             joints: Vec::new(),
+            lightjak: LightJak::default(),
         }
     }
 

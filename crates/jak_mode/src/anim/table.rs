@@ -1,7 +1,7 @@
 //! The animations Jak's states play, by the names the art groups give them.
 use super::Anim;
 
-pub static NAMES: [&str; 207] = [
+pub static NAMES: [&str; 229] = [
     "jakb-attack-from-jump",
     "jakb-attack-from-jump-end",
     "jakb-attack-from-jump-loop",
@@ -173,10 +173,24 @@ pub static NAMES: [&str; 207] = [
     "jakb-jump-loop",
     "jakb-jump-short-land",
     "jakb-launch-jump-loop",
+    "jakb-lightjak-get-off",
+    "jakb-lightjak-get-on",
+    "jakb-lightjak-get-on-land",
+    "jakb-lightjak-get-on-loop",
+    "jakb-lightjak-get-on-out",
+    "jakb-lightjak-stance",
+    "jakb-lightjak-stance-to-stance",
+    "jakb-lightjak-swoop-fall",
+    "jakb-lightjak-swoop-fall-loop",
+    "jakb-lightjak-swoop-land",
+    "jakb-lightjak-swoop1",
+    "jakb-lightjak-swoop2",
     "jakb-moving-flop-down",
     "jakb-moving-flop-down-loop",
     "jakb-painful-land",
     "jakb-painful-land-end",
+    "jakb-powerjak-get-on",
+    "jakb-powerjak-get-on-loop",
     "jakb-roll-flip",
     "jakb-roll-flip-land",
     "jakb-run",
@@ -209,6 +223,14 @@ pub static NAMES: [&str; 207] = [
     "jakb-wall-hide-scared",
     "jakb-wall-hide-scared-loop",
     "jakb-wall-hide-scared-return",
+    "jakb-wings-lightjak-get-off",
+    "jakb-wings-lightjak-get-on-land",
+    "jakb-wings-lightjak-stance",
+    "jakb-wings-lightjak-swoop-fall",
+    "jakb-wings-lightjak-swoop-fall-loop",
+    "jakb-wings-lightjak-swoop-land",
+    "jakb-wings-lightjak-swoop1",
+    "jakb-wings-lightjak-swoop2",
 ];
 
 pub const ATTACK_FROM_JUMP: Anim = Anim(0);
@@ -382,39 +404,61 @@ pub const JUMP_LAND: Anim = Anim(167);
 pub const JUMP_LOOP: Anim = Anim(168);
 pub const JUMP_SHORT_LAND: Anim = Anim(169);
 pub const LAUNCH_JUMP_LOOP: Anim = Anim(170);
-pub const MOVING_FLOP_DOWN: Anim = Anim(171);
-pub const MOVING_FLOP_DOWN_LOOP: Anim = Anim(172);
-pub const PAINFUL_LAND: Anim = Anim(173);
-pub const PAINFUL_LAND_END: Anim = Anim(174);
-pub const ROLL_FLIP: Anim = Anim(175);
-pub const ROLL_FLIP_LAND: Anim = Anim(176);
-pub const RUN: Anim = Anim(177);
-pub const RUN_DOWN: Anim = Anim(178);
-pub const RUN_LEFT: Anim = Anim(179);
-pub const RUN_RIGHT: Anim = Anim(180);
-pub const RUN_SQUASH: Anim = Anim(181);
-pub const RUN_SQUASH_WEAK: Anim = Anim(182);
-pub const RUN_TO_STANCE: Anim = Anim(183);
-pub const RUN_TO_STANCE_FAST: Anim = Anim(184);
-pub const RUN_UP: Anim = Anim(185);
-pub const SHOCKED: Anim = Anim(186);
-pub const SMACK_SURFACE: Anim = Anim(187);
-pub const SMACK_SURFACE_END: Anim = Anim(188);
-pub const STANCE_LOOP: Anim = Anim(189);
-pub const STANCE_TO_DUCK: Anim = Anim(190);
-pub const STANCE_TO_INVISIBLE: Anim = Anim(191);
-pub const TRIP: Anim = Anim(192);
-pub const TURN_AROUND: Anim = Anim(193);
-pub const WALK: Anim = Anim(194);
-pub const WALK_DOWN: Anim = Anim(195);
-pub const WALK_LEFT: Anim = Anim(196);
-pub const WALK_RIGHT: Anim = Anim(197);
-pub const WALK_UP: Anim = Anim(198);
-pub const WALL_HIDE: Anim = Anim(199);
-pub const WALL_HIDE_BODY: Anim = Anim(200);
-pub const WALL_HIDE_HEAD: Anim = Anim(201);
-pub const WALL_HIDE_HEAD_LEFT: Anim = Anim(202);
-pub const WALL_HIDE_HEAD_RIGHT: Anim = Anim(203);
-pub const WALL_HIDE_SCARED: Anim = Anim(204);
-pub const WALL_HIDE_SCARED_LOOP: Anim = Anim(205);
-pub const WALL_HIDE_SCARED_RETURN: Anim = Anim(206);
+pub const LIGHTJAK_GET_OFF: Anim = Anim(171);
+pub const LIGHTJAK_GET_ON: Anim = Anim(172);
+pub const LIGHTJAK_GET_ON_LAND: Anim = Anim(173);
+pub const LIGHTJAK_GET_ON_LOOP: Anim = Anim(174);
+pub const LIGHTJAK_GET_ON_OUT: Anim = Anim(175);
+pub const LIGHTJAK_STANCE: Anim = Anim(176);
+pub const LIGHTJAK_STANCE_TO_STANCE: Anim = Anim(177);
+pub const LIGHTJAK_SWOOP_FALL: Anim = Anim(178);
+pub const LIGHTJAK_SWOOP_FALL_LOOP: Anim = Anim(179);
+pub const LIGHTJAK_SWOOP_LAND: Anim = Anim(180);
+pub const LIGHTJAK_SWOOP1: Anim = Anim(181);
+pub const LIGHTJAK_SWOOP2: Anim = Anim(182);
+pub const MOVING_FLOP_DOWN: Anim = Anim(183);
+pub const MOVING_FLOP_DOWN_LOOP: Anim = Anim(184);
+pub const PAINFUL_LAND: Anim = Anim(185);
+pub const PAINFUL_LAND_END: Anim = Anim(186);
+pub const POWERJAK_GET_ON: Anim = Anim(187);
+pub const POWERJAK_GET_ON_LOOP: Anim = Anim(188);
+pub const ROLL_FLIP: Anim = Anim(189);
+pub const ROLL_FLIP_LAND: Anim = Anim(190);
+pub const RUN: Anim = Anim(191);
+pub const RUN_DOWN: Anim = Anim(192);
+pub const RUN_LEFT: Anim = Anim(193);
+pub const RUN_RIGHT: Anim = Anim(194);
+pub const RUN_SQUASH: Anim = Anim(195);
+pub const RUN_SQUASH_WEAK: Anim = Anim(196);
+pub const RUN_TO_STANCE: Anim = Anim(197);
+pub const RUN_TO_STANCE_FAST: Anim = Anim(198);
+pub const RUN_UP: Anim = Anim(199);
+pub const SHOCKED: Anim = Anim(200);
+pub const SMACK_SURFACE: Anim = Anim(201);
+pub const SMACK_SURFACE_END: Anim = Anim(202);
+pub const STANCE_LOOP: Anim = Anim(203);
+pub const STANCE_TO_DUCK: Anim = Anim(204);
+pub const STANCE_TO_INVISIBLE: Anim = Anim(205);
+pub const TRIP: Anim = Anim(206);
+pub const TURN_AROUND: Anim = Anim(207);
+pub const WALK: Anim = Anim(208);
+pub const WALK_DOWN: Anim = Anim(209);
+pub const WALK_LEFT: Anim = Anim(210);
+pub const WALK_RIGHT: Anim = Anim(211);
+pub const WALK_UP: Anim = Anim(212);
+pub const WALL_HIDE: Anim = Anim(213);
+pub const WALL_HIDE_BODY: Anim = Anim(214);
+pub const WALL_HIDE_HEAD: Anim = Anim(215);
+pub const WALL_HIDE_HEAD_LEFT: Anim = Anim(216);
+pub const WALL_HIDE_HEAD_RIGHT: Anim = Anim(217);
+pub const WALL_HIDE_SCARED: Anim = Anim(218);
+pub const WALL_HIDE_SCARED_LOOP: Anim = Anim(219);
+pub const WALL_HIDE_SCARED_RETURN: Anim = Anim(220);
+pub const WINGS_LIGHTJAK_GET_OFF: Anim = Anim(221);
+pub const WINGS_LIGHTJAK_GET_ON_LAND: Anim = Anim(222);
+pub const WINGS_LIGHTJAK_STANCE: Anim = Anim(223);
+pub const WINGS_LIGHTJAK_SWOOP_FALL: Anim = Anim(224);
+pub const WINGS_LIGHTJAK_SWOOP_FALL_LOOP: Anim = Anim(225);
+pub const WINGS_LIGHTJAK_SWOOP_LAND: Anim = Anim(226);
+pub const WINGS_LIGHTJAK_SWOOP1: Anim = Anim(227);
+pub const WINGS_LIGHTJAK_SWOOP2: Anim = Anim(228);

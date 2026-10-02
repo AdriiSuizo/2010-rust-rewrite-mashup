@@ -83,6 +83,10 @@ pub(crate) struct Animator {
     push: Push,
     /// Each joint's position in Jak's own frame, game units, as last posed.
     joints: Vec<jak_mode::glam::Vec3>,
+    /// The wings' pose as last shown, and the blend into their current one.
+    wings_last: Vec<Trs>,
+    wings_from: Option<(Vec<Trs>, i64, f32)>,
+    wings_push: Push,
 }
 
 impl Animator {
@@ -93,6 +97,9 @@ impl Animator {
             last: Vec::new(),
             push: Push::default(),
             joints: Vec::new(),
+            wings_last: Vec::new(),
+            wings_from: None,
+            wings_push: Push::default(),
         }
     }
 
@@ -166,7 +173,11 @@ impl Animator {
             }
             Some(rig.skin_matrices(&rig.globals(&own), frame * globals[at]))
         };
+        let wings = self
+            .wings(assets, jak, &globals, frame)
+            .unwrap_or_else(Vec::new);
         Arc::new(JakSkins {
+            wings,
             body: body.skin_matrices(&globals, frame),
             board: attached(
                 &assets.board,
@@ -177,6 +188,56 @@ impl Animator {
             .unwrap_or_else(Vec::new),
             gun: attached(&assets.gun, "gun", "gun-idle-yellow", true).unwrap_or_else(Vec::new),
         })
+    }
+}
+
+impl Animator {
+    /// Light Jak's wings on his chest, without its scale, in their own
+    /// animation at their channel's frame.
+    fn wings(
+        &mut self,
+        assets: &JakAssets,
+        jak: &Jak,
+        globals: &[Mat4],
+        frame: Mat4,
+    ) -> Option<Vec<Mat4>> {
+        let rig = assets.wings.as_ref()?;
+        let Some(wings) = jak.lightjak.wings.filter(|w| w.shown) else {
+            self.wings_last.clear();
+            self.wings_from = None;
+            return None;
+        };
+        let mut pose = rig.rest_pose();
+        let name = wings.chan.anim.name();
+        if let Some(clip) = rig.clips.get(name) {
+            let last = clip.frames.saturating_sub(1).max(1) as f32;
+            clip.sample(
+                wings.chan.frame.clamp(0.0, last) / last * clip.duration,
+                &mut pose,
+            );
+        }
+        if wings.push != self.wings_push {
+            self.wings_push = wings.push;
+            if !self.wings_last.is_empty() {
+                let seconds = wings.push.ticks as f32 / TICKS_PER_SECOND as f32;
+                self.wings_from = Some((self.wings_last.clone(), wings.push.tick, seconds));
+            }
+        }
+        if let Some((from, began, length)) = &self.wings_from {
+            let t = (jak.time - began) as f32 / TICKS_PER_SECOND as f32 / length.max(1e-3);
+            if t < 1.0 && from.len() == pose.len() {
+                for (p, f) in pose.iter_mut().zip(from) {
+                    *p = f.lerp(p, t);
+                }
+            } else {
+                self.wings_from = None;
+            }
+        }
+        self.wings_last.clone_from(&pose);
+        let chest = globals[assets.body.joint("chest")?];
+        let (_, rotation, translation) = chest.to_scale_rotation_translation();
+        let root = frame * Mat4::from_rotation_translation(rotation, translation);
+        Some(rig.skin_matrices(&rig.globals(&pose), root))
     }
 }
 
@@ -384,6 +445,11 @@ pub(crate) fn skin(skins: &JakSkins, geom: &mut CpuBodyGeom) {
     }
     if let Some(gun) = &assets.gun {
         skin_model(&gun.mesh, &skins.gun, geom);
+    }
+    if let Some(wings) = &assets.wings
+        && !skins.wings.is_empty()
+    {
+        skin_model(&wings.mesh, &skins.wings, geom);
     }
     geom.decoded_n = geom.packed.len();
 }

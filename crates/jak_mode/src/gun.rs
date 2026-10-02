@@ -169,6 +169,17 @@ impl Jak {
         if matches!(self.state, State::BoardGetOff) {
             return;
         }
+        let gun_off = self.control.current.flags & crate::surface::flag::GUN_OFF != 0
+            || matches!(
+                self.state,
+                State::PowerJakGetOn | State::LightJakGetOn { .. }
+            );
+        if gun_off {
+            if self.gun.out {
+                self.gun.end_mode();
+            }
+            return;
+        }
         if let Some(mut shot) = self.gun.check(
             self.time,
             &self.pad,
@@ -176,6 +187,10 @@ impl Jak {
             self.board.latch,
             &mut self.events,
         ) {
+            if self.lightjak.on {
+                let l = &mut self.lightjak;
+                l.eco = (l.eco - crate::lightjak::SWOOP_INC).max(0.0);
+            }
             if let Some(hit) = shot.point_blank(world, &mut self.probe_cache) {
                 self.events.push(Event::Impact(hit));
             } else {

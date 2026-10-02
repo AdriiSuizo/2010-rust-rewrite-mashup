@@ -1065,3 +1065,217 @@ fn running_mixes_the_run_cycle() {
     let want = speed / (6.25 * M) * jak.anims.info(jak.chan.anim).speed;
     assert!((step - want).abs() < 0.02, "{step} {want}");
 }
+
+/// Made-up timing for the flaps, numbered so the frames the swoop's
+/// windows name fall inside them.
+fn light_anims() -> std::sync::Arc<Anims> {
+    let info = |base: f32| jak_mode::anim::AnimInfo {
+        frames: 25,
+        speed: 0.5,
+        artist_base: base,
+        artist_step: 1.5,
+    };
+    std::sync::Arc::new(Anims::from_rows([
+        ("jakb-lightjak-swoop1", info(10.0)),
+        ("jakb-lightjak-swoop2", info(40.0)),
+        ("jakb-lightjak-swoop-fall", info(76.0)),
+    ]))
+}
+
+/// A jump, then X again once the double jump takes it.
+fn double_jump_press(jak: &mut Jak, world: &mut TriangleGrid) {
+    jak.step(&press(button::X), world, None);
+    while jak.velocity().y >= 12288.0 {
+        jak.step(&idle(), world, None);
+    }
+    jak.step(&press(button::X), world, None);
+}
+
+/// Steps until a flap lifts Jak, and the climb it left him with.
+fn until_flap(jak: &mut Jak, world: &mut TriangleGrid) -> f32 {
+    for _ in 0..120 {
+        let before = jak.velocity().y;
+        jak.step(&idle(), world, None);
+        if jak.velocity().y > before + 8192.0 {
+            return jak.velocity().y;
+        }
+    }
+    panic!("no flap: {:?}", jak.state);
+}
+
+fn l2_and(b: u32, pressed: u32) -> PadInput {
+    PadInput {
+        held: button::L2 | b,
+        pressed,
+        ..Default::default()
+    }
+}
+
+/// Holding the power button and pressing X changes Jak into Light Jak
+/// with the flight, wings and all.
+fn light_jak(world: &mut TriangleGrid) -> Jak {
+    let mut jak = standing(world);
+    jak.anims = light_anims();
+    jak.lightjak.eco = jak_mode::lightjak::ECO_MAX;
+    run(&mut jak, world, l2_and(0, button::L2), 1);
+    assert_eq!(jak.state, State::PowerJakGetOn);
+    run(&mut jak, world, l2_and(0, 0), 5);
+    jak.step(&l2_and(button::X, button::X), world, None);
+    until(&mut jak, world, idle(), 60, |s| {
+        matches!(s, State::LightJakGetOn { swoop: true })
+    });
+    until(&mut jak, world, idle(), 600, |s| *s == State::Stance);
+    assert!(jak.light());
+    assert!(jak.lightjak.swoop);
+    assert!(jak.lightjak.wings.is_some());
+    jak
+}
+
+#[test]
+fn power_button_and_x_change_into_light_jak() {
+    let mut world = ground(None);
+    let jak = light_jak(&mut world);
+    assert_eq!(jak.lightjak.eco, jak_mode::lightjak::ECO_MAX);
+}
+
+/// As Light Jak the double jump's press spreads the wings: the first flap
+/// costs a unit of light eco and sets the climb to 1.4 of the flap's
+/// 77824 units a second under a lighter pull; X again after half a second
+/// flaps again for free, as hard as the time since allows; between flaps
+/// he falls under the usual pull, X flaps once more, and the landing is
+/// the swoop's own.
+#[test]
+fn light_jak_flies_on_the_double_jump() {
+    let mut world = ground(None);
+    let mut jak = light_jak(&mut world);
+    let eco = jak.lightjak.eco;
+    double_jump_press(&mut jak, &mut world);
+    assert!(
+        matches!(jak.state, State::LightJakSwoop { first: true, .. }),
+        "{:?}",
+        jak.state
+    );
+    assert_eq!(jak.lightjak.eco, eco - 1.0);
+    let flap = 285.0 * 163840.0 / 600.0;
+    let up = jak.velocity().y;
+    assert!(
+        up <= 1.4 * flap && up > 1.4 * flap - 163840.0 / 30.0,
+        "{up}"
+    );
+    assert_eq!(jak.control.gravity_length, 163840.0);
+    assert!(
+        jak.lightjak
+            .wings
+            .is_some_and(|w| w.mode == jak_mode::lightjak::WingsMode::Use)
+    );
+
+    until(&mut jak, &mut world, idle(), 200, |s| {
+        *s == State::LightJakSwoopFalling
+    });
+    assert_eq!(jak.control.gravity_length, 245760.0);
+    assert!(
+        jak.trans().y > 2.0 * M,
+        "too low to flap: {}",
+        jak.trans().y / M
+    );
+    jak.step(&press(button::X), &mut world, None);
+    assert_eq!(
+        jak.state,
+        State::LightJakSwoop {
+            first: false,
+            held: 1.0
+        }
+    );
+    let up = until_flap(&mut jak, &mut world);
+    assert!(up <= flap && up > flap - 163840.0 / 30.0, "{up}");
+    assert_eq!(jak.lightjak.eco, eco - 1.0);
+
+    let held = 40;
+    run(&mut jak, &mut world, idle(), held);
+    jak.step(&press(button::X), &mut world, None);
+    let State::LightJakSwoop {
+        first: false,
+        held: seconds,
+    } = jak.state
+    else {
+        panic!("{:?}", jak.state);
+    };
+    let lift = ((seconds * seconds - 0.25) / 0.7).clamp(0.0, 1.0);
+    let up = until_flap(&mut jak, &mut world);
+    assert!(
+        up <= lift * flap && up > lift * flap - 163840.0 / 30.0,
+        "{up} {seconds}"
+    );
+    assert_eq!(jak.lightjak.eco, eco - 1.0);
+
+    until(&mut jak, &mut world, idle(), 600, |s| {
+        matches!(s, State::HitGround { .. })
+    });
+    assert!(jak.chan.is(jak_mode::anim::LIGHTJAK_SWOOP_LAND));
+    assert!(jak.light());
+}
+
+/// Light Jak neither ducks nor rolls.
+#[test]
+fn light_jak_does_not_duck_or_roll() {
+    let mut world = ground(None);
+    let mut jak = light_jak(&mut world);
+    run(&mut jak, &mut world, hold(button::L1), 20);
+    assert_eq!(jak.state, State::Stance);
+    run(&mut jak, &mut world, forward(), 30);
+    jak.step(
+        &PadInput {
+            held: button::L1,
+            pressed: button::L1,
+            left: [0.0, 1.0],
+            ..Default::default()
+        },
+        &mut world,
+        None,
+    );
+    assert_ne!(jak.state, State::Roll);
+}
+
+/// A tap of the power button as Light Jak changes him back.
+#[test]
+fn power_button_tap_changes_back() {
+    let mut world = ground(None);
+    let mut jak = light_jak(&mut world);
+    run(&mut jak, &mut world, l2_and(0, button::L2), 1);
+    assert_eq!(jak.state, State::PowerJakGetOn);
+    jak.step(&idle(), &mut world, None);
+    assert_eq!(jak.state, State::LightJakGetOff);
+    until(&mut jak, &mut world, idle(), 600, |s| *s == State::Stance);
+    assert!(!jak.light());
+    assert!(jak.lightjak.wings.is_none());
+}
+
+/// The flight's last eco: he keeps flying, and changes back on landing.
+#[test]
+fn light_jak_ends_when_the_eco_runs_out() {
+    let mut world = ground(None);
+    let mut jak = light_jak(&mut world);
+    jak.lightjak.eco = 1.0;
+    double_jump_press(&mut jak, &mut world);
+    assert!(matches!(
+        jak.state,
+        State::LightJakSwoop { first: true, .. }
+    ));
+    assert_eq!(jak.lightjak.eco, 0.0);
+    assert!(jak.light());
+    until(&mut jak, &mut world, idle(), 600, |s| {
+        *s == State::LightJakGetOff
+    });
+    until(&mut jak, &mut world, idle(), 600, |s| *s == State::Stance);
+    assert!(!jak.light());
+}
+
+/// Without Light Jak the double jump is a double jump.
+#[test]
+fn no_flight_without_light_jak() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.lightjak.eco = jak_mode::lightjak::ECO_MAX;
+    double_jump_press(&mut jak, &mut world);
+    assert!(matches!(jak.state, State::DoubleJump { .. }));
+}

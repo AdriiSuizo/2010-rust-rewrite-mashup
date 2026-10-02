@@ -166,7 +166,7 @@ impl Jak {
     }
 
     /// What every move leaves behind it.
-    fn target_exit(&mut self) {
+    pub(crate) fn target_exit(&mut self) {
         let c = &mut self.control;
         c.mod_surface = surface::WALK;
         c.draw_offset_y = 0.0;
@@ -209,6 +209,7 @@ impl Jak {
     fn can_duck(&self) -> bool {
         self.control.on_surface()
             && self.control.local_normal.dot(self.control.gravity_normal) >= 0.7
+            && !self.light()
     }
 
     /// Room to stand up: the two upper body spheres clear of the world.
@@ -230,6 +231,7 @@ impl Jak {
             && (c.status & status::TOUCH_WALL == 0 || 0.7 >= c.touch_angle)
             && c.local_slope_z < 0.7
             && self.surface_flags() & flag::NO_ATTACK == 0
+            && !self.light()
     }
 
     /// Up against a wall square-on.
@@ -280,7 +282,7 @@ impl Jak {
 
     /// In the air: a spin, landing, or stuck long enough to count as
     /// landed.
-    fn falling_trans(&mut self, stuck_after: i64, air_spin: bool) -> Option<State> {
+    pub(crate) fn falling_trans(&mut self, stuck_after: i64, air_spin: bool) -> Option<State> {
         if air_spin && self.pad.pressed(button::CIRCLE) && self.can_feet() {
             return Some(State::AttackAir {
                 from: AirFrom::Jump,
@@ -401,6 +403,13 @@ impl Jak {
     /// The new state's entry; a state can turn straight into another here.
     pub(crate) fn foot_enter(&mut self, state: &State) -> Option<State> {
         let now = self.time;
+        if matches!(state, State::DoubleJump { .. }) && self.swoop_instead() {
+            return Some(State::LightJakSwoop {
+                first: true,
+                held: 1.2,
+            });
+        }
+        self.lightjak_enter(state);
         match *state {
             State::Stance | State::Walk => {
                 self.control.mod_surface = self.walk_mods();
@@ -603,6 +612,7 @@ impl Jak {
 
     pub(crate) fn foot_exit(&mut self, state: &State, next: &State) {
         let now = self.time;
+        self.lightjak_exit(state, next);
         match *state {
             State::Stance => {
                 self.control.bend_target = 0.0;
@@ -701,6 +711,9 @@ impl Jak {
                     self.code.no_exit = true;
                     return Some(State::Walk);
                 }
+                if self.want_to_powerjak() {
+                    return Some(State::PowerJakGetOn);
+                }
                 if self.pad.hold(button::L1) && self.can_duck() {
                     self.control.bend_target = 0.0;
                     self.code.no_exit = true;
@@ -722,6 +735,9 @@ impl Jak {
                 if !self.move_legs() {
                     self.code.no_exit = true;
                     return Some(State::Stance);
+                }
+                if self.want_to_powerjak() {
+                    return Some(State::PowerJakGetOn);
                 }
                 self.ground_actions(x, true)
             }
@@ -773,6 +789,9 @@ impl Jak {
                 if walking && !self.move_legs() {
                     return Some(State::DuckStance { keep_time: true });
                 }
+                if self.want_to_powerjak() {
+                    return Some(State::PowerJakGetOn);
+                }
                 if x && self.can_jump(false) {
                     return Some(if self.pad.stick0_speed == 0.0 {
                         State::DuckHighJump {
@@ -805,6 +824,9 @@ impl Jak {
                 }
                 if self.move_legs() {
                     return Some(State::Walk);
+                }
+                if self.want_to_powerjak() {
+                    return Some(State::PowerJakGetOn);
                 }
                 if self.pad.recently_pressed(button::CIRCLE) && self.can_feet() {
                     return Some(State::Attack);
@@ -938,6 +960,7 @@ impl Jak {
                 }
                 None
             }
+            State::LightJakSwoop { .. } | State::LightJakSwoopFalling => self.lightjak_trans(),
             State::RollFlip { .. } => {
                 if self.pad.pressed(button::CIRCLE)
                     && self.can_feet()
@@ -1184,7 +1207,19 @@ impl Jak {
                 seek(self.control.draw_offset_y, 0.0, 16384.0 * SECONDS_PER_FRAME);
         }
         self.flag_setup();
-        let no_stick = matches!(self.state, State::TurnAround | State::HitGroundHard { .. });
+        let no_stick = matches!(
+            self.state,
+            State::TurnAround
+                | State::HitGroundHard { .. }
+                | State::PowerJakGetOn
+                | State::LightJakGetOn { .. }
+                | State::LightJakGetOff
+        );
+        if matches!(self.state, State::PowerJakGetOn | State::LightJakGetOff)
+            && self.control.on_surface()
+        {
+            self.control.transv = Vec3::ZERO;
+        }
         if self.control.force_turn_to_strength < 0.0 && !no_stick {
             self.control.force_turn_to_strength = 1.0 - self.pad.stick0_speed;
         }
@@ -1202,6 +1237,7 @@ impl Jak {
         self.bend_gravity();
         self.post_flag_setup();
         self.target_gspot(world);
+        self.lightjak_process();
     }
 
     /// While the gun is out: turning eases to the aim while Jak walks, and

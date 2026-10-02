@@ -1,7 +1,7 @@
 //! Jak's animations as the player's own art groups (`*.go`, the game's
 //! linked object files) hold them: each animation's playback speed and
-//! artist frame numbering, and the motion of its align joint frame by frame,
-//! which the GLB export leaves out.
+//! artist frame numbering, and the motion of its align joint and the
+//! placing of its prejoint frame by frame, which the GLB export leaves out.
 use std::collections::HashMap;
 
 /// One animation's numbering and motion.
@@ -13,6 +13,10 @@ pub struct ArtAnim {
     /// The align joint at each frame: translation (units) then rotation as
     /// a quaternion (x, y, z, w), in the animation's own frame.
     pub align: Option<Vec<[f32; 7]>>,
+    /// The prejoint at each frame, which every bone of the mesh hangs
+    /// from, as a column-major matrix (units), when it is not where the
+    /// root is.
+    pub prejoint: Option<Vec<[f32; 16]>>,
 }
 
 /// Every one of Jak's animations in a linked art group, by name.
@@ -63,7 +67,8 @@ pub fn read(bytes: &[u8]) -> HashMap<String, ArtAnim> {
             && artist_step <= 8.0
             && artist_base.abs() < 1000.0
         {
-            let align = u32_at(seg, anim + 32).and_then(|frames| align(seg, frames as usize));
+            let matrices = u32_at(seg, anim + 32).and_then(|frames| matrices(seg, frames as usize));
+            let (align, prejoint) = matrices.map_or((None, None), |(a, p)| (Some(a), p));
             out.insert(
                 name.clone(),
                 ArtAnim {
@@ -71,6 +76,7 @@ pub fn read(bytes: &[u8]) -> HashMap<String, ArtAnim> {
                     artist_base,
                     artist_step,
                     align,
+                    prejoint,
                 },
             );
         }
@@ -88,11 +94,13 @@ fn f32_at(bytes: &[u8], at: usize) -> Option<f32> {
     u32_at(bytes, at).map(f32::from_bits)
 }
 
-/// The align joint's matrix at each frame, from the compressed animation:
-/// one fixed block, then a block per frame, the whole optionally LZO
-/// compressed. The align joint is a full matrix, either in the fixed block
-/// (it does not move) or first in each frame's 64-bit data.
-fn align(seg: &[u8], control: usize) -> Option<Vec<[f32; 7]>> {
+/// The align joint at each frame, and the prejoint's matrices unless they
+/// are all the identity, from the compressed animation: one fixed block,
+/// then a block per frame, the whole optionally LZO compressed. The two
+/// are full matrices, each either in the fixed block (it does not move) or
+/// in each frame's block, align first, at the start of the 64-bit data.
+#[allow(clippy::type_complexity)]
+fn matrices(seg: &[u8], control: usize) -> Option<(Vec<[f32; 7]>, Option<Vec<[f32; 16]>>)> {
     let head = u32_at(seg, control)?;
     let frames = (head & 0xffff) as usize;
     let compressed = (head >> 16) & 1 != 0;
@@ -127,19 +135,33 @@ fn align(seg: &[u8], control: usize) -> Option<Vec<[f32; 7]>> {
     };
     let matrix_bits = u32_at(fixed, 60)?;
     let fixed_64 = u32_at(fixed, 64)? as usize;
+    let read = |bytes: &[u8], at: usize| -> Option<[f32; 16]> {
+        let m: Vec<f32> = (0..16)
+            .map(|k| f32_at(bytes, at + 4 * k))
+            .collect::<Option<_>>()?;
+        m.try_into().ok()
+    };
+    let align_varies = matrix_bits & 1 != 0;
+    let prejoint_varies = matrix_bits & 2 != 0;
+    let fixed_prejoint = if prejoint_varies {
+        None
+    } else {
+        let skip = if align_varies { 0 } else { 64 };
+        Some(read(fixed, 80 + fixed_64 + skip)?)
+    };
     let mut out = Vec::with_capacity(frames);
+    let mut prejoints = Vec::with_capacity(frames);
     for block in frame_blocks {
-        let m: Vec<f32> = if matrix_bits & 1 != 0 {
-            let at = 16 + u32_at(block, 0)? as usize;
-            (0..16)
-                .map(|k| f32_at(block, at + 4 * k))
-                .collect::<Option<_>>()?
+        let frame_64 = 16 + u32_at(block, 0)? as usize;
+        let m = if align_varies {
+            read(block, frame_64)?
         } else {
-            let at = 80 + fixed_64;
-            (0..16)
-                .map(|k| f32_at(fixed, at + 4 * k))
-                .collect::<Option<_>>()?
+            read(fixed, 80 + fixed_64)?
         };
+        prejoints.push(match fixed_prejoint {
+            Some(p) => p,
+            None => read(block, frame_64 + if align_varies { 64 } else { 0 })?,
+        });
         let col = |r: usize| {
             bevy::math::Vec3::new(m[4 * r], m[4 * r + 1], m[4 * r + 2])
                 .normalize_or(bevy::math::Vec3::ZERO)
@@ -148,7 +170,11 @@ fn align(seg: &[u8], control: usize) -> Option<Vec<[f32; 7]>> {
         let q = bevy::math::Quat::from_mat3(&rot).normalize();
         out.push([m[12], m[13], m[14], q.x, q.y, q.z, q.w]);
     }
-    Some(out)
+    let identity = bevy::math::Mat4::IDENTITY.to_cols_array();
+    let moved = prejoints
+        .iter()
+        .any(|p| p.iter().zip(&identity).any(|(a, b)| (a - b).abs() > 1e-4));
+    Some((out, moved.then_some(prejoints)))
 }
 
 /// LZO1X decompression, as the game unpacks animations it keeps packed.
