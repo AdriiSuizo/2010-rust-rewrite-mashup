@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::bot_model::{BotJoint, BotModel, BotSurface, BotTexture, BotVertex};
 use crate::glb::{Glb, index};
+use crate::jak_art_group::ArtAnim;
 
 /// The body, best first: the in-game Jak, then the variants that share his
 /// skeleton.
@@ -188,6 +189,8 @@ pub struct AnimTiming {
     pub artist_step: f32,
     /// Whether the artist numbering came from the art group, not a default.
     pub numbered: bool,
+    /// The align joint's motion, frame by frame, when the art group has it.
+    pub align: Option<Vec<[f32; 7]>>,
 }
 
 impl JakAssets {
@@ -209,11 +212,12 @@ pub fn local_jak() -> Option<&'static JakAssets> {
                 Ok(assets) => {
                     diag::info!(
                         World,
-                        "Jak model: {} clips, board {}, gun {}, {} animations numbered from .go art groups",
+                        "Jak model: {} clips, board {}, gun {}, {} animations numbered from .go art groups, {} with their motion",
                         assets.body.clips.len(),
                         assets.board.is_some(),
                         assets.gun.is_some(),
-                        assets.timing.iter().filter(|t| t.numbered).count()
+                        assets.timing.iter().filter(|t| t.numbered).count(),
+                        assets.timing.iter().filter(|t| t.align.is_some()).count()
                     );
                     Some(assets)
                 }
@@ -254,10 +258,7 @@ pub fn load(root: &Path) -> Result<JakAssets, String> {
 
 /// Frames and speed from the exported clips, which sample each frame at its
 /// playback time; the artist numbering from the art groups when present.
-fn timing(
-    clips: &HashMap<String, Clip>,
-    numbering: &HashMap<String, (f32, f32, f32)>,
-) -> Vec<AnimTiming> {
+fn timing(clips: &HashMap<String, Clip>, numbering: &HashMap<String, ArtAnim>) -> Vec<AnimTiming> {
     let mut out: Vec<AnimTiming> = clips
         .iter()
         .filter(|(_, clip)| clip.frames > 0)
@@ -269,7 +270,9 @@ fn timing(
                 1.0
             };
             let numbered = numbering.get(name);
-            let (speed, artist_base, artist_step) = numbered.copied().unwrap_or((speed, 0.0, 1.0));
+            let (speed, artist_base, artist_step) = numbered.map_or((speed, 0.0, 1.0), |n| {
+                (n.speed, n.artist_base, n.artist_step)
+            });
             AnimTiming {
                 name: name.clone(),
                 frames,
@@ -277,6 +280,7 @@ fn timing(
                 artist_base,
                 artist_step,
                 numbered: numbered.is_some(),
+                align: numbered.and_then(|n| n.align.clone()),
             }
         })
         .collect();
@@ -284,9 +288,9 @@ fn timing(
     out
 }
 
-/// Every art group (`*.go`) in `root`: each of Jak's animations' speed and
-/// artist numbering, by name.
-fn art_groups(root: &Path) -> HashMap<String, (f32, f32, f32)> {
+/// Every art group (`*.go`) in `root`: each of Jak's animations' speed,
+/// artist numbering and motion, by name.
+fn art_groups(root: &Path) -> HashMap<String, ArtAnim> {
     let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir(root) else {
         return out;
@@ -298,64 +302,7 @@ fn art_groups(root: &Path) -> HashMap<String, (f32, f32, f32)> {
             .is_some_and(|e| e.eq_ignore_ascii_case("go"))
             && let Ok(bytes) = std::fs::read(&path)
         {
-            out.extend(art_group_timing(&bytes));
-        }
-    }
-    out
-}
-
-/// The animations of a linked art group: each one's name string, then the
-/// animation that points at it, holding speed, artist base and artist step
-/// 44 bytes past its start.
-pub fn art_group_timing(bytes: &[u8]) -> HashMap<String, (f32, f32, f32)> {
-    let word = |at: usize| -> Option<u32> {
-        bytes
-            .get(at..at + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    let float = |at: usize| word(at).map(f32::from_bits);
-    let mut out = HashMap::new();
-    let Some(header) = word(4).map(|h| h as usize).filter(|&h| h < bytes.len()) else {
-        return out;
-    };
-    let data = &bytes[header..];
-    let prefix = b"jakb-";
-    let mut names = HashMap::new();
-    let mut i = 4;
-    while i + prefix.len() <= data.len() {
-        if &data[i..i + prefix.len()] != prefix {
-            i += 1;
-            continue;
-        }
-        let end = data[i..]
-            .iter()
-            .position(|&b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
-            .map_or(data.len(), |n| i + n);
-        if data.get(end) == Some(&0)
-            && word(header + i - 4) == Some((end - i) as u32)
-            && let Ok(name) = std::str::from_utf8(&data[i..end])
-        {
-            names.insert((i - 4) as u32, name.to_owned());
-        }
-        i = end.max(i + 1);
-    }
-    for at in (4..data.len().saturating_sub(4)).step_by(4) {
-        let Some(name) = word(header + at).and_then(|w| names.get(&w)) else {
-            continue;
-        };
-        let base = header + at - 4;
-        let (Some(speed), Some(artist_base), Some(artist_step)) =
-            (float(base + 44), float(base + 48), float(base + 52))
-        else {
-            continue;
-        };
-        if 0.0 < speed
-            && speed <= 4.0
-            && 0.0 < artist_step
-            && artist_step <= 8.0
-            && artist_base.abs() < 1000.0
-        {
-            out.insert(name.clone(), (speed, artist_base, artist_step));
+            out.extend(crate::jak_art_group::read(&bytes));
         }
     }
     out

@@ -5,25 +5,29 @@
 //! The simulation keeps Jak's own units (4096 per meter, y up, 300 ticks a
 //! second) and runs at the 60 Hz the game's movement was tuned at; the host
 //! converts at the boundary and feeds one [`Jak::step`] per frame.
+pub mod align;
 pub mod anim;
+pub mod attack;
 pub mod board;
 pub mod board_anim;
 mod board_code;
 pub mod collide;
 pub mod control;
+mod foot_code;
 pub mod gun;
 pub mod math;
 pub mod pad;
 pub mod projectile;
 pub mod surface;
-mod target;
+pub mod target;
 
 use std::sync::Arc;
 
 pub use glam;
 use glam::{Quat, Vec3};
 
-pub use anim::{Anim, Anims, Channel, Push};
+pub use anim::{AlignTrack, Anim, Anims, Channel, Push};
+pub use attack::{Attack, Danger};
 pub use board::BoardInfo;
 pub use board_anim::BoardAnim;
 pub use collide::{
@@ -34,12 +38,41 @@ pub use gun::Gun;
 pub use math::{Basis, FRAME_TICKS, METER, SECONDS_PER_FRAME, TICKS_PER_SECOND};
 pub use pad::{Pad, PadInput, button};
 pub use projectile::{ActorWorld, Projectile, ProjectileHit};
+pub use target::{FootInfo, StateHook};
+
+/// What a high jump leaves from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HighJump {
+    Plain,
+    /// Ducking with the stick let go.
+    Duck,
+    /// Straight after landing the roll's flip.
+    Flip,
+    /// Bounced off a dive's landing, standing still or running on.
+    Flop,
+    FlopForward,
+}
+
+/// What a spin in the air came out of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AirFrom {
+    Jump,
+    Flop,
+    Uppercut,
+}
 
 /// What Jak is doing. On-foot states first, board states after.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum State {
     Stance,
     Walk,
+    /// Ducking; `keep_time` carries the time from the duck state before.
+    DuckStance {
+        keep_time: bool,
+    },
+    DuckWalk {
+        keep_time: bool,
+    },
     Jump {
         min: f32,
         max: f32,
@@ -48,8 +81,57 @@ pub enum State {
         min: f32,
         max: f32,
     },
-    Falling,
-    HitGround,
+    HighJump {
+        min: f32,
+        max: f32,
+        kind: HighJump,
+    },
+    /// The crouch before a high jump from ducking or a dive's landing.
+    DuckHighJump {
+        min: f32,
+        max: f32,
+        kind: HighJump,
+    },
+    DuckHighJumpJump {
+        min: f32,
+        max: f32,
+        kind: HighJump,
+    },
+    Falling {
+        uppercut: bool,
+    },
+    HitGround {
+        stuck: bool,
+    },
+    /// The spin kick.
+    Attack,
+    /// The punch.
+    RunningAttack,
+    /// The spin kick in the air.
+    AttackAir {
+        from: AirFrom,
+    },
+    AttackUppercut {
+        min: f32,
+        max: f32,
+    },
+    AttackUppercutJump {
+        min: f32,
+        max: f32,
+    },
+    /// The dive.
+    Flop {
+        forward: bool,
+    },
+    FlopHitGround {
+        stuck: bool,
+    },
+    Roll,
+    /// The flip out of a roll.
+    RollFlip {
+        height: f32,
+        dist: f32,
+    },
     BoardGetOn,
     BoardStance,
     BoardDuckStance,
@@ -81,15 +163,7 @@ pub enum State {
 
 impl State {
     pub fn is_board(&self) -> bool {
-        !matches!(
-            self,
-            State::Stance
-                | State::Walk
-                | State::Jump { .. }
-                | State::DoubleJump { .. }
-                | State::Falling
-                | State::HitGround
-        )
+        self.kind() != board::StateKind::OnFoot
     }
 
     pub(crate) fn kind(&self) -> board::StateKind {
@@ -117,10 +191,24 @@ impl State {
         match self {
             State::Stance => "stance",
             State::Walk => "walk",
+            State::DuckStance { .. } => "duck-stance",
+            State::DuckWalk { .. } => "duck-walk",
             State::Jump { .. } => "jump",
             State::DoubleJump { .. } => "double-jump",
-            State::Falling => "falling",
-            State::HitGround => "hit-ground",
+            State::HighJump { .. } => "high-jump",
+            State::DuckHighJump { .. } => "duck-high-jump",
+            State::DuckHighJumpJump { .. } => "duck-high-jump-jump",
+            State::Falling { .. } => "falling",
+            State::HitGround { .. } => "hit-ground",
+            State::Attack => "attack",
+            State::RunningAttack => "running-attack",
+            State::AttackAir { .. } => "attack-air",
+            State::AttackUppercut { .. } => "attack-uppercut",
+            State::AttackUppercutJump { .. } => "attack-uppercut-jump",
+            State::Flop { .. } => "flop",
+            State::FlopHitGround { .. } => "flop-hit-ground",
+            State::Roll => "roll",
+            State::RollFlip { .. } => "roll-flip",
             State::BoardGetOn => "board-get-on",
             State::BoardStance => "board-stance",
             State::BoardDuckStance => "board-duck-stance",
@@ -189,6 +277,16 @@ pub enum Event {
     },
     /// A shot stopped: where, the surface it struck and the damage it does.
     Impact(ProjectileHit),
+    /// A blow landed: on an actor, or on the world when `actor` is none;
+    /// where, which way and the hit points it takes.
+    Strike {
+        actor: Option<u64>,
+        pos: Vec3,
+        dir: Vec3,
+        damage: f32,
+    },
+    /// The punch's fist met a wall and Jak bounced back.
+    PunchWall,
 }
 
 /// Where a state's code is: the step it resumes at and the locals it keeps
@@ -202,6 +300,9 @@ pub struct Code {
     pub z: f32,
     pub rate: f32,
     pub flag: bool,
+    /// Times the state keeps: when a button went down, when a wall was met.
+    pub t: i64,
+    pub t2: i64,
     /// Reached this frame, without a suspend since.
     pub(crate) arrived: bool,
 }
@@ -245,6 +346,15 @@ pub struct Jak {
     pub anims: Arc<Anims>,
     pub code: Code,
     pub trace: Trace,
+    /// The moves on foot: their timers, windows and the punch's table.
+    pub foot: FootInfo,
+    /// The attack under way, and what it struck.
+    pub attack: Attack,
+    /// The align joint's motion the animation carries.
+    pub align: align::Align,
+    /// Jak's joints in his own frame as last posed (units), from the host
+    /// when his model is there; the blows that strike from a hand use them.
+    pub joints: Vec<Vec3>,
 }
 
 impl Jak {
@@ -256,7 +366,7 @@ impl Jak {
             board: BoardInfo::default(),
             gun: Gun::default(),
             pad: Pad::default(),
-            state: State::Falling,
+            state: State::Falling { uppercut: false },
             state_time: time,
             time,
             camera: Basis::IDENTITY,
@@ -270,6 +380,10 @@ impl Jak {
             anims: Arc::new(Anims::nominal()),
             code: Code::default(),
             trace: Trace::default(),
+            foot: FootInfo::default(),
+            attack: Attack::default(),
+            align: align::Align::default(),
+            joints: Vec::new(),
         }
     }
 
@@ -302,7 +416,7 @@ impl Jak {
         &mut self,
         input: &PadInput,
         world: &mut dyn CollideWorld,
-        actors: Option<&mut dyn ActorWorld>,
+        mut actors: Option<&mut dyn ActorWorld>,
     ) {
         self.time += FRAME_TICKS;
         self.pad.update(input);
@@ -313,6 +427,7 @@ impl Jak {
             self.trace.why = "post";
             self.go(next);
         }
+        self.attack_post(world, actors.as_deref_mut());
         self.track_peak();
         self.gun_frame(world);
         self.step_projectiles_with(world, actors);
@@ -327,7 +442,7 @@ impl Jak {
                 self.go(next);
                 continue;
             }
-            match self.run_code() {
+            match self.run_code(world) {
                 Some(next) => {
                     self.trace.why = "code";
                     self.go(next);
@@ -337,11 +452,11 @@ impl Jak {
         }
     }
 
-    fn run_code(&mut self) -> Option<State> {
+    fn run_code(&mut self, world: &mut dyn CollideWorld) -> Option<State> {
         if self.state.is_board() {
             self.board_code()
         } else {
-            None
+            self.foot_code(world)
         }
     }
 
@@ -366,6 +481,7 @@ impl Jak {
         }
         self.trace.prev = old.name();
         self.trace.changed_at = self.time;
+        self.foot.prev_state_time = self.state_time;
         self.state = next;
         self.state_time = self.time;
         self.code = Code {

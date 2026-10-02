@@ -17,6 +17,8 @@ pub mod button {
 }
 
 const STICK_DEADZONE: f32 = 0.3;
+/// How many frames of presses the buffered checks look back over.
+pub const PRESS_HISTORY: usize = 15;
 
 /// One simulation step's input. Sticks are `[-1, 1]` with +x right and +y up;
 /// `pressed` holds the buttons that went down since the previous step.
@@ -40,6 +42,9 @@ pub struct Pad {
     /// is pushed, 0 inside the dead zone.
     pub stick0_dir: f32,
     pub stick0_speed: f32,
+    /// The presses of the last frames, newest first: a press stays buffered
+    /// this long for the states that accept a recent one.
+    pub history: [u32; PRESS_HISTORY],
 }
 
 /// A stick axis as the pad reports it: 0 to 255, centered on 128, pushed
@@ -60,6 +65,8 @@ impl Pad {
     pub fn update(&mut self, input: &PadInput) {
         self.held = input.held;
         self.pressed = input.pressed;
+        self.history.rotate_right(1);
+        self.history[0] = input.pressed;
         self.leftx = byte_x(input.left[0]);
         self.lefty = byte_y(input.left[1]);
         self.rightx = byte_x(input.right[0]);
@@ -79,6 +86,23 @@ impl Pad {
 
     pub fn pressed(&self, buttons: u32) -> bool {
         self.pressed & buttons != 0
+    }
+
+    /// Pressed this frame or in the buffered frames before it.
+    pub fn recently_pressed(&self, buttons: u32) -> bool {
+        self.history.iter().any(|p| p & buttons != 0)
+    }
+
+    /// Forgets `buttons`, held and pressed, for this frame.
+    pub fn clear(&mut self, buttons: u32) {
+        self.held &= !buttons;
+        self.pressed &= !buttons;
+        self.history[0] &= !buttons;
+    }
+
+    /// The buttons buffered now, newest press first.
+    pub fn buffered(&self) -> u32 {
+        self.history.iter().fold(0, |a, p| a | p)
     }
 
     /// A button's pressure, 0 to 1. Digital pads report full travel.

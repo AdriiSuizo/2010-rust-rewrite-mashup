@@ -132,6 +132,14 @@ impl ActorWorld for Mobs {
         }
         best
     }
+
+    fn actors_touching(&mut self, center: jg::Vec3, radius: f32) -> Vec<u64> {
+        self.boxes
+            .iter()
+            .filter(|(_, lo, hi)| center.clamp(*lo, *hi).distance(center) <= radius)
+            .map(|(key, ..)| *key)
+            .collect()
+    }
 }
 
 enum Collision {
@@ -360,7 +368,7 @@ fn update(
     mut authority: Option<ResMut<net::AuthorityWorld>>,
     mut mode: ResMut<JakMode>,
     mut host: ResMut<Host>,
-    skate: Res<frame::SkateMode>,
+    (skate, interact): (Res<frame::SkateMode>, Option<Res<frame::WorldInteract>>),
     (keys, mouse, mut motion): (
         Res<ButtonInput<KeyCode>>,
         Res<ButtonInput<MouseButton>>,
@@ -437,15 +445,7 @@ fn update(
         let mut jak = Jak::new(to_jak(origin), jak_mode::math::y_angle(facing));
         jak.gun.endless_ammo = true;
         if let Some(model) = assets::jak_model::local_jak() {
-            jak.anims = Arc::new(Anims::from_rows(model.timing.iter().map(|t| {
-                let info = AnimInfo {
-                    frames: t.frames,
-                    speed: t.speed,
-                    artist_base: t.artist_base,
-                    artist_step: t.artist_step,
-                };
-                (t.name.as_str(), info)
-            })));
+            jak.anims = Arc::new(anims_of(model));
         }
         host.camera.yaw = ps.viewangles[1];
         host.camera.pitch = -12.0;
@@ -526,6 +526,24 @@ fn update(
     };
     for event in &events {
         match *event {
+            Event::Strike {
+                actor,
+                pos,
+                dir,
+                damage,
+            } if voxel => {
+                let damage = damage * DAMAGE_TO_MW2;
+                match actor {
+                    Some(key) => {
+                        sim::voxel::push_mob_shot(key, damage, from_jak(pos - dir).to_array())
+                    }
+                    None => sim::voxel::push_shot(
+                        from_jak(pos).to_array(),
+                        dir_from_jak(-dir).normalize_or_zero().to_array(),
+                        damage,
+                    ),
+                }
+            }
             Event::Impact(hit) if voxel => {
                 let damage = hit.damage * DAMAGE_TO_MW2;
                 match hit.actor {
@@ -550,6 +568,13 @@ fn update(
         .on_board()
         .then(|| mode.root.inverse() * body_matrix(jak, lift * 0.5));
     mode.skins = assets::jak_model::local_jak().map(|model| host.animator.pose(model, jak));
+    let joints = host.animator.joints();
+    if let Some(jak) = host.jak.as_mut() {
+        jak.joints = joints;
+    }
+    let Some(jak) = host.jak.as_ref() else {
+        return;
+    };
     mode.shots = jak
         .projectiles
         .iter()
@@ -557,7 +582,8 @@ fn update(
         .collect();
     mode.state = jak.state.name().to_owned();
     if mode.show_debug {
-        mode.debug = readout(jak);
+        let target = interact.as_ref().and_then(|i| i.target.as_ref());
+        mode.debug = readout(jak, target.map(|t| t.label.as_str()));
     }
     mode.speed = jak.velocity().length() / jak_mode::METER;
     mode.ammo = (!jak.gun.endless_ammo).then_some(jak.gun.ammo);
@@ -674,9 +700,10 @@ pub(crate) fn board_mesh(board: Mat4, geom: &mut crate::anim::remote_body::CpuBo
 }
 
 /// What the state machine is doing, for `jak debug`.
-fn readout(jak: &Jak) -> String {
+fn readout(jak: &Jak, interact: Option<&str>) -> String {
     let t = &jak.trace;
-    let ago = |tick: i64| (jak.time - tick) as f32 / jak_mode::TICKS_PER_SECOND as f32;
+    let seconds = |ticks: i64| ticks as f32 / jak_mode::TICKS_PER_SECOND as f32;
+    let ago = |tick: i64| seconds(jak.time - tick);
     let chan = &jak.chan;
     let a = &jak.anims;
     let v = jak.velocity() / jak_mode::METER;
@@ -689,24 +716,81 @@ fn readout(jak: &Jak) -> String {
             "-".to_owned()
         }
     };
+    let names = |bits: u32| {
+        use jak_mode::pad::button;
+        [
+            (button::X, "X"),
+            (button::SQUARE, "[]"),
+            (button::CIRCLE, "O"),
+            (button::TRIANGLE, "/\\"),
+            (button::L1, "L1"),
+            (button::L2, "L2"),
+            (button::R1, "R1"),
+            (button::R2, "R2"),
+        ]
+        .iter()
+        .filter(|(b, _)| bits & b != 0)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(" ")
+    };
+    let attack = &jak.attack;
+    let hit = match attack.danger {
+        Some(d) => format!(
+            "{} #{} dmg {} spheres {} struck {}{}",
+            d.name(),
+            attack.id,
+            d.damage(),
+            attack.live.len(),
+            attack.struck.len(),
+            if attack.struck_world { " +world" } else { "" }
+        ),
+        None => format!("none (last #{})", attack.id),
+    };
+    let window = jak.cancel_window().map_or("-".to_owned(), |(n, left)| {
+        format!("{n} {:.2}s left", seconds(left))
+    });
+    let moves = jak
+        .moves()
+        .iter()
+        .map(|(m, open)| {
+            if *open {
+                (*m).to_owned()
+            } else {
+                format!("({m})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let align = a.align(chan.anim).map_or("none", |_| "on");
     format!(
-        "{} <- {} ({}, {:.2}s ago)  code step {}\n\
-         anim {} frame {:.1}/{} artist {:.1} {:?}  timing {}/{} from files\n\
-         vel {:.1} {:.1} {:.1} m/s  {}  height {:.1} m  peak {:.1} m\n\
-         last jump +{:.1} m/s {:.2}s ago  buttons {:#06x}  L1 {}  L2 {}\n\
-         trick x {:.2} z {:.2}  flip {:.2}  spin {:.0}  flips {}",
+        "{} <- {} ({}, {:.2}s ago, {:.2}s in)  code step {}\n\
+         anim {} frame {:.1}/{} artist {:.1} {:?}  align {}  timing {}/{} from files\n\
+         attack {}\n\
+         moves {}\n\
+         cancel window {}  buffered [{}]  held [{}]\n\
+         vel {:.1} {:.1} {:.1} m/s  {}  height {:.1} m  peak {:.1} m  last jump +{:.1} m/s {:.2}s ago\n\
+         board {}  L1 {}  L2 {}  trick x {:.2} z {:.2}  flip {:.2}  spin {:.0}  flips {}\n\
+         interact {}",
         jak.state.name(),
         t.prev,
         t.why,
         ago(t.changed_at),
+        ago(jak.state_time),
         jak.code.pc,
         chan.anim.name(),
         chan.frame,
         a.max(chan.anim),
         chan.aframe_num(a),
         chan.func,
+        align,
         a.timed,
         jak_mode::anim::NAMES.len(),
+        hit,
+        if moves.is_empty() { "-" } else { &moves },
+        window,
+        names(jak.pad.buffered()),
+        names(jak.pad.held),
         v.x,
         v.y,
         v.z,
@@ -715,7 +799,7 @@ fn readout(jak: &Jak) -> String {
         t.peak / jak_mode::METER,
         t.impulse / jak_mode::METER,
         ago(t.impulse_at),
-        jak.pad.held,
+        if jak.on_board() { "on" } else { "off" },
         latch(b.duck_start_time),
         latch(b.l2_start_time),
         b.trick_x,
@@ -723,5 +807,36 @@ fn readout(jak: &Jak) -> String {
         b.flip_control,
         b.roty_cum.abs() / 65536.0 * 360.0,
         b.flip_count,
+        interact.unwrap_or("-"),
     )
+}
+
+/// The timing and motion of Jak's animations, from the player's files.
+fn anims_of(model: &assets::jak_model::JakAssets) -> Anims {
+    let rows = model.timing.iter().map(|t| {
+        let info = AnimInfo {
+            frames: t.frames,
+            speed: t.speed,
+            artist_base: t.artist_base,
+            artist_step: t.artist_step,
+        };
+        (t.name.as_str(), info)
+    });
+    let mut anims = Anims::from_rows(rows);
+    for t in &model.timing {
+        if let Some(align) = &t.align {
+            let track = jak_mode::AlignTrack {
+                trans: align
+                    .iter()
+                    .map(|k| jg::Vec3::new(k[0], k[1], k[2]))
+                    .collect(),
+                quat: align
+                    .iter()
+                    .map(|k| jg::Quat::from_xyzw(k[3], k[4], k[5], k[6]))
+                    .collect(),
+            };
+            anims = anims.with_align(&t.name, track);
+        }
+    }
+    anims
 }

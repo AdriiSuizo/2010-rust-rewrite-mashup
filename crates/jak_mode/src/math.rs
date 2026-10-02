@@ -108,6 +108,18 @@ pub fn analog_input(value: i32, offset: f32, center: f32, max: f32, out: f32) ->
     }
 }
 
+/// A division as the PS2 does it: by zero gives the largest float, never
+/// infinity, so a zero rate it scales stays zero.
+pub fn ps2_div(a: f32, b: f32) -> f32 {
+    if b != 0.0 {
+        a / b
+    } else if a == 0.0 {
+        0.0
+    } else {
+        a.signum() * f32::MAX
+    }
+}
+
 pub fn normalize(v: Vec3, length: f32) -> Vec3 {
     v.normalize_or_zero() * length
 }

@@ -543,3 +543,381 @@ fn board_kick_trick_played_out_keeps_the_rise() {
     assert_eq!(jak.state, State::BoardFalling);
     assert!(jak.velocity().y > 0.0, "{}", jak.velocity().y);
 }
+
+/// The moves that travel with their animation, given a plain motion: the
+/// punch and the roll straight ahead, the uppercut straight up, the roll's
+/// flip in an arc. With the player's files the real motion replaces it.
+fn moving_anims() -> std::sync::Arc<Anims> {
+    use jak_mode::glam::Quat;
+    let track = |f: &dyn Fn(f32) -> Vec3| AlignTrack {
+        trans: (0..21).map(|i| f(i as f32 / 20.0)).collect(),
+        quat: vec![Quat::IDENTITY; 21],
+    };
+    let anims = Anims::nominal()
+        .with_align(
+            "jakb-attack-punch",
+            track(&|t| Vec3::new(0.0, 0.0, 9.0 * M * t)),
+        )
+        .with_align(
+            "jakb-duck-roll",
+            track(&|t| Vec3::new(0.0, 0.0, 6.0 * M * t)),
+        )
+        .with_align(
+            "jakb-attack-uppercut",
+            track(&|t| Vec3::new(0.0, 5.0 * M * t, 0.0)),
+        )
+        .with_align(
+            "jakb-roll-flip",
+            track(&|t| {
+                Vec3::new(
+                    0.0,
+                    3.2969 * M * (std::f32::consts::PI * t).sin(),
+                    12.5 * M * t,
+                )
+            }),
+        );
+    std::sync::Arc::new(anims)
+}
+
+fn mover(world: &mut TriangleGrid) -> Jak {
+    let mut jak = standing(world);
+    jak.anims = moving_anims();
+    jak
+}
+
+/// Frames until `state` matches, up to `limit`, holding `input`.
+fn until(
+    jak: &mut Jak,
+    world: &mut TriangleGrid,
+    input: PadInput,
+    limit: usize,
+    f: impl Fn(&State) -> bool,
+) -> usize {
+    for frame in 0..limit {
+        if f(&jak.state) {
+            return frame;
+        }
+        jak.step(&input, world, None);
+    }
+    assert!(f(&jak.state), "still {:?}", jak.state);
+    limit
+}
+
+/// Square punches; X while the punch still carries Jak forward turns it
+/// into the uppercut, which then rises on its own animation.
+#[test]
+fn punch_then_x_is_uppercut() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    jak.step(&press(button::SQUARE), &mut world, None);
+    assert_eq!(jak.state, State::RunningAttack);
+    assert_eq!(jak.attack.danger, Some(Danger::Punch));
+    run(&mut jak, &mut world, hold(button::SQUARE), 8);
+    assert!(
+        jak.control.ctrl_xz_vel > 4096.0,
+        "{}",
+        jak.control.ctrl_xz_vel
+    );
+    jak.step(&press(button::X), &mut world, None);
+    assert!(
+        matches!(jak.state, State::AttackUppercut { .. }),
+        "{:?}",
+        jak.state
+    );
+    assert_eq!(jak.trace.prev, "running-attack");
+    until(&mut jak, &mut world, idle(), 120, |s| {
+        matches!(s, State::AttackUppercutJump { .. })
+    });
+    let base = jak.trans().y;
+    let mut top = base;
+    for _ in 0..90 {
+        jak.step(&idle(), &mut world, None);
+        top = top.max(jak.trans().y);
+    }
+    assert!(top - base > 2.0 * M, "{}", (top - base) / M);
+}
+
+/// The uppercut's animation past artist frame 12, circle spins in the air.
+#[test]
+fn uppercut_then_circle_is_air_spin() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    jak.step(&press(button::SQUARE), &mut world, None);
+    run(&mut jak, &mut world, hold(button::SQUARE), 8);
+    jak.step(&press(button::X), &mut world, None);
+    until(&mut jak, &mut world, idle(), 120, |s| {
+        matches!(s, State::AttackUppercutJump { .. })
+    });
+    while jak.chan.aframe_num(&jak.anims) < 12.0 {
+        jak.step(&idle(), &mut world, None);
+        assert!(matches!(jak.state, State::AttackUppercutJump { .. }));
+    }
+    jak.step(&press(button::CIRCLE), &mut world, None);
+    assert_eq!(
+        jak.state,
+        State::AttackAir {
+            from: AirFrom::Uppercut
+        }
+    );
+    assert_eq!(jak.attack.danger, Some(Danger::SpinAir));
+}
+
+/// Circle in the air spins; landing ends it.
+#[test]
+fn jump_then_circle_is_air_spin() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.step(&press(button::X), &mut world, None);
+    run(&mut jak, &mut world, hold(button::X), 10);
+    jak.step(&press(button::CIRCLE), &mut world, None);
+    assert_eq!(
+        jak.state,
+        State::AttackAir {
+            from: AirFrom::Jump
+        }
+    );
+    until(&mut jak, &mut world, idle(), 240, |s| {
+        matches!(s, State::HitGround { .. } | State::Stance)
+    });
+}
+
+/// Square in the air, near the top of the jump, dives: down at the dive's
+/// speed, dangerous on the way, and a landing of its own.
+#[test]
+fn jump_then_square_is_dive() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.step(&press(button::X), &mut world, None);
+    while jak.velocity().y >= 26624.0 {
+        jak.step(&hold(button::X), &mut world, None);
+    }
+    jak.step(&press(button::SQUARE), &mut world, None);
+    assert!(matches!(jak.state, State::Flop { .. }), "{:?}", jak.state);
+    until(&mut jak, &mut world, idle(), 240, |s| {
+        matches!(s, State::FlopHitGround { .. })
+    });
+}
+
+/// X while still rising slowly in a jump jumps again.
+#[test]
+fn jump_then_x_is_double_jump() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.step(&press(button::X), &mut world, None);
+    while jak.velocity().y >= 12288.0 {
+        jak.step(&idle(), &mut world, None);
+    }
+    jak.step(&press(button::X), &mut world, None);
+    assert!(
+        matches!(jak.state, State::DoubleJump { .. }),
+        "{:?}",
+        jak.state
+    );
+}
+
+/// Ducking with the stick let go, X crouches and leaps 7 m.
+#[test]
+fn duck_then_x_is_high_jump() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.step(&hold(button::L1), &mut world, None);
+    assert!(
+        matches!(jak.state, State::DuckStance { .. }),
+        "{:?}",
+        jak.state
+    );
+    run(&mut jak, &mut world, hold(button::L1), 5);
+    let base = jak.trans().y;
+    jak.step(&press(button::X | button::L1), &mut world, None);
+    assert!(
+        matches!(
+            jak.state,
+            State::DuckHighJump {
+                kind: HighJump::Duck,
+                ..
+            }
+        ),
+        "{:?}",
+        jak.state
+    );
+    until(&mut jak, &mut world, idle(), 120, |s| {
+        matches!(s, State::DuckHighJumpJump { .. })
+    });
+    let mut top = base;
+    for _ in 0..240 {
+        jak.step(&idle(), &mut world, None);
+        top = top.max(jak.trans().y);
+    }
+    assert!(
+        ((top - base) / M - 7.0).abs() < 0.05,
+        "{}",
+        (top - base) / M
+    );
+}
+
+fn running(jak: &mut Jak, world: &mut TriangleGrid) {
+    run(jak, world, forward(), 30);
+    assert_eq!(jak.state, State::Walk);
+}
+
+/// L1 while running rolls; an X pressed during the roll is kept and turns
+/// its end into the flip.
+#[test]
+fn roll_then_x_is_roll_flip() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    running(&mut jak, &mut world);
+    jak.step(
+        &PadInput {
+            pressed: button::L1,
+            held: button::L1,
+            ..forward()
+        },
+        &mut world,
+        None,
+    );
+    assert_eq!(jak.state, State::Roll);
+    run(&mut jak, &mut world, forward(), 3);
+    jak.step(
+        &PadInput {
+            pressed: button::X,
+            held: button::X,
+            ..forward()
+        },
+        &mut world,
+        None,
+    );
+    assert_eq!(jak.state, State::Roll);
+    until(&mut jak, &mut world, forward(), 120, |s| {
+        matches!(s, State::RollFlip { .. })
+    });
+    assert_eq!(jak.trace.why, "code");
+    let start = jak.trans();
+    until(&mut jak, &mut world, forward(), 240, |s| {
+        !matches!(s, State::RollFlip { .. })
+    });
+    assert!((jak.trans() - start).length() > 4.0 * M);
+}
+
+/// Without X the roll ends ducking; X in the tenth of a second after still
+/// flips.
+#[test]
+fn x_just_after_a_roll_still_flips() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    running(&mut jak, &mut world);
+    jak.step(
+        &PadInput {
+            pressed: button::L1,
+            held: button::L1,
+            ..forward()
+        },
+        &mut world,
+        None,
+    );
+    until(&mut jak, &mut world, forward(), 120, |s| *s != State::Roll);
+    assert!(
+        matches!(
+            jak.state,
+            State::DuckStance { .. } | State::DuckWalk { .. } | State::Walk
+        ),
+        "{:?}",
+        jak.state
+    );
+    jak.step(
+        &PadInput {
+            pressed: button::X,
+            held: button::X,
+            ..forward()
+        },
+        &mut world,
+        None,
+    );
+    assert!(
+        matches!(jak.state, State::RollFlip { .. }),
+        "{:?}",
+        jak.state
+    );
+}
+
+/// A press a few frames before it can act still acts: X pressed in the
+/// double jump, which takes no third jump, jumps again on landing.
+#[test]
+fn a_press_just_before_landing_is_kept() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.step(&press(button::X), &mut world, None);
+    while jak.velocity().y >= 12288.0 {
+        jak.step(&idle(), &mut world, None);
+    }
+    jak.step(&press(button::X), &mut world, None);
+    assert!(matches!(jak.state, State::DoubleJump { .. }));
+    while jak.trans().y > 0.4 * M || jak.velocity().y > 0.0 {
+        jak.step(&idle(), &mut world, None);
+    }
+    jak.step(&press(button::X), &mut world, None);
+    assert!(matches!(jak.state, State::DoubleJump { .. }));
+    until(&mut jak, &mut world, idle(), 14, |s| {
+        matches!(s, State::Jump { .. })
+    });
+    assert_eq!(jak.trace.prev, "hit-ground");
+}
+
+/// Mid-spin, X jumps out of it.
+#[test]
+fn spin_then_x_jumps() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    jak.step(&press(button::CIRCLE), &mut world, None);
+    assert_eq!(jak.state, State::Attack);
+    run(&mut jak, &mut world, idle(), 5);
+    jak.step(&press(button::X), &mut world, None);
+    assert!(matches!(jak.state, State::Jump { .. }), "{:?}", jak.state);
+}
+
+/// An actor in reach of the spin: struck once for the spin's 3 hit points,
+/// however many frames the spin touches it.
+struct Dummy {
+    at: Vec3,
+}
+
+impl ActorWorld for Dummy {
+    fn actor_hit(&mut self, _: Vec3, _: Vec3, _: f32) -> Option<(u64, f32, Vec3)> {
+        None
+    }
+
+    fn actors_touching(&mut self, center: Vec3, radius: f32) -> Vec<u64> {
+        if (center - self.at).length() < radius + 0.5 * M {
+            vec![7]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[test]
+fn spin_strikes_each_target_once() {
+    let mut world = ground(None);
+    let mut jak = standing(&mut world);
+    let mut dummy = Dummy {
+        at: jak.trans() + Vec3::new(0.0, 1.5 * M, 2.0 * M),
+    };
+    jak.take_events();
+    jak.step(&press(button::CIRCLE), &mut world, Some(&mut dummy));
+    for _ in 0..60 {
+        jak.step(&idle(), &mut world, Some(&mut dummy));
+    }
+    let strikes: Vec<_> = jak
+        .take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Strike {
+                actor: Some(a),
+                damage,
+                ..
+            } => Some((a, damage)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strikes, vec![(7, 3.0)]);
+}

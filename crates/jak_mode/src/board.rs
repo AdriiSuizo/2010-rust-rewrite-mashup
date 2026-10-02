@@ -247,6 +247,20 @@ impl Jak {
                 }
             }
             Hook::GunWalk => self.gun_walk_hook(cur),
+            Hook::ClampSpeed | Hook::Duck => {
+                cur.transv_max = cur.transv_max.min(mods.transv_max);
+                cur.target_speed = cur.target_speed.min(mods.target_speed);
+                if cur.hook == Hook::Duck {
+                    cur.target_speed = 16384.0;
+                }
+            }
+            Hook::SlideSeek => {
+                if self.control.ground_pat.event == crate::collide::PatEvent::Slide {
+                    cur.seek0 = 0.05;
+                    cur.seek90 = 0.05;
+                    cur.seek180 = 0.05;
+                }
+            }
         }
     }
 

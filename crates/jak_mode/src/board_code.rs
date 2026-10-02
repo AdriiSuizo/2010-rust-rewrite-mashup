@@ -48,7 +48,7 @@ const HOLDS: [(Anim, Anim, Anim, Trick); 4] = [
 ];
 
 impl Jak {
-    fn ja_push(&mut self, ticks: i64) {
+    pub(crate) fn ja_push(&mut self, ticks: i64) {
         self.push = crate::Push {
             tick: self.time,
             ticks,
@@ -56,19 +56,19 @@ impl Jak {
     }
 
     /// Plays `anim` from `frame` toward `func`'s target, without advancing.
-    fn ja_set(&mut self, anim: Anim, func: NumFunc, frame: f32) {
+    pub(crate) fn ja_set(&mut self, anim: Anim, func: NumFunc, frame: f32) {
         self.chan.set(anim, func, frame);
     }
 
-    fn ja_play(&mut self, anim: Anim, rate: f32) {
+    pub(crate) fn ja_play(&mut self, anim: Anim, rate: f32) {
         self.ja_set(anim, NumFunc::seek(rate), 0.0);
     }
 
-    fn aframe(&self, anim: Anim, artist: f32) -> f32 {
+    pub(crate) fn aframe(&self, anim: Anim, artist: f32) -> f32 {
         self.anims.aframe(anim, artist)
     }
 
-    fn goto(&mut self, pc: u16) {
+    pub(crate) fn goto(&mut self, pc: u16) {
         self.code.pc = pc;
         self.code.arrived = true;
     }
@@ -95,7 +95,7 @@ impl Jak {
     }
 
     /// A loop that runs until the state changes: one step a frame.
-    fn ja_loop(&mut self) -> Option<State> {
+    pub(crate) fn ja_loop(&mut self) -> Option<State> {
         if !self.code.arrived {
             self.chan
                 .eval_with(&self.anims, NumFunc::Loop { rate: 1.0 });
@@ -711,7 +711,7 @@ impl Jak {
                     } else if self.hit_ground_or_stuck()
                         && self.chan.aframe_num(&self.anims) >= 14.0
                     {
-                        return Some(State::Falling);
+                        return Some(State::Falling { uppercut: false });
                     } else {
                         return None;
                     }
@@ -720,7 +720,7 @@ impl Jak {
                     if self.ja_while() {
                         self.goto(4);
                     } else if self.hit_ground_or_stuck() {
-                        return Some(State::Falling);
+                        return Some(State::Falling { uppercut: false });
                     } else {
                         return None;
                     }
@@ -728,9 +728,9 @@ impl Jak {
                 _ => {
                     self.board.anim.duck_vel = 15.0;
                     return Some(if self.control.on_surface() {
-                        State::HitGround
+                        State::HitGround { stuck: false }
                     } else {
-                        State::Falling
+                        State::Falling { uppercut: false }
                     });
                 }
             }

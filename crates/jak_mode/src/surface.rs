@@ -8,13 +8,17 @@ pub mod flag {
     pub const XZ_LOCAL: u32 = 1 << 1;
     pub const NO_TURN_AROUND: u32 = 1 << 3;
     pub const TURN_TO_PAD: u32 = 1 << 4;
+    pub const SMOOTH_COLLISION: u32 = 1 << 2;
     pub const TURN_TO_VEL: u32 = 1 << 5;
     pub const NO_JUMP: u32 = 1 << 6;
     pub const NO_ATTACK: u32 = 1 << 7;
+    pub const NO_HANDS: u32 = 1 << 8;
     pub const NO_FEET: u32 = 1 << 9;
     pub const CHECK_EDGE: u32 = 1 << 10;
     pub const AIR: u32 = 1 << 11;
+    pub const ATTACK: u32 = 1 << 12;
     pub const DUCK: u32 = 1 << 13;
+    pub const MOMENTUM: u32 = 1 << 14;
     pub const TURN_WHEN_CENTERED: u32 = 1 << 15;
     pub const TURN_TO_ALT: u32 = 1 << 16;
     pub const SPIN: u32 = 1 << 17;
@@ -32,6 +36,12 @@ pub enum Name {
     Spin,
     Stone,
     Edge,
+    HighJump,
+    Attack,
+    Roll,
+    RollFlip,
+    Flop,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -40,6 +50,7 @@ pub enum Mode {
     Ground,
     Air,
     Ride,
+    Attack,
 }
 
 /// Which rewrite runs after the multiply, and so which of Jak's state the
@@ -54,6 +65,12 @@ pub enum Hook {
     BoardWallKick,
     BoardRide,
     GunWalk,
+    /// Speed no faster than the mode's own.
+    ClampSpeed,
+    /// Ducking: speed clamped, and a slow crawl.
+    Duck,
+    /// On sliding ground the seeks drop to a twentieth.
+    SlideSeek,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -576,5 +593,518 @@ pub mod board {
         mode: Mode::Air,
         flags: flag::CHECK_EDGE | flag::AIR,
         ..UNIT_REST
+    };
+}
+
+/// Jak's moves on foot.
+pub mod foot {
+    use super::{Hook, Mode, Name, Surface, ZERO, flag};
+
+    pub const HIGH_JUMP: Surface = Surface {
+        name: Name::HighJump,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 65536.0,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 26624.0,
+        target_speed: 26624.0,
+        seek0: 0.9,
+        seek90: 0.9,
+        seek180: 0.9,
+        fric: 0.3,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR,
+        ..ZERO
+    };
+
+    pub const FORWARD_HIGH_JUMP: Surface = Surface {
+        name: Name::HighJump,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 65536.0,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 45056.0,
+        target_speed: 45056.0,
+        seek0: 0.9,
+        seek90: 0.9,
+        seek180: 0.9,
+        fric: 0.3,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR,
+        ..ZERO
+    };
+
+    pub const FLIP_JUMP: Surface = Surface {
+        name: Name::HighJump,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 65536.0,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 80281.6,
+        target_speed: 51200.0,
+        seek0: 0.9,
+        seek90: 0.9,
+        seek180: 0.9,
+        fric: 0.3,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR,
+        ..ZERO
+    };
+
+    pub const FORWARD_JUMP: Surface = Surface {
+        name: Name::Jump,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 18204.445,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 65536.0,
+        target_speed: 65536.0,
+        seek0: 0.3,
+        seek90: 0.3,
+        seek180: 0.3,
+        fric: 0.05,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR,
+        ..ZERO
+    };
+
+    pub const ROLL: Surface = Surface {
+        name: Name::Roll,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 5461.3335,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 91750.4,
+        target_speed: 11468.8,
+        seek0: 1.0,
+        seek90: 1.0,
+        seek180: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 0.25,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Attack,
+        flags: flag::NO_TURN_AROUND | flag::ATTACK,
+        ..ZERO
+    };
+
+    pub const ROLL_FLIP: Surface = Surface {
+        name: Name::RollFlip,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 91750.4,
+        target_speed: 103219.195,
+        seek90: 0.5,
+        seek180: 0.15,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 0.25,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Attack,
+        flags: flag::NO_TURN_AROUND | flag::CHECK_EDGE | flag::AIR | flag::ATTACK,
+        ..ZERO
+    };
+
+    pub const FLOP: Surface = Surface {
+        name: Name::Flop,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 40960.0,
+        target_speed: 40960.0,
+        seek0: 1.0,
+        seek90: 0.3,
+        seek180: 1.5,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 0.25,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Attack,
+        flags: flag::AIR | flag::ATTACK,
+        ..ZERO
+    };
+
+    pub const DUCK: Surface = Surface {
+        name: Name::Duck,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 524288.0,
+        turnvvf: 30.0,
+        tiltv: 65536.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 16384.0,
+        target_speed: 16384.0,
+        seek0: 1.0,
+        seek90: 1.0,
+        seek180: 1.0,
+        fric: 1.0,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Ground,
+        flags: flag::DUCK,
+        hook: Hook::Duck,
+        ..ZERO
+    };
+
+    pub const ATTACK: Surface = Surface {
+        name: Name::Attack,
+        tiltv: 65536.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 40960.0,
+        target_speed: 40960.0,
+        seek0: 1.0,
+        seek90: 1.0,
+        seek180: 1.0,
+        fric: 1.0,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Attack,
+        flags: flag::ATTACK | flag::SPIN,
+        hook: Hook::SlideSeek,
+        ..ZERO
+    };
+
+    pub const RUN_ATTACK: Surface = Surface {
+        name: Name::Other,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 91750.4,
+        target_speed: 122880.0,
+        seek90: 0.5,
+        seek180: 0.15,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 0.25,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Attack,
+        flags: flag::NO_TURN_AROUND | flag::TURN_TO_PAD | flag::ATTACK,
+        ..ZERO
+    };
+
+    pub const JUMP_ATTACK: Surface = Surface {
+        name: Name::Attack,
+        turnvv: 18204.445,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 24576.0,
+        target_speed: 24576.0,
+        seek0: 0.9,
+        seek90: 0.9,
+        seek180: 0.9,
+        fric: 0.2,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR | flag::ATTACK | flag::SPIN,
+        hook: Hook::SlideSeek,
+        ..ZERO
+    };
+
+    pub const UPPERCUT_JUMP: Surface = Surface {
+        name: Name::Attack,
+        turnvv: 18204.445,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 32768.0,
+        target_speed: 32768.0,
+        seek0: 0.3,
+        seek90: 0.3,
+        seek180: 0.3,
+        fric: 0.2,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR | flag::ATTACK | flag::SPIN,
+        hook: Hook::ClampSpeed,
+        ..ZERO
+    };
+
+    pub const LIGHTJAK_SWOOP: Surface = Surface {
+        name: Name::Other,
+        turnv: 32768.0,
+        turnvf: 90.0,
+        turnvv: 18204.445,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 32768.0,
+        target_speed: 32768.0,
+        seek0: 0.3,
+        seek90: 0.3,
+        seek180: 0.3,
+        fric: 0.2,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR,
+        ..ZERO
+    };
+
+    pub const SMACK_JUMP: Surface = Surface {
+        name: Name::Jump,
+        turnv: 131072.0,
+        turnvf: 30.0,
+        turnvv: 18204.445,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 40960.0,
+        target_speed: 40960.0,
+        seek0: 0.3,
+        seek90: 0.3,
+        seek180: 0.3,
+        fric: 0.05,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::CHECK_EDGE | flag::AIR,
+        ..ZERO
+    };
+
+    pub const WALK_NO_TURN: Surface = Surface {
+        name: Name::Run,
+        tiltv: 65536.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 40960.0,
+        target_speed: 40960.0,
+        seek0: 1.0,
+        seek90: 1.0,
+        seek180: 1.0,
+        fric: 1.0,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 1.0,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Ground,
+        ..ZERO
+    };
+
+    /// The landing from a dive: slow to turn, its speed clamped.
+    pub const FLOP_LAND: Surface = Surface {
+        name: Name::Flop,
+        turnv: 9102.223,
+        turnvf: 30.0,
+        turnvv: 9102.223,
+        turnvvf: 30.0,
+        tiltv: 32768.0,
+        tiltvf: 150.0,
+        tiltvv: 262144.0,
+        tiltvvf: 15.0,
+        transv_max: 40960.0,
+        target_speed: 40960.0,
+        seek0: 0.3,
+        seek90: 0.1,
+        seek180: 0.15,
+        fric: 0.2,
+        nonlin_fric_dist: 1.0,
+        slip_factor: 1.0,
+        slide_factor: 1.0,
+        slope_up_factor: 0.25,
+        slope_down_factor: 1.0,
+        slope_slip_angle: 1.0,
+        impact_fric: 1.0,
+        bend_factor: 1.0,
+        bend_speed: 1.0,
+        alignv: 1.0,
+        slope_up_traction: 1.0,
+        align_speed: 1.0,
+        mode: Mode::Air,
+        flags: flag::AIR,
+        hook: Hook::ClampSpeed,
+        ..ZERO
+    };
+
+    /// The spin's wind-down.
+    pub const ATTACK_END: Surface = ATTACK;
+
+    /// The uppercut's crouch before it leaves the ground.
+    pub const UPPERCUT: Surface = Surface {
+        flags: flag::ATTACK,
+        ..super::TURN_AROUND
     };
 }

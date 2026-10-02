@@ -881,7 +881,7 @@ pub(crate) fn update_jak_overlay(
                 String::new()
             };
             format!(
-                "JAK | {} | {:.1} m/s | Blaster ammo {ammo}\nWASD/stick move  Space/A jump  F/RMB/RT board  LMB/RB fire, on the board flip  Ctrl/LB duck, charge jump  Ctrl or Shift/LT + direction trick, Alt for part way  E/B zap  mouse/right stick camera | K: return to MW2{debug}",
+                "JAK | {} | {:.1} m/s | Blaster ammo {ammo}\nWASD/stick move  Space/A jump  C/X punch  E/B spin, on the board zap  Ctrl/LB duck, roll, charge jump  F/RMB/RT board  LMB/RB fire, on the board flip  Ctrl or Shift/LT + direction trick, Alt for part way  mouse/right stick camera | K: return to MW2{debug}",
                 mode.state, mode.speed
             )
         };

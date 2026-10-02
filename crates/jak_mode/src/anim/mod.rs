@@ -9,6 +9,9 @@
 //! [`NOMINAL`].
 mod table;
 
+use std::sync::Arc;
+
+use glam::{Quat, Vec3};
 pub use table::*;
 
 /// One animation's timing.
@@ -29,10 +32,38 @@ pub const NOMINAL: AnimInfo = AnimInfo {
     artist_step: 1.0,
 };
 
-/// The timing of every animation in [`NAMES`].
+/// Where an animation carries Jak: its align joint at each frame, as an
+/// offset from where it started (units) and a turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlignTrack {
+    pub trans: Vec<Vec3>,
+    pub quat: Vec<Quat>,
+}
+
+impl AlignTrack {
+    /// At a frame between two, as the joint is evaluated.
+    pub fn sample(&self, frame: f32) -> (Vec3, Quat) {
+        let n = self.trans.len().min(self.quat.len());
+        if n == 0 {
+            return (Vec3::ZERO, Quat::IDENTITY);
+        }
+        let f = frame.clamp(0.0, (n - 1) as f32);
+        let a = f.floor() as usize;
+        let b = (a + 1).min(n - 1);
+        let t = f - a as f32;
+        (
+            self.trans[a].lerp(self.trans[b], t),
+            self.quat[a].slerp(self.quat[b], t).normalize(),
+        )
+    }
+}
+
+/// The timing of every animation in [`NAMES`], and the motion of those the
+/// player's files carry it for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Anims {
     infos: Vec<AnimInfo>,
+    aligns: Vec<Option<Arc<AlignTrack>>>,
     /// How many came from the player's files.
     pub timed: usize,
 }
@@ -47,6 +78,7 @@ impl Anims {
     pub fn nominal() -> Self {
         Self {
             infos: vec![NOMINAL; NAMES.len()],
+            aligns: vec![None; NAMES.len()],
             timed: 0,
         }
     }
@@ -65,6 +97,23 @@ impl Anims {
             }
         }
         anims
+    }
+
+    /// Adds the motion of the animation called `name`.
+    pub fn with_align(mut self, name: &str, track: AlignTrack) -> Self {
+        if let Some(anim) = Anim::by_name(name) {
+            self.aligns[usize::from(anim.0)] = Some(Arc::new(track));
+        }
+        self
+    }
+
+    pub fn align(&self, anim: Anim) -> Option<&AlignTrack> {
+        self.aligns.get(usize::from(anim.0))?.as_deref()
+    }
+
+    /// How many animations carry their motion.
+    pub fn aligned(&self) -> usize {
+        self.aligns.iter().filter(|a| a.is_some()).count()
     }
 
     pub fn info(&self, anim: Anim) -> AnimInfo {

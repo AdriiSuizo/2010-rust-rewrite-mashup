@@ -55,6 +55,11 @@ struct Contact {
 /// Creatures a shot can hit, from the host: the earliest along the move.
 pub trait ActorWorld {
     fn actor_hit(&mut self, start: Vec3, motion: Vec3, radius: f32) -> Option<(u64, f32, Vec3)>;
+
+    /// Every actor a sphere touches, for Jak's blows.
+    fn actors_touching(&mut self, _center: Vec3, _radius: f32) -> Vec<u64> {
+        Vec::new()
+    }
 }
 
 impl Projectile {

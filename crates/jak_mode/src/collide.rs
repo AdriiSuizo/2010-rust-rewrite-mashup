@@ -38,6 +38,7 @@ pub enum PatEvent {
     #[default]
     None,
     Rail,
+    Slide,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

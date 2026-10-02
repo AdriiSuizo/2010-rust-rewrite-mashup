@@ -2,6 +2,7 @@ mod artifact_cache;
 mod asset_graph;
 pub mod bot_model;
 mod glb;
+pub mod jak_art_group;
 pub mod jak_model;
 pub mod minecraft_map;
 pub mod minecraft_setup;

@@ -195,6 +195,13 @@ pub struct Control {
     pub jump_start: Vec3,
 
     pub low_coverage: LowCoverage,
+    /// How high above Jak's origin each body sphere sits: standing, or all
+    /// at the bottom while ducking.
+    pub sphere_heights: [f32; 3],
+    /// The ground speed an animation's own motion last asked for, and how
+    /// much of it the move kept.
+    pub align_xz_vel: Vec3,
+    pub zx_vel_frac: f32,
     trans_log: Vec<(i64, Vec3)>,
     trans_log_idx: usize,
 }
@@ -292,6 +299,9 @@ impl Control {
             jump_height_max: 0.0,
             jump_start: trans,
             low_coverage: LowCoverage::default(),
+            sphere_heights: SPHERE_HEIGHTS,
+            align_xz_vel: Vec3::ZERO,
+            zx_vel_frac: 0.0,
             trans_log: vec![(i64::MIN / 2, trans); 128],
             trans_log_idx: 0,
         }
@@ -310,7 +320,7 @@ impl Control {
     }
 
     pub fn sphere_center(&self, i: usize) -> Vec3 {
-        self.trans + Vec3::new(0.0, SPHERE_HEIGHTS[i], 0.0)
+        self.trans + Vec3::new(0.0, self.sphere_heights[i], 0.0)
     }
 
     pub fn y_angle(&self) -> f32 {
@@ -479,7 +489,7 @@ impl Jak {
         let target_dir = xz_normalize(target_dir, 1.0);
         let heading = target_dir.z;
         let mut rate = if xz_length(v) >= xz_length(target) {
-            c.current.fric * (xz_length(v) / c.current.nonlin_fric_dist).max(1.0)
+            c.current.fric * ps2_div(xz_length(v), c.current.nonlin_fric_dist).max(1.0)
         } else if heading >= 0.0 {
             heading * c.current.seek0 + (1.0 - heading) * c.current.seek90
         } else {
@@ -734,6 +744,12 @@ impl Jak {
         {
             c.btransv = before;
         }
+        let along = c.align_xz_vel.length();
+        c.zx_vel_frac = if along == 0.0 {
+            0.0
+        } else {
+            (c.transv.dot(c.align_xz_vel / along) / along).max(0.0)
+        };
     }
 
     /// One sweep of the remaining fraction of the move: the earliest contact

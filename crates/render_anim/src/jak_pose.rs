@@ -80,6 +80,8 @@ pub(crate) struct Animator {
     from: Option<(Vec<Trs>, i64, f32)>,
     last: Vec<Trs>,
     push: Push,
+    /// Each joint's position in Jak's own frame, game units, as last posed.
+    joints: Vec<jak_mode::glam::Vec3>,
 }
 
 impl Animator {
@@ -89,7 +91,13 @@ impl Animator {
             from: None,
             last: Vec::new(),
             push: Push::default(),
+            joints: Vec::new(),
         }
+    }
+
+    /// Jak's joints as last posed, in his own frame (game units).
+    pub(crate) fn joints(&self) -> Vec<jak_mode::glam::Vec3> {
+        self.joints.clone()
     }
 
     /// Skins for Jak, his board and his gun this frame, in the body frame.
@@ -112,7 +120,7 @@ impl Animator {
         }
         if jak.push != self.push {
             self.push = jak.push;
-            if jak.state.is_board() && !self.last.is_empty() {
+            if !self.last.is_empty() {
                 let seconds = jak.push.ticks as f32 / TICKS_PER_SECOND as f32;
                 self.from = Some((self.last.clone(), jak.push.tick, seconds));
             }
@@ -137,6 +145,12 @@ impl Animator {
 
         let frame = body_frame();
         let globals = body.globals(&pose);
+        self.joints = globals
+            .iter()
+            .map(|m| {
+                jak_mode::glam::Vec3::from_array(m.w_axis.truncate().to_array()) * jak_mode::METER
+            })
+            .collect();
         let attached = |rig: &Option<Rig>, joint: &str, clip: &str, shown: bool| {
             let rig = rig.as_ref().filter(|_| shown)?;
             let at = body.joint(joint)?;
@@ -171,7 +185,7 @@ fn program_for(jak: &Jak) -> (Program, i64) {
     let gun = jak.gun.out;
     let since = jak.state_time;
     match jak.state {
-        State::Stance => {
+        State::Stance if gun => {
             let fire = jak.time - jak.gun.fire_time;
             if gun && fire >= 0 && fire < jak_mode::math::seconds(0.3) {
                 return (
@@ -185,42 +199,16 @@ fn program_for(jak: &Jak) -> (Program, i64) {
                     jak.gun.fire_time,
                 );
             }
-            let clip = if gun {
-                "jakb-gun-stance-yellow"
-            } else {
-                "jakb-stance-loop"
-            };
-            (clips(vec![looped(clip)], 0.2), since)
+            (clips(vec![looped("jakb-gun-stance-yellow")], 0.2), since)
         }
-        State::Walk => {
+        State::Walk if gun => {
             let speed = jak_mode::math::xz_length(jak.velocity()) / jak_mode::METER;
-            let clip = match (gun, speed > RUN_SPEED) {
-                (false, false) => "jakb-walk",
-                (false, true) => "jakb-run",
-                (true, false) => "jakb-gun-front-walk",
-                (true, true) => "jakb-gun-front-run",
+            let clip = if speed > RUN_SPEED {
+                "jakb-gun-front-run"
+            } else {
+                "jakb-gun-front-walk"
             };
             (clips(vec![looped(clip)], 0.2), since)
-        }
-        State::Jump { .. } | State::DoubleJump { .. } => {
-            let first = if gun {
-                "jakb-gun-front-jump"
-            } else {
-                "jakb-jump"
-            };
-            (
-                clips(vec![once(first), looped("jakb-jump-loop")], 0.05),
-                since,
-            )
-        }
-        State::Falling => (clips(vec![looped("jakb-jump-loop")], 0.2), since),
-        State::HitGround => {
-            let clip = if gun {
-                "jakb-gun-front-jump-land"
-            } else {
-                "jakb-jump-land"
-            };
-            (clips(vec![once(clip)], 0.05), since)
         }
         _ => (Program::Channel, 0),
     }
@@ -235,7 +223,11 @@ fn channel(rig: &Rig, jak: &Jak) -> Vec<Trs> {
     }
     let name = chan.anim.name();
     let Some(clip) = rig.clips.get(name) else {
-        return stance(rig, jak);
+        return if jak.state.is_board() {
+            stance(rig, jak)
+        } else {
+            sampled(rig, "jakb-stance-loop", 0.0)
+        };
     };
     let last = clip.frames.saturating_sub(1).max(1) as f32;
     sampled(
