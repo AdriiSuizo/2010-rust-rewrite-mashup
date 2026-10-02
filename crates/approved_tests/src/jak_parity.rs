@@ -393,3 +393,153 @@ fn board_glances_off_a_wall() {
     }
     assert!(glanced);
 }
+
+fn stick(held: u32, pressed: u32, x: f32, z: f32) -> PadInput {
+    PadInput {
+        held: held | pressed,
+        pressed,
+        left: [x, z],
+        ..Default::default()
+    }
+}
+
+/// A held board jump, until Jak rises past 1.2 m: high enough for a trick.
+fn rising(jak: &mut Jak, world: &mut TriangleGrid) {
+    jak.step(&press(button::X), world, None);
+    while jak.trans().y < 1.2 * M {
+        jak.step(&hold(button::X), world, None);
+        assert!(jak.velocity().y > 0.0);
+    }
+}
+
+/// L1's press is only noted after the frame's checks, so a grab out of a
+/// plain jump starts the frame after it, if L1 is still down. Then it plays
+/// its whole animation: letting go of L1 does not cut the nose flip short. It ends when the flip
+/// reaches its artist frame 20, and only then.
+#[test]
+fn board_trick_lasts_its_animation() {
+    let mut world = ground(None);
+    let mut jak = boarding(&mut world);
+    rising(&mut jak, &mut world);
+    jak.step(&stick(0, button::L1, 0.0, 1.0), &mut world, None);
+    assert!(matches!(jak.state, State::BoardJump { .. }));
+    jak.step(&stick(button::L1, 0, 0.0, 1.0), &mut world, None);
+    assert_eq!(jak.state, State::BoardTricky);
+    assert!(jak.chan.is(anim::BOARD_NOSEFLIP));
+    let a = &jak.anims;
+    let target = a.aframe(anim::BOARD_NOSEFLIP, 20.0);
+    let speed = a.info(anim::BOARD_NOSEFLIP).speed;
+    let frames = (target / speed).ceil() as usize;
+    for frame in 1..frames {
+        jak.step(&stick(0, 0, 0.0, 1.0), &mut world, None);
+        assert_eq!(jak.state, State::BoardTricky, "frame {frame}");
+    }
+    jak.step(&stick(0, 0, 0.0, 1.0), &mut world, None);
+    assert_eq!(jak.state, State::BoardFalling);
+    assert_eq!(jak.trace.why, "code");
+}
+
+/// Moving the stick from across to forward while L1's press still counts
+/// cancels the kick trick into the grab trick, through the same per-frame
+/// check that starts tricks out of a jump.
+#[test]
+fn board_trick_cancels_into_another() {
+    let mut world = ground(None);
+    let mut jak = boarding(&mut world);
+    rising(&mut jak, &mut world);
+    jak.step(&stick(0, button::L1, 0.6, 0.0), &mut world, None);
+    assert_eq!(jak.state, State::BoardTrickx);
+    jak.step(&stick(button::L1, 0, 0.0, 0.8), &mut world, None);
+    assert_eq!(jak.state, State::BoardTricky);
+    assert_eq!(jak.trace.prev, "board-trickx");
+    assert_eq!(jak.trace.why, "trans");
+}
+
+/// Chained tricks climb. A trick's jump adds what is left of the rise, so
+/// each new one started while still rising launches faster than the last.
+/// Once the kick trick's exit has cleared the grab's latch, every fresh L1
+/// press with the stick part way forward restarts the grab, never letting
+/// one finish and stop the rise.
+fn chained_climb(side: f32) -> (f32, State) {
+    let mut world = ground(None);
+    let mut jak = boarding(&mut world);
+    rising(&mut jak, &mut world);
+    jak.step(&stick(0, button::L1, side, 0.0), &mut world, None);
+    jak.step(&stick(button::L1, 0, 0.0, 0.8), &mut world, None);
+    for frame in 0..360 {
+        let input = match frame % 4 {
+            0 => stick(0, button::L1, 0.0, 0.8),
+            3 => stick(0, 0, 0.0, 0.8),
+            _ => stick(button::L1, 0, 0.0, 0.8),
+        };
+        jak.step(&input, &mut world, None);
+    }
+    (jak.trace.peak / M, jak.state)
+}
+
+#[test]
+fn board_tricks_chained_while_rising_keep_climbing() {
+    let (peak, state) = chained_climb(0.6);
+    assert!(peak > 50.0, "{peak}");
+    assert_eq!(state, State::BoardTricky);
+}
+
+/// With the stick fully across, the kick trick latches a full sideways
+/// push, and the grab can never start after it: no climb.
+#[test]
+fn board_tricks_with_full_tilt_do_not_climb() {
+    let (peak, _) = chained_climb(1.0);
+    assert!(peak < 6.0, "{peak}");
+}
+
+/// Animations two frames long, so a trick plays out while Jak still rises.
+fn quick(names: &[&str]) -> std::sync::Arc<Anims> {
+    let info = anim::AnimInfo {
+        frames: 3,
+        speed: 1.0,
+        artist_base: 0.0,
+        artist_step: 10.0,
+    };
+    std::sync::Arc::new(Anims::from_rows(names.iter().map(|n| (*n, info))))
+}
+
+/// A grab that plays out cuts the rise; a kick trick that plays out keeps
+/// it.
+#[test]
+fn board_grab_played_out_stops_the_rise() {
+    let mut world = ground(None);
+    let mut jak = boarding(&mut world);
+    jak.anims = quick(&["jakb-board-noseflip"]);
+    rising(&mut jak, &mut world);
+    jak.step(&stick(0, button::L1, 0.0, 1.0), &mut world, None);
+    jak.step(&stick(button::L1, 0, 0.0, 1.0), &mut world, None);
+    assert_eq!(jak.state, State::BoardTricky);
+    let mut up = 0.0;
+    while jak.state == State::BoardTricky {
+        up = jak.velocity().y;
+        jak.step(&idle(), &mut world, None);
+    }
+    assert!(up > 0.0, "{up}");
+    assert_eq!(jak.state, State::BoardFalling);
+    let fall = jak.velocity().y;
+    assert!(fall <= 0.0 && fall > -245760.0 / 60.0 - 1.0, "{fall}");
+}
+
+#[test]
+fn board_kick_trick_played_out_keeps_the_rise() {
+    let mut world = ground(None);
+    let mut jak = boarding(&mut world);
+    jak.anims = quick(&[
+        "jakb-board-kickflip-a",
+        "jakb-board-kickflip-b",
+        "jakb-board-kickflip-c",
+    ]);
+    rising(&mut jak, &mut world);
+    jak.step(&stick(0, button::L1, -1.0, 0.0), &mut world, None);
+    assert_eq!(jak.state, State::BoardTrickx);
+    while jak.state == State::BoardTrickx {
+        jak.step(&idle(), &mut world, None);
+    }
+    assert_eq!(jak.state, State::BoardFalling);
+    assert!(jak.velocity().y > 0.0, "{}", jak.velocity().y);
+}

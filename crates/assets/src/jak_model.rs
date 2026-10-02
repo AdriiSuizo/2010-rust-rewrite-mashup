@@ -70,6 +70,8 @@ pub struct Rig {
 
 pub struct Clip {
     pub duration: f32,
+    /// Keyframes in the longest track: the animation's frame count.
+    pub frames: usize,
     tracks: Vec<Track>,
 }
 
@@ -171,6 +173,21 @@ pub struct JakAssets {
     pub body: Rig,
     pub board: Option<Rig>,
     pub gun: Option<Rig>,
+    /// Each of Jak's animations' timing.
+    pub timing: Vec<AnimTiming>,
+}
+
+/// How an animation plays: its frames, the frames it advances in a 60 Hz
+/// frame, and the artist numbering the game's states count frames in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimTiming {
+    pub name: String,
+    pub frames: u16,
+    pub speed: f32,
+    pub artist_base: f32,
+    pub artist_step: f32,
+    /// Whether the artist numbering came from the art group, not a default.
+    pub numbered: bool,
 }
 
 impl JakAssets {
@@ -192,10 +209,11 @@ pub fn local_jak() -> Option<&'static JakAssets> {
                 Ok(assets) => {
                     diag::info!(
                         World,
-                        "Jak model: {} clips, board {}, gun {}",
+                        "Jak model: {} clips, board {}, gun {}, {} animations numbered from .go art groups",
                         assets.body.clips.len(),
                         assets.board.is_some(),
-                        assets.gun.is_some()
+                        assets.gun.is_some(),
+                        assets.timing.iter().filter(|t| t.numbered).count()
                     );
                     Some(assets)
                 }
@@ -225,11 +243,122 @@ pub fn load(root: &Path) -> Result<JakAssets, String> {
         let path = root.join(name);
         path.is_file().then(|| rig(&path, label)).transpose()
     };
+    let timing = timing(&body.clips, &art_groups(root));
     Ok(JakAssets {
         body,
         board: optional(BOARD_FILE, "board")?,
         gun: optional(GUN_FILE, "gun")?,
+        timing,
     })
+}
+
+/// Frames and speed from the exported clips, which sample each frame at its
+/// playback time; the artist numbering from the art groups when present.
+fn timing(
+    clips: &HashMap<String, Clip>,
+    numbering: &HashMap<String, (f32, f32, f32)>,
+) -> Vec<AnimTiming> {
+    let mut out: Vec<AnimTiming> = clips
+        .iter()
+        .filter(|(_, clip)| clip.frames > 0)
+        .map(|(name, clip)| {
+            let frames = clip.frames.min(usize::from(u16::MAX)) as u16;
+            let speed = if clip.duration > 0.0 {
+                (clip.frames - 1) as f32 / (clip.duration * 60.0)
+            } else {
+                1.0
+            };
+            let numbered = numbering.get(name);
+            let (speed, artist_base, artist_step) = numbered.copied().unwrap_or((speed, 0.0, 1.0));
+            AnimTiming {
+                name: name.clone(),
+                frames,
+                speed,
+                artist_base,
+                artist_step,
+                numbered: numbered.is_some(),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Every art group (`*.go`) in `root`: each of Jak's animations' speed and
+/// artist numbering, by name.
+fn art_groups(root: &Path) -> HashMap<String, (f32, f32, f32)> {
+    let mut out = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("go"))
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            out.extend(art_group_timing(&bytes));
+        }
+    }
+    out
+}
+
+/// The animations of a linked art group: each one's name string, then the
+/// animation that points at it, holding speed, artist base and artist step
+/// 44 bytes past its start.
+pub fn art_group_timing(bytes: &[u8]) -> HashMap<String, (f32, f32, f32)> {
+    let word = |at: usize| -> Option<u32> {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let float = |at: usize| word(at).map(f32::from_bits);
+    let mut out = HashMap::new();
+    let Some(header) = word(4).map(|h| h as usize).filter(|&h| h < bytes.len()) else {
+        return out;
+    };
+    let data = &bytes[header..];
+    let prefix = b"jakb-";
+    let mut names = HashMap::new();
+    let mut i = 4;
+    while i + prefix.len() <= data.len() {
+        if &data[i..i + prefix.len()] != prefix {
+            i += 1;
+            continue;
+        }
+        let end = data[i..]
+            .iter()
+            .position(|&b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+            .map_or(data.len(), |n| i + n);
+        if data.get(end) == Some(&0)
+            && word(header + i - 4) == Some((end - i) as u32)
+            && let Ok(name) = std::str::from_utf8(&data[i..end])
+        {
+            names.insert((i - 4) as u32, name.to_owned());
+        }
+        i = end.max(i + 1);
+    }
+    for at in (4..data.len().saturating_sub(4)).step_by(4) {
+        let Some(name) = word(header + at).and_then(|w| names.get(&w)) else {
+            continue;
+        };
+        let base = header + at - 4;
+        let (Some(speed), Some(artist_base), Some(artist_step)) =
+            (float(base + 44), float(base + 48), float(base + 52))
+        else {
+            continue;
+        };
+        if 0.0 < speed
+            && speed <= 4.0
+            && 0.0 < artist_step
+            && artist_step <= 8.0
+            && artist_base.abs() < 1000.0
+        {
+            out.insert(name.clone(), (speed, artist_base, artist_step));
+        }
+    }
+    out
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {
@@ -532,7 +661,15 @@ fn clips(glb: &Glb, joints: &[Joint]) -> Result<HashMap<String, Clip>, String> {
             });
         }
         if !tracks.is_empty() {
-            out.insert(name.to_owned(), Clip { duration, tracks });
+            let frames = tracks.iter().map(|t| t.times.len()).max().unwrap_or(0);
+            out.insert(
+                name.to_owned(),
+                Clip {
+                    duration,
+                    frames,
+                    tracks,
+                },
+            );
         }
     }
     Ok(out)

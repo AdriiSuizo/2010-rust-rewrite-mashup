@@ -168,10 +168,4 @@ impl Jak {
             a.duck = 0.0;
         }
     }
-
-    /// Back on the board after the hop: the landing crouch.
-    pub(crate) fn board_anim_land(&mut self) {
-        self.board.anim.duck = 1.0;
-        self.board.anim.duck_vel = 15.0;
-    }
 }

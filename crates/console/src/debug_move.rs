@@ -75,7 +75,7 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
     }
     registry.register(
         crate::CommandSpec::new("jak")
-            .usage("jak [on|off|status] - Jak Mode: Jak 3's JET-Board and Blaster (K toggles)"),
+            .usage("jak [on|off|status|debug] - Jak Mode: Jak 3's JET-Board and Blaster (K toggles; debug shows the state machine)"),
     );
     if registry.resolve("force_spawn").is_none() {
         registry.register(crate::CommandSpec::new("force_spawn").usage(
@@ -153,9 +153,14 @@ pub(crate) fn route_debug_move_commands(
                     Some("status") => {}
                     Some("on") => jak.toggle_requested = !jak.active,
                     Some("off") => jak.toggle_requested = jak.active,
+                    Some("debug") => jak.show_debug = !jak.show_debug,
                     None => jak.toggle_requested = true,
                     _ => {
-                        echo("usage: jak [on|off|status]".into(), &mut console, &mut line);
+                        echo(
+                            "usage: jak [on|off|status|debug]".into(),
+                            &mut console,
+                            &mut line,
+                        );
                         continue;
                     }
                 }
@@ -870,8 +875,13 @@ pub(crate) fn update_jak_overlay(
             let ammo = mode
                 .ammo
                 .map_or("endless".to_owned(), |a| format!("{a:.0}"));
+            let debug = if mode.show_debug {
+                format!("\n{}", mode.debug)
+            } else {
+                String::new()
+            };
             format!(
-                "JAK | {} | {:.1} m/s | Blaster ammo {ammo}\nWASD/stick move  Space/A jump  F/RMB/RT board  LMB/RB fire, on the board flip  Ctrl/LB duck, charge jump  Ctrl or Shift/LT + direction trick  E/B zap  mouse/right stick camera | K: return to MW2",
+                "JAK | {} | {:.1} m/s | Blaster ammo {ammo}\nWASD/stick move  Space/A jump  F/RMB/RT board  LMB/RB fire, on the board flip  Ctrl/LB duck, charge jump  Ctrl or Shift/LT + direction trick, Alt for part way  E/B zap  mouse/right stick camera | K: return to MW2{debug}",
                 mode.state, mode.speed
             )
         };

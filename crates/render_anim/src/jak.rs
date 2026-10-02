@@ -7,9 +7,10 @@ use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use frame::{AppScreen, JakMode};
+use jak_mode::anim::AnimInfo;
 use jak_mode::glam as jg;
 use jak_mode::{
-    ActorWorld, Basis, CollideWorld, Event, Jak, PadInput, Pat, Tri, TriangleGrid, button,
+    ActorWorld, Anims, Basis, CollideWorld, Event, Jak, PadInput, Pat, Tri, TriangleGrid, button,
 };
 
 /// Map units per Jak meter: Jak's body (three spheres, 2.8 m) stands as tall
@@ -19,6 +20,9 @@ const TO_JAK: f32 = jak_mode::METER / MAP_PER_METER;
 /// Jak's health is 8 and a soldier's 100: his damage in MW2's terms.
 const DAMAGE_TO_MW2: f32 = 100.0 / 8.0;
 const STEP: f32 = 1.0 / 60.0;
+/// How far Alt pushes the keyboard's stick: across, past the board tricks'
+/// dead zone yet short of half their range.
+const PART_TILT: f32 = 0.6;
 /// The map's triangles are bucketed on this grid, in Jak units.
 const GRID_CELL: f32 = jak_mode::METER * 4.0;
 
@@ -236,6 +240,8 @@ fn stop(host: &mut Host, mode: &mut JakMode, authority: &mut net::AuthorityWorld
 /// Keyboard, mouse and controller, in the PS2 pad's layout the gameplay
 /// reads: A/Space jump (X), B/E zap (circle), X/C square, Y/Q triangle,
 /// LB/Ctrl duck (L1), LT/Shift L2, RB/left mouse fire (R1), RT/F board (R2).
+/// Alt pushes the keyboard's stick only part way, as a light touch on a
+/// controller's stick does.
 fn read_input(
     keys: &ButtonInput<KeyCode>,
     mouse: &ButtonInput<MouseButton>,
@@ -271,6 +277,9 @@ fn read_input(
     }
     if keys.pressed(KeyCode::KeyA) {
         left[0] -= 1.0;
+    }
+    if keys.pressed(KeyCode::AltLeft) {
+        left = left.map(|v| v * PART_TILT);
     }
     let mut right = [0.0f32; 2];
     if let Some(pad) = pad {
@@ -427,6 +436,17 @@ fn update(
         let facing = dir_to_jak(Vec3::new(yaw.cos(), yaw.sin(), 0.0));
         let mut jak = Jak::new(to_jak(origin), jak_mode::math::y_angle(facing));
         jak.gun.endless_ammo = true;
+        if let Some(model) = assets::jak_model::local_jak() {
+            jak.anims = Arc::new(Anims::from_rows(model.timing.iter().map(|t| {
+                let info = AnimInfo {
+                    frames: t.frames,
+                    speed: t.speed,
+                    artist_base: t.artist_base,
+                    artist_step: t.artist_step,
+                };
+                (t.name.as_str(), info)
+            })));
+        }
         host.camera.yaw = ps.viewangles[1];
         host.camera.pitch = -12.0;
         host.accumulated = 0.0;
@@ -536,6 +556,9 @@ fn update(
         .map(|p| (from_jak(p.trans), from_jak(p.tail)))
         .collect();
     mode.state = jak.state.name().to_owned();
+    if mode.show_debug {
+        mode.debug = readout(jak);
+    }
     mode.speed = jak.velocity().length() / jak_mode::METER;
     mode.ammo = (!jak.gun.endless_ammo).then_some(jak.gun.ammo);
     let (view, _) = follow_camera(&mut host.camera, jak, Vec2::ZERO, 0.0);
@@ -648,4 +671,57 @@ pub(crate) fn board_mesh(board: Mat4, geom: &mut crate::anim::remote_body::CpuBo
         name: Some(material),
     });
     geom.decoded_n = geom.packed.len();
+}
+
+/// What the state machine is doing, for `jak debug`.
+fn readout(jak: &Jak) -> String {
+    let t = &jak.trace;
+    let ago = |tick: i64| (jak.time - tick) as f32 / jak_mode::TICKS_PER_SECOND as f32;
+    let chan = &jak.chan;
+    let a = &jak.anims;
+    let v = jak.velocity() / jak_mode::METER;
+    let c = &jak.control;
+    let b = &jak.board;
+    let latch = |at: i64| {
+        if c.last_time_on_surface < at {
+            format!("{:.2}s", ago(at))
+        } else {
+            "-".to_owned()
+        }
+    };
+    format!(
+        "{} <- {} ({}, {:.2}s ago)  code step {}\n\
+         anim {} frame {:.1}/{} artist {:.1} {:?}  timing {}/{} from files\n\
+         vel {:.1} {:.1} {:.1} m/s  {}  height {:.1} m  peak {:.1} m\n\
+         last jump +{:.1} m/s {:.2}s ago  buttons {:#06x}  L1 {}  L2 {}\n\
+         trick x {:.2} z {:.2}  flip {:.2}  spin {:.0}  flips {}",
+        jak.state.name(),
+        t.prev,
+        t.why,
+        ago(t.changed_at),
+        jak.code.pc,
+        chan.anim.name(),
+        chan.frame,
+        a.max(chan.anim),
+        chan.aframe_num(a),
+        chan.func,
+        a.timed,
+        jak_mode::anim::NAMES.len(),
+        v.x,
+        v.y,
+        v.z,
+        if c.on_surface() { "ground" } else { "air" },
+        c.height_above_ground() / jak_mode::METER,
+        t.peak / jak_mode::METER,
+        t.impulse / jak_mode::METER,
+        ago(t.impulse_at),
+        jak.pad.held,
+        latch(b.duck_start_time),
+        latch(b.l2_start_time),
+        b.trick_x,
+        b.trick_z,
+        b.flip_control,
+        b.roty_cum.abs() / 65536.0 * 360.0,
+        b.flip_count,
+    )
 }

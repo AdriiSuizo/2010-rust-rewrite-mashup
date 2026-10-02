@@ -33,4 +33,7 @@ pub struct JakMode {
     pub speed: f32,
     pub ammo: Option<f32>,
     pub status: String,
+    /// The state machine's readout, filled while `show_debug` is on.
+    pub show_debug: bool,
+    pub debug: String,
 }

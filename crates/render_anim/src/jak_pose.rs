@@ -1,7 +1,8 @@
-//! Jak's own model, board and gun, posed from the gameplay: each state plays
-//! the animation Jak 3 plays for it, sampled from the clips the player
-//! exported, and the board stance mixes its turn, lean and duck animations
-//! by the amounts the board simulation drives.
+//! Jak's own model, board and gun, posed from the gameplay. On the board
+//! the pose is the animation the state's own sequence is playing, at the
+//! frame it has reached, blended over each change the way the state asks;
+//! the board stance mixes its turn, lean and duck animations by the amounts
+//! the board simulation drives. On foot each state plays its animation.
 use std::sync::Arc;
 
 use assets::bot_model::BotModel;
@@ -9,7 +10,7 @@ use assets::jak_model::{JakAssets, Rig, Trs};
 use bevy::prelude::*;
 use frame::JakSkins;
 use jak_mode::board_anim::TURN_FRAMES;
-use jak_mode::{BoardTrick, Jak, State, TICKS_PER_SECOND};
+use jak_mode::{Jak, Push, State, TICKS_PER_SECOND};
 
 use crate::anim::remote_body::{CpuBodyGeom, CpuSurfMeta};
 use crate::jak::MAP_PER_METER;
@@ -59,11 +60,11 @@ const fn looped(clip: &'static str) -> Step {
     }
 }
 
-/// What a state shows: a run of clips, or the board stance mix.
+/// What a state shows: a run of clips, or the channel the board states play.
 #[derive(Clone, PartialEq)]
 enum Program {
     Clips { steps: Vec<Step>, blend: f32 },
-    Stance { lead_in: Option<Step> },
+    Channel,
 }
 
 /// Which program is showing and since when, in game ticks.
@@ -78,6 +79,7 @@ pub(crate) struct Animator {
     /// The pose to blend from, and when the blend began.
     from: Option<(Vec<Trs>, i64, f32)>,
     last: Vec<Trs>,
+    push: Push,
 }
 
 impl Animator {
@@ -86,6 +88,7 @@ impl Animator {
             showing: None,
             from: None,
             last: Vec::new(),
+            push: Push::default(),
         }
     }
 
@@ -100,25 +103,25 @@ impl Animator {
         if changed {
             let blend = match &program {
                 Program::Clips { blend, .. } => *blend,
-                Program::Stance { .. } => 0.1,
+                Program::Channel => 0.1,
             };
             if !self.last.is_empty() {
                 self.from = Some((self.last.clone(), jak.time, blend));
             }
             self.showing = Some(Showing { program, start });
         }
+        if jak.push != self.push {
+            self.push = jak.push;
+            if jak.state.is_board() && !self.last.is_empty() {
+                let seconds = jak.push.ticks as f32 / TICKS_PER_SECOND as f32;
+                self.from = Some((self.last.clone(), jak.push.tick, seconds));
+            }
+        }
         let showing = self.showing.as_ref().expect("set above");
         let elapsed = (jak.time - showing.start) as f32 / TICKS_PER_SECOND as f32;
         let mut pose = match &showing.program {
             Program::Clips { steps, .. } => play(body, steps, elapsed),
-            Program::Stance { lead_in } => {
-                let rest = lead_in.and_then(|step| {
-                    let clip = body.clips.get(step.clip)?;
-                    let t = elapsed * step.rate;
-                    (t < clip.duration).then(|| sampled(body, step.clip, t))
-                });
-                rest.unwrap_or_else(|| stance(body, jak))
-            }
+            Program::Channel => channel(body, jak),
         };
         if let Some((from, began, length)) = &self.from {
             let t = (jak.time - began) as f32 / TICKS_PER_SECOND as f32 / length.max(1e-3);
@@ -219,60 +222,27 @@ fn program_for(jak: &Jak) -> (Program, i64) {
             };
             (clips(vec![once(clip)], 0.05), since)
         }
-        State::BoardGetOn => (clips(vec![once("jakb-board-get-on")], 0.05), since),
-        State::BoardHitGround => (
-            Program::Stance {
-                lead_in: Some(Step {
-                    clip: "jakb-board-get-on-land",
-                    rate: 1.8,
-                    hold: Hold::Once,
-                }),
-            },
-            since,
-        ),
-        State::BoardStance | State::BoardDuckStance | State::BoardTurnTo { .. } => {
-            (Program::Stance { lead_in: None }, 0)
-        }
-        State::BoardJump { duck, .. } => {
-            let first = if duck {
-                "jakb-board-jump-high"
-            } else {
-                "jakb-board-jump"
-            };
-            (
-                clips(vec![once(first), looped("jakb-board-jump-loop")], 0.05),
-                since,
-            )
-        }
-        State::BoardFalling => (clips(vec![looped("jakb-board-jump-loop")], 0.5), since),
-        State::BoardFlip => (
-            clips(
-                vec![
-                    once("jakb-board-flip-forward"),
-                    looped("jakb-board-flip-forward-loop"),
-                ],
-                0.1,
-            ),
-            since,
-        ),
-        State::BoardTrick(trick) => {
-            let steps = match trick {
-                BoardTrick::Grab => vec![
-                    once("jakb-board-nosegrab"),
-                    looped("jakb-board-nosegrab-loop"),
-                ],
-                BoardTrick::Kick => vec![
-                    once("jakb-board-kickflip-a"),
-                    looped("jakb-board-jump-loop"),
-                ],
-                BoardTrick::Hold => {
-                    vec![once("jakb-board-method"), looped("jakb-board-method-loop")]
-                }
-            };
-            (clips(steps, 0.08), since)
-        }
-        State::BoardGetOff => (clips(vec![once("jakb-board-get-off")], 0.05), since),
+        _ => (Program::Channel, 0),
     }
+}
+
+/// The board states' channel: its animation at the frame it has reached,
+/// or the stance mix.
+fn channel(rig: &Rig, jak: &Jak) -> Vec<Trs> {
+    let chan = &jak.chan;
+    if chan.is(jak_mode::anim::BOARD_TURN) {
+        return stance(rig, jak);
+    }
+    let name = chan.anim.name();
+    let Some(clip) = rig.clips.get(name) else {
+        return stance(rig, jak);
+    };
+    let last = clip.frames.saturating_sub(1).max(1) as f32;
+    sampled(
+        rig,
+        name,
+        chan.frame.clamp(0.0, last) / last * clip.duration,
+    )
 }
 
 /// A run of clips `elapsed` seconds in: each one-shot plays through before

@@ -1173,8 +1173,10 @@ impl Jak {
         if set_velocity {
             let up_speed = (2.0 * c.gravity_length * low).sqrt() - 0.008333334 * -c.gravity_length;
             c.transv = with_vertical(c.transv, c.gravity_normal, up_speed);
+            self.trace.impulse = up_speed;
+            self.trace.impulse_at = self.time;
         }
-        c.jump_start = c.trans;
+        self.control.jump_start = self.control.trans;
     }
 
     /// While the jump button stays down through the first tenth of a second,

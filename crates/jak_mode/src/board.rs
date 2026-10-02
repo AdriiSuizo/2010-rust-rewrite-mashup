@@ -84,6 +84,7 @@ pub struct BoardInfo {
     pub flip_count: i32,
     pub trick_x: f32,
     pub trick_z: f32,
+    pub trickx_count: i32,
     pub spinning: bool,
     pub rotyv_max: f32,
     pub rotyv: f32,
@@ -151,6 +152,7 @@ impl Default for BoardInfo {
             flip_count: 0,
             trick_x: 0.0,
             trick_z: 0.0,
+            trickx_count: 0,
             spinning: false,
             rotyv_max: 0.0,
             rotyv: 0.0,
@@ -472,7 +474,10 @@ impl Jak {
             state,
             StateKind::BoardStance | StateKind::BoardDuckStance | StateKind::BoardTurnTo
         );
-        let trick_state = state == StateKind::BoardTrick;
+        let trick_state = matches!(
+            state,
+            StateKind::BoardHold | StateKind::BoardTrickx | StateKind::BoardTricky
+        );
         let float_free = air
             && !grounded_states
             && ((((20480.0 < c.gravity_normal.dot(c.trans - c.gspot_pos))
@@ -500,7 +505,7 @@ impl Jak {
         let c = &mut self.control;
         match state {
             StateKind::BoardGetOn | StateKind::BoardGetOff => {}
-            StateKind::BoardTrick => {
+            StateKind::BoardHold | StateKind::BoardTrickx | StateKind::BoardTricky => {
                 c.gravity_length = seek(c.gravity_length, 245760.0, 30.0 * SECONDS_PER_FRAME);
             }
             _ if c.mod_surface.name == surface::Name::Spin => {
@@ -725,7 +730,13 @@ impl Jak {
         if self.board.spinning {
             self.add_spin_points();
             self.board.spinning = false;
-            let in_trick = matches!(self.state.kind(), StateKind::BoardFlip);
+            let in_trick = matches!(
+                self.state.kind(),
+                StateKind::BoardFlip
+                    | StateKind::BoardHold
+                    | StateKind::BoardTrickx
+                    | StateKind::BoardTricky
+            );
             let c = &mut self.control;
             let facing = rotate_y(
                 flatten(z_axis(c.quat), Vec3::Y).normalize_or(Vec3::Z),
@@ -852,9 +863,14 @@ impl Jak {
     /// pushed forward or back flips. Returns the flip when one starts.
     fn board_spin_check(&mut self) -> Option<State> {
         let now = self.time;
-        if self.pad.pressed(button::R1)
+        let just_tricked = matches!(
+            self.state,
+            State::BoardTricky | State::BoardTrickx | State::BoardHold
+        ) && !self.time_elapsed(self.board.spin_start_time, seconds(0.5));
+        if (self.pad.pressed(button::R1)
             || (self.pad.hold(button::R1)
-                && self.time_elapsed(self.board.spin_check_time, seconds(0.3)))
+                && self.time_elapsed(self.board.spin_check_time, seconds(0.3))))
+            && !just_tricked
         {
             let c = &mut self.control;
             self.board.spin_start_time = now;
@@ -935,7 +951,7 @@ impl Jak {
                 && b.tricky_exit_time < b.duck_start_time
             {
                 self.board.trick_z = push;
-                return Some(State::BoardTrick(BoardTrick::Grab));
+                return Some(State::BoardTricky);
             }
             let b = &self.board;
             if push.abs() < 0.5
@@ -947,7 +963,7 @@ impl Jak {
                 && self.time_elapsed(b.tricky_exit_time, seconds(0.05))
             {
                 self.board.trick_x = side;
-                return Some(State::BoardTrick(BoardTrick::Kick));
+                return Some(State::BoardTrickx);
             }
         } else if self.pad.pressed(button::L2) || since_surface < self.board.l2_start_time {
             self.board.turn_anim_tilt = false;
@@ -963,7 +979,7 @@ impl Jak {
                 && b.hold_exit_time < b.l2_start_time
             {
                 self.board.trick_z = push;
-                return Some(State::BoardTrick(BoardTrick::Hold));
+                return Some(State::BoardHold);
             }
             let b = &self.board;
             if push.abs() < 0.5
@@ -975,14 +991,14 @@ impl Jak {
                 && self.time_elapsed(b.hold_exit_time, seconds(0.05))
             {
                 self.board.trick_x = side;
-                return Some(State::BoardTrick(BoardTrick::Hold));
+                return Some(State::BoardHold);
             }
         }
         let _ = now;
         None
     }
 
-    /// In the air on the board: landing, kicking off walls, spins.
+    /// In the air on the board: landing, the jump kick, spins and tricks.
     fn board_jump_trans(&mut self) -> Option<State> {
         if self.time != self.state_time && self.hit_ground_or_stuck() {
             self.board.jump_land_time = self.time;
@@ -991,7 +1007,37 @@ impl Jak {
         if self.time_elapsed(self.state_time, seconds(0.1)) {
             self.board_smack_surface();
         }
+        let c = &self.control;
+        let up = c.gravity_normal.dot(c.transv);
+        if self.pad.pressed(button::X)
+            && up < 12288.0
+            && -61440.0 < up
+            && !matches!(self.state, State::BoardWallKick { .. })
+        {
+            return Some(State::BoardJumpKick);
+        }
         self.board_spin_check()
+    }
+
+    /// The jump window and the held jump, every frame of a jump or trick.
+    fn board_var_jump(&mut self) {
+        self.control.jump_window = self.control.jump_window.max(self.pad.pressure(button::X));
+        let holding = self.pad.hold(button::X);
+        self.mod_var_jump(holding);
+    }
+
+    /// The jumps out of the air tricks and flips: a little higher than
+    /// where Jak is heading, under the board's lighter trick gravity.
+    fn board_trick_enter(&mut self, min: f32, max: f32, gravity: f32) {
+        let c = &mut self.control;
+        c.dir_targ = forward_up_nopitch_quat(c.transv, y_axis(c.dir_targ));
+        c.gravity_length = 245760.0;
+        self.init_var_jump(min, max, true, false, 1.0);
+        let c = &mut self.control;
+        c.status &= !(status::ON_SURFACE | status::ON_GROUND | status::TOUCH_SURFACE);
+        c.mod_surface = surface::board::FLIP;
+        self.board.mods_backup = surface::board::FLIP;
+        c.gravity_length = gravity;
     }
 
     pub(crate) fn board_enter(&mut self, state: &State) {
@@ -1007,6 +1053,7 @@ impl Jak {
                 let c = &mut self.control;
                 let g = c.gravity_normal;
                 let up = g.dot(c.transv);
+                self.code.flag = to_ground < seconds(0.25);
                 let lift = if to_ground < seconds(0.25) {
                     up.clamp(0.0, 40960.0)
                         + 0.0016666667 * (seconds(0.66) - to_ground) as f32 * c.gravity_length
@@ -1038,6 +1085,11 @@ impl Jak {
                 };
                 if !self.time_elapsed(self.board.ride_time, seconds(0.5)) {
                     mods = surface::board::RIDE_JUMP;
+                    let c = &mut self.control;
+                    let along = c.transv.normalize_or_zero();
+                    c.dir_targ = forward_up_nopitch_quat(along, y_axis(c.dir_targ));
+                    let back = along.dot(c.local_to_world.f);
+                    c.turn_lockout_end_time = now + lerp_scale(225.0, 0.0, back, -1.0, 1.0) as i64;
                 }
                 self.control.gravity_length = 245760.0;
                 let mut extra = 0.0;
@@ -1093,40 +1145,35 @@ impl Jak {
                 c.turn_lockout_end_time = now + duration;
             }
             State::BoardFlip => {
-                let c = &mut self.control;
-                c.dir_targ = forward_up_nopitch_quat(c.transv, y_axis(c.dir_targ));
-                c.gravity_length = 245760.0;
-                self.init_var_jump(JUMP_HEIGHT_MIN, JUMP_HEIGHT_MAX, true, false, 1.0);
-                let c = &mut self.control;
-                c.status &= !(status::ON_SURFACE | status::ON_GROUND | status::TOUCH_SURFACE);
-                c.mod_surface = surface::board::FLIP;
-                self.board.mods_backup = surface::board::FLIP;
+                self.board_trick_enter(JUMP_HEIGHT_MIN, JUMP_HEIGHT_MAX, 245760.0);
                 self.board.danger = Some(Danger::Spin);
                 self.events.push(Event::BoardFlip);
             }
-            State::BoardTrick(trick) => {
+            State::BoardTricky => {
+                self.board_trick_enter(TRICKY_HEIGHT_MIN, TRICKY_HEIGHT_MAX, 147456.0);
+            }
+            State::BoardTrickx => {
+                self.board_trick_enter(TRICKX_HEIGHT_MIN, TRICKX_HEIGHT_MAX, 147456.0);
+            }
+            State::BoardHold => {
+                self.board_trick_enter(TRICKZ_HEIGHT_MIN, TRICKZ_HEIGHT_MAX, 147456.0);
+            }
+            State::BoardJumpKick => {
+                self.control.mod_surface = surface::board::JUMP;
+                self.board.mods_backup = surface::board::JUMP;
+            }
+            State::BoardWallKick { dir, speed } => {
                 let c = &mut self.control;
-                c.dir_targ = forward_up_nopitch_quat(c.transv, y_axis(c.dir_targ));
-                c.gravity_length = 245760.0;
-                self.init_var_jump(TRICK_HEIGHT_MIN, TRICK_HEIGHT_MAX, true, false, 1.0);
-                let c = &mut self.control;
-                c.status &= !(status::ON_SURFACE | status::ON_GROUND | status::TOUCH_SURFACE);
-                c.mod_surface = surface::board::FLIP;
-                self.board.mods_backup = surface::board::FLIP;
-                c.gravity_length = 147456.0;
-                let (_, z) = self.pad.left_trick_axes();
-                let push = analog_input((128.0 * z) as i32, 0.0, 96.0, 110.0, 1.0);
-                let named = match trick {
-                    BoardTrick::Grab if push < 0.0 => Trick::Kickspin,
-                    BoardTrick::Grab if 40960.0 < self.control.height_above_ground() => {
-                        Trick::Nosegrab
-                    }
-                    BoardTrick::Grab => Trick::Noseflip,
-                    BoardTrick::Kick if self.board.trick_x >= 0.0 => Trick::Kickflip,
-                    BoardTrick::Kick => Trick::BoardSpin,
-                    BoardTrick::Hold => Trick::Method,
-                };
-                self.add_trick(named, 500.0);
+                c.transv = xz_normalize(dir, 0.8 * speed);
+                c.transv.y = 0.0;
+                let face = -c.transv;
+                c.dir_targ = forward_up_nopitch_quat(face.normalize_or_zero(), y_axis(c.dir_targ));
+                c.quat = c.dir_targ;
+                c.transv.y = (24576.0 * c.gravity_length).sqrt() + 0.008333334 * c.gravity_length;
+                c.mod_surface = surface::board::WALL_KICK;
+                self.board.mods_backup = surface::board::WALL_KICK;
+                self.board.smack_surface_time = 0;
+                self.build_conversions();
             }
             State::BoardGetOff => {
                 self.board.shock_offsetv = 0.0;
@@ -1135,6 +1182,7 @@ impl Jak {
                 c.mod_surface = surface::board::GET_OFF;
                 c.gravity_length = control::STANDARD_GRAVITY;
                 let to_ground = self.time_to_ground();
+                self.code.flag = to_ground < seconds(0.207);
                 let c = &mut self.control;
                 let g = c.gravity_normal;
                 let up = g.dot(c.transv).clamp(0.0, 40960.0);
@@ -1157,13 +1205,13 @@ impl Jak {
                 self.board.turn_anim_tilt = false;
                 self.board_anim_exit(next);
             }
-            State::BoardGetOn => self.board_anim_land(),
-            State::BoardTrick(trick) => {
+            State::BoardTricky | State::BoardTrickx => {
                 self.board.trick_z = 0.0;
-                match trick {
-                    BoardTrick::Hold => self.board.hold_exit_time = self.time,
-                    BoardTrick::Grab | BoardTrick::Kick => self.board.tricky_exit_time = self.time,
-                }
+                self.board.tricky_exit_time = self.time;
+            }
+            State::BoardHold => {
+                self.board.trick_z = 0.0;
+                self.board.hold_exit_time = self.time;
             }
             State::BoardFlip => {
                 self.board.danger = None;
@@ -1185,29 +1233,17 @@ impl Jak {
     pub(crate) fn board_trans(&mut self) -> Option<State> {
         let now = self.time;
         match self.state {
-            State::BoardGetOn => {
-                if self.control.on_surface()
-                    || (now != self.state_time && self.hit_ground_or_stuck())
-                {
-                    self.control.status |= status::ON_SURFACE;
-                    return Some(State::BoardHitGround);
-                }
-                None
-            }
             State::BoardStance | State::BoardDuckStance => self.board_stance_trans(),
             State::BoardJump { .. } => {
                 if let Some(next) = self.board_jump_trans() {
                     return Some(next);
                 }
-                let holding = self.pad.hold(button::X);
-                self.control.jump_window =
-                    self.control.jump_window.max(self.pad.pressure(button::X));
-                self.mod_var_jump(holding);
+                self.board_var_jump();
                 self.board.slow_transv = self.control.transv;
                 self.board.shock_offset *= 0.8;
                 None
             }
-            State::BoardFalling => self.board_jump_trans(),
+            State::BoardFalling | State::BoardWallKick { .. } => self.board_jump_trans(),
             State::BoardHitGround => {
                 if self.pad.hold(button::L1) {
                     return Some(State::BoardDuckStance);
@@ -1221,8 +1257,7 @@ impl Jak {
                     });
                 }
                 self.board_smack_surface();
-                self.control.mod_surface = surface::board::WALK;
-                Some(State::BoardStance)
+                None
             }
             State::BoardTurnTo { duration, .. } => {
                 if self.pad.pressed(button::X) && self.can_jump(true) {
@@ -1246,67 +1281,45 @@ impl Jak {
                 None
             }
             State::BoardFlip => {
-                self.control.jump_window =
-                    self.control.jump_window.max(self.pad.pressure(button::X));
-                let holding = self.pad.hold(button::X);
-                self.mod_var_jump(holding);
+                self.board_var_jump();
                 self.board.slow_transv = self.control.transv;
-                let (_, z) = self.pad.left_trick_axes();
-                let stick = analog_input((128.0 * z) as i32, 0.0, 96.0, 110.0, 1.0);
-                let finished = !self.pad.hold(button::R1)
-                    || stick == 0.0
-                    || self.hit_ground_or_stuck()
-                    || self.time_to_ground() < seconds(0.5);
-                if finished && self.time_elapsed(self.state_time, seconds(0.1)) {
-                    if self.hit_ground_or_stuck() {
-                        return Some(State::BoardHitGround);
-                    }
-                    return Some(State::BoardFalling);
-                }
                 None
             }
-            State::BoardTrick(trick) => {
+            State::BoardTricky | State::BoardHold => {
                 if let Some(next) = self.board_spin_check() {
                     return Some(next);
                 }
-                self.control.jump_window =
-                    self.control.jump_window.max(self.pad.pressure(button::X));
-                let holding = self.pad.hold(button::X);
-                self.mod_var_jump(holding);
+                self.board_var_jump();
                 self.board.slow_transv = self.control.transv;
-                if trick == BoardTrick::Kick && self.hit_ground_or_stuck() {
+                None
+            }
+            State::BoardTrickx => {
+                if let Some(next) = self.board_spin_check() {
+                    return Some(next);
+                }
+                self.board_var_jump();
+                if self.hit_ground_or_stuck() {
                     self.board.jump_land_time = now;
                     return Some(State::BoardHitGround);
                 }
-                let held = match trick {
-                    BoardTrick::Grab => self.pad.hold(button::L1),
-                    BoardTrick::Hold => self.pad.hold(button::L2),
-                    BoardTrick::Kick => {
-                        let (_, z) = self.pad.left_trick_axes();
-                        self.pad.hold(button::R1)
-                            && analog_input((128.0 * z) as i32, 0.0, 96.0, 110.0, 1.0) != 0.0
-                    }
-                };
-                let limit = if trick == BoardTrick::Kick {
-                    seconds(0.5)
-                } else {
-                    seconds(0.3)
-                };
-                if !held || self.hit_ground_or_stuck() || self.time_to_ground() < limit {
-                    let c = &mut self.control;
-                    let g = c.gravity_normal;
-                    let up = g.dot(c.transv).min(0.0);
-                    c.transv = with_vertical(c.transv, g, up);
-                    return Some(State::BoardFalling);
-                }
+                self.board.slow_transv = self.control.transv;
                 None
             }
-            State::BoardGetOff => {
-                if now != self.state_time && self.hit_ground_or_stuck() {
-                    return Some(if self.control.on_surface() {
-                        State::HitGround
-                    } else {
-                        State::Falling
+            State::BoardJumpKick => {
+                if self.hit_ground_or_stuck() {
+                    return Some(State::BoardHitGround);
+                }
+                self.board_smack_surface();
+                if !self.time_elapsed(self.board.smack_surface_time, seconds(0.2)) {
+                    return Some(State::BoardWallKick {
+                        dir: self.board.smack_normal,
+                        speed: self.board.smack_speed,
+                    });
+                }
+                if !self.time_elapsed(self.board.glance_time, seconds(0.2)) {
+                    return Some(State::BoardWallKick {
+                        dir: self.board.glance_out_transv.normalize_or_zero(),
+                        speed: self.board.glance_speed,
                     });
                 }
                 None
@@ -1383,22 +1396,16 @@ impl Jak {
     }
 }
 
-pub const TRICK_HEIGHT_MIN: f32 = meters(0.9);
-pub const TRICK_HEIGHT_MAX: f32 = meters(1.2);
-
-/// The air tricks: a grab with L1 and the stick forward or back, a kick with
-/// L1 and the stick across, a hold with L2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BoardTrick {
-    Grab,
-    Kick,
-    Hold,
-}
+pub const TRICKX_HEIGHT_MIN: f32 = meters(0.9);
+pub const TRICKX_HEIGHT_MAX: f32 = meters(1.2);
+pub const TRICKY_HEIGHT_MIN: f32 = meters(0.9);
+pub const TRICKY_HEIGHT_MAX: f32 = meters(1.2);
+pub const TRICKZ_HEIGHT_MIN: f32 = meters(0.9);
+pub const TRICKZ_HEIGHT_MAX: f32 = meters(1.2);
 
 /// The state without its payload, for the comparisons the board loop makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StateKind {
-    BoardTrick,
     OnFoot,
     BoardGetOn,
     BoardStance,
@@ -1408,5 +1415,10 @@ pub(crate) enum StateKind {
     BoardHitGround,
     BoardTurnTo,
     BoardFlip,
+    BoardTricky,
+    BoardTrickx,
+    BoardHold,
+    BoardJumpKick,
+    BoardWallKick,
     BoardGetOff,
 }
