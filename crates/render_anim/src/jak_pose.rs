@@ -216,6 +216,21 @@ impl Animator {
                 &mut pose,
             );
         }
+        let prejoint = assets
+            .timing
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.prejoint.as_ref())
+            .and_then(|p| p.get((wings.chan.frame.max(0.0).round() as usize).min(p.len() - 1)));
+        if let (Some(m), Some(slot)) = (prejoint, pose.get_mut(1)) {
+            let (scale, rotation, translation) =
+                Mat4::from_cols_array(m).to_scale_rotation_translation();
+            *slot = Trs {
+                translation: translation / jak_mode::METER,
+                rotation,
+                scale,
+            };
+        }
         if wings.push != self.wings_push {
             self.wings_push = wings.push;
             if !self.wings_last.is_empty() {
