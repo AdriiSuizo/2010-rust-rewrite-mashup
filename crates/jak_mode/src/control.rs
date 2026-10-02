@@ -181,7 +181,16 @@ pub struct Control {
     pub time_of_last_clear_wall_in_jump: i64,
     pub time_of_last_surface_change: i64,
     pub last_trans_any_surf: Vec3,
+    pub last_trans_leaving_surf: Vec3,
+    /// The top of the current jump or fall, under Jak.
+    pub highest_jump_mark: Vec3,
     pub last_transv: Vec3,
+    /// The last frames' velocities and speeds, newest first, as the walk
+    /// keeps them to tell a turn-around.
+    pub transv_history: [(Vec3, f32); 16],
+    pub idx_of_fastest_xz_vel: usize,
+    pub average_xz_vel: f32,
+    pub time_of_last_pad_read: i64,
 
     pub ground_impact_vel: f32,
     pub normal_impact_vel: f32,
@@ -290,7 +299,13 @@ impl Control {
             time_of_last_clear_wall_in_jump: i64::MIN / 2,
             time_of_last_surface_change: now,
             last_trans_any_surf: trans,
+            last_trans_leaving_surf: trans,
+            highest_jump_mark: trans,
             last_transv: Vec3::ZERO,
+            transv_history: [(Vec3::ZERO, 0.0); 16],
+            idx_of_fastest_xz_vel: 0,
+            average_xz_vel: 0.0,
+            time_of_last_pad_read: i64::MIN / 2,
             ground_impact_vel: 0.0,
             normal_impact_vel: 0.0,
             transv_on_last_impact: Vec3::ZERO,
@@ -386,6 +401,16 @@ impl Jak {
         if c.on_surface() {
             c.last_time_on_surface = now;
             c.last_trans_any_surf = c.trans;
+        } else {
+            if c.old_status & status::ON_SURFACE != 0 {
+                c.last_trans_leaving_surf = c.last_trans_any_surf;
+                c.highest_jump_mark = c.last_trans_any_surf;
+            }
+            c.highest_jump_mark.x = c.trans.x;
+            c.highest_jump_mark.z = c.trans.z;
+            if c.gravity_normal.dot(c.highest_jump_mark - c.trans) < 0.0 {
+                c.highest_jump_mark.y = c.trans.y;
+            }
         }
         c.bend_speed = if c.on_surface() { 32.0 } else { 2.0 };
     }
@@ -426,12 +451,21 @@ impl Jak {
     /// The stick as a world direction, through the camera.
     pub(crate) fn read_pad(&mut self) -> Vec3 {
         let c = &mut self.control;
-        c.last_pad_xz_dir = c.pad_xz_dir;
-        c.last_pad_magnitude = c.pad_magnitude;
+        if c.time_of_last_pad_read != self.time {
+            c.last_pad_xz_dir = c.pad_xz_dir;
+            c.last_pad_magnitude = c.pad_magnitude;
+            c.time_of_last_pad_read = self.time;
+        }
         let local = Vec3::new(sin(self.pad.stick0_dir), 0.0, cos(self.pad.stick0_dir));
         c.pad_xz_dir = local;
         c.pad_magnitude = self.pad.stick0_speed;
         self.camera.to_world(local)
+    }
+
+    /// The stick as a world direction laid into the ground's plane.
+    pub(crate) fn pad_in_surface(&mut self) -> Vec3 {
+        let v = self.read_pad();
+        warp_into_surface(v, self.control.local_normal, &self.camera)
     }
 
     pub(crate) fn turn_to_vector(&mut self, v: Vec3, magnitude: f32) {

@@ -185,12 +185,64 @@ impl NumFunc {
     }
 }
 
+/// The walk cycle's seven channels as one: the walk and the run, each
+/// leaned toward its uphill or downhill cycle and its sideways one, all at
+/// the base channel's frame, the run mixed over the walk.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WalkMix {
+    /// 0 walks, 1 runs.
+    pub run: f32,
+    /// Uphill positive, downhill negative.
+    pub up: f32,
+    /// Toward the right cycle positive, the left negative.
+    pub side: f32,
+}
+
+impl WalkMix {
+    /// The ground one cycle covers, as the channels' distances mix.
+    pub fn cycle_dist(&self) -> f32 {
+        use crate::target::cycle;
+        let (walk_slope, run_slope) = if self.up >= 0.0 {
+            (cycle::WALK_UP, cycle::RUN_UP)
+        } else {
+            (cycle::WALK_DOWN, cycle::RUN_DOWN)
+        };
+        let up = self.up.abs();
+        let side = self.side.abs();
+        let walk = lerp(lerp(cycle::WALK, walk_slope, up), cycle::WALK_SIDE, side);
+        let run = lerp(lerp(cycle::RUN, run_slope, up), cycle::RUN_SIDE, side);
+        lerp(walk, run, self.run)
+    }
+
+    /// The animations of the six cycles: walk, its slope and side, run, its
+    /// slope and side.
+    pub fn anims(&self) -> [Anim; 6] {
+        let (walk_slope, run_slope) = if self.up >= 0.0 {
+            (WALK_UP, RUN_UP)
+        } else {
+            (WALK_DOWN, RUN_DOWN)
+        };
+        let (walk_side, run_side) = if self.side >= 0.0 {
+            (WALK_RIGHT, RUN_RIGHT)
+        } else {
+            (WALK_LEFT, RUN_LEFT)
+        };
+        [WALK, walk_slope, walk_side, RUN, run_slope, run_side]
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 /// The base animation channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Channel {
     pub anim: Anim,
     pub frame: f32,
     pub func: NumFunc,
+    /// The walk cycle's mix, while it plays.
+    pub mix: Option<WalkMix>,
 }
 
 impl Default for Channel {
@@ -199,6 +251,7 @@ impl Default for Channel {
             anim: STANCE_LOOP,
             frame: 0.0,
             func: NumFunc::Identity,
+            mix: None,
         }
     }
 }
@@ -209,6 +262,7 @@ impl Channel {
         self.anim = anim;
         self.func = func;
         self.frame = frame;
+        self.mix = None;
     }
 
     fn target(&self, anims: &Anims, target: Target) -> f32 {

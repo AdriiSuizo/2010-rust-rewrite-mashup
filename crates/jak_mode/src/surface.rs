@@ -1102,6 +1102,12 @@ pub mod foot {
     /// The spin's wind-down.
     pub const ATTACK_END: Surface = ATTACK;
 
+    /// A hard landing: the walk without its looking around.
+    pub const HIT_GROUND_HARD: Surface = Surface {
+        flags: 0,
+        ..super::WALK
+    };
+
     /// The uppercut's crouch before it leaves the ground.
     pub const UPPERCUT: Surface = Surface {
         flags: flag::ATTACK,

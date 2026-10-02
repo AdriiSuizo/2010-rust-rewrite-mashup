@@ -15,7 +15,8 @@ use jak_mode::{Jak, Push, State, TICKS_PER_SECOND};
 use crate::anim::remote_body::{CpuBodyGeom, CpuSurfMeta};
 use crate::jak::MAP_PER_METER;
 
-/// Above this speed on foot Jak runs rather than walks, meters a second.
+/// Above this speed with the gun out Jak runs rather than walks, meters a
+/// second.
 const RUN_SPEED: f32 = 5.0;
 
 /// Jak's meters (x left, y up, z forward) in the soldier body's frame (x
@@ -221,6 +222,9 @@ fn channel(rig: &Rig, jak: &Jak) -> Vec<Trs> {
     if chan.is(jak_mode::anim::BOARD_TURN) {
         return stance(rig, jak);
     }
+    if let Some(mix) = chan.mix {
+        return walk_mix(rig, &mix, chan.frame);
+    }
     let name = chan.anim.name();
     let Some(clip) = rig.clips.get(name) else {
         return if jak.state.is_board() {
@@ -235,6 +239,49 @@ fn channel(rig: &Rig, jak: &Jak) -> Vec<Trs> {
         name,
         chan.frame.clamp(0.0, last) / last * clip.duration,
     )
+}
+
+/// The walk cycle: the walk and the run each leaned toward their slope and
+/// side cycles, all at one frame, the run mixed over the walk.
+fn walk_mix(rig: &Rig, mix: &jak_mode::anim::WalkMix, frame: f32) -> Vec<Trs> {
+    let at = |anim: jak_mode::anim::Anim| -> Option<Vec<Trs>> {
+        let clip = rig.clips.get(anim.name())?;
+        let last = clip.frames.saturating_sub(1).max(1) as f32;
+        Some(sampled(
+            rig,
+            anim.name(),
+            frame.clamp(0.0, last) / last * clip.duration,
+        ))
+    };
+    let lean = |pose: &mut Vec<Trs>, anim: jak_mode::anim::Anim, weight: f32| {
+        if weight > 0.0
+            && let Some(other) = at(anim)
+        {
+            for (p, o) in pose.iter_mut().zip(&other) {
+                *p = p.lerp(o, weight.min(1.0));
+            }
+        }
+    };
+    let [walk, walk_slope, walk_side, run, run_slope, run_side] = mix.anims();
+    let group = |base, slope, side| {
+        let mut pose = at(base)?;
+        lean(&mut pose, slope, mix.up.abs());
+        lean(&mut pose, side, mix.side.abs());
+        Some(pose)
+    };
+    match (
+        group(walk, walk_slope, walk_side),
+        group(run, run_slope, run_side),
+    ) {
+        (Some(mut walking), Some(running)) => {
+            for (w, r) in walking.iter_mut().zip(&running) {
+                *w = w.lerp(r, mix.run.clamp(0.0, 1.0));
+            }
+            walking
+        }
+        (Some(pose), None) | (None, Some(pose)) => pose,
+        (None, None) => sampled(rig, "jakb-stance-loop", 0.0),
+    }
 }
 
 /// A run of clips `elapsed` seconds in: each one-shot plays through before

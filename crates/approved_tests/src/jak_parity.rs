@@ -575,6 +575,15 @@ fn moving_anims() -> std::sync::Arc<Anims> {
                     12.5 * M * t,
                 )
             }),
+        )
+        .with_align(
+            "jakb-turn-around",
+            AlignTrack {
+                trans: vec![Vec3::ZERO; 21],
+                quat: (0..21)
+                    .map(|i| Quat::from_rotation_y(std::f32::consts::PI * i as f32 / 20.0))
+                    .collect(),
+            },
         );
     std::sync::Arc::new(anims)
 }
@@ -920,4 +929,139 @@ fn spin_strikes_each_target_once() {
         })
         .collect();
     assert_eq!(strikes, vec![(7, 3.0)]);
+}
+
+fn back() -> PadInput {
+    PadInput {
+        left: [0.0, -1.0],
+        ..Default::default()
+    }
+}
+
+/// Pulling the stick back at a full run skids Jak round: the skid turns
+/// him on its animation and he sets off the other way at a walk's speed.
+#[test]
+fn reversing_at_a_run_skids_round() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    run(&mut jak, &mut world, forward(), 60);
+    assert_eq!(jak.state, State::Walk);
+    assert!(jak.velocity().z > 9.0 * M, "{}", jak.velocity().z / M);
+    until(&mut jak, &mut world, back(), 5, |s| *s == State::TurnAround);
+    until(&mut jak, &mut world, back(), 60, |s| *s == State::Walk);
+    let v = jak.velocity();
+    assert!(v.z < -9.0 * M, "{}", v.z / M);
+}
+
+/// Walking is not running: a slow walk never skids.
+#[test]
+fn reversing_at_a_walk_does_not_skid() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    let slow = PadInput {
+        left: [0.0, 0.5],
+        ..Default::default()
+    };
+    run(&mut jak, &mut world, slow, 60);
+    for _ in 0..30 {
+        jak.step(&back(), &mut world, None);
+        assert_ne!(jak.state, State::TurnAround);
+    }
+}
+
+/// A floor at y = 0 and a ledge `height` meters up that ends at z = 2 m.
+fn ledge(height: f32) -> TriangleGrid {
+    let s = 2000.0 * M;
+    let h = height * M;
+    let mut tris = quad(
+        Vec3::new(-s, 0.0, -s),
+        Vec3::new(-s, 0.0, s),
+        Vec3::new(s, 0.0, s),
+        Vec3::new(s, 0.0, -s),
+    )
+    .to_vec();
+    tris.extend(quad(
+        Vec3::new(-s, h, -s),
+        Vec3::new(-s, h, 2.0 * M),
+        Vec3::new(s, h, 2.0 * M),
+        Vec3::new(s, h, -s),
+    ));
+    TriangleGrid::new(tris, 4.0 * M)
+}
+
+fn run_off(height: f32) -> (Jak, Vec<Event>) {
+    let mut world = ledge(height);
+    let mut jak = Jak::new(Vec3::new(0.0, height * M, 0.0), 0.0);
+    run(&mut jak, &mut world, idle(), 60);
+    assert_eq!(jak.state, State::Stance);
+    jak.take_events();
+    let mut events = Vec::new();
+    for _ in 0..600 {
+        jak.step(&forward(), &mut world, None);
+        events.extend(jak.take_events());
+        if jak.control.on_surface() && jak.trans().y < 1.0 * M {
+            jak.step(&forward(), &mut world, None);
+            events.extend(jak.take_events());
+            break;
+        }
+    }
+    (jak, events)
+}
+
+/// Over thirty meters a landing is hard: it costs a unit of health for the
+/// first thirty and one more for every twenty after, and Jak is down until
+/// the painful landing has played.
+#[test]
+fn a_fall_over_thirty_meters_lands_hard() {
+    let (mut jak, events) = run_off(40.0);
+    assert!(
+        matches!(jak.state, State::HitGroundHard { .. }),
+        "{:?}",
+        jak.state
+    );
+    assert!(
+        events.contains(&Event::HardLanding { health: 1.0 }),
+        "{events:?}"
+    );
+    let mut world = ledge(40.0);
+    for _ in 0..10 {
+        jak.step(&press(button::X), &mut world, None);
+        assert!(matches!(jak.state, State::HitGroundHard { .. }));
+    }
+    until(&mut jak, &mut world, idle(), 200, |s| *s == State::Stance);
+
+    let (_, events) = run_off(55.0);
+    assert!(
+        events.contains(&Event::HardLanding { health: 2.0 }),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_fall_under_thirty_meters_lands_unhurt() {
+    let (jak, events) = run_off(20.0);
+    assert!(!matches!(jak.state, State::HitGroundHard { .. }));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::HardLanding { .. }))
+    );
+}
+
+/// At a run the walk cycle mixes all the way to the run and advances by
+/// the ground covered over the run cycle's six and a quarter meters.
+#[test]
+fn running_mixes_the_run_cycle() {
+    let mut world = ground(None);
+    let mut jak = mover(&mut world);
+    run(&mut jak, &mut world, forward(), 120);
+    let mix = jak.chan.mix.expect("the walk cycle mixes");
+    assert_eq!(mix.run, 1.0);
+    let speed = jak.control.ctrl_xz_vel;
+    let before = jak.chan.frame;
+    jak.step(&forward(), &mut world, None);
+    let max = jak.anims.max(jak.chan.anim);
+    let step = (jak.chan.frame - before).rem_euclid(max);
+    let want = speed / (6.25 * M) * jak.anims.info(jak.chan.anim).speed;
+    assert!((step - want).abs() < 0.02, "{step} {want}");
 }

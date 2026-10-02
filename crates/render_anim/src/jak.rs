@@ -557,6 +557,11 @@ fn update(
                     ),
                 }
             }
+            Event::HardLanding { health } if health > 0.0 => {
+                let damage = (health * DAMAGE_TO_MW2).round() as i32;
+                sim::voxel::push_player_damage(local.0.0, damage, None);
+                diag::info!(World, "Jak: hard landing, {damage} damage");
+            }
             Event::BoardOn => diag::info!(World, "Jak: on the board"),
             Event::BoardOff => diag::info!(World, "Jak: off the board"),
             _ => {}
@@ -763,9 +768,12 @@ fn readout(jak: &Jak, interact: Option<&str>) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let align = a.align(chan.anim).map_or("none", |_| "on");
+    let mix = chan.mix.map_or(String::new(), |m| {
+        format!("  mix run {:.2} up {:.2} side {:.2}", m.run, m.up, m.side)
+    });
     format!(
         "{} <- {} ({}, {:.2}s ago, {:.2}s in)  code step {}\n\
-         anim {} frame {:.1}/{} artist {:.1} {:?}  align {}  timing {}/{} from files\n\
+         anim {} frame {:.1}/{} artist {:.1} {:?}  align {}{}  timing {}/{} from files\n\
          attack {}\n\
          moves {}\n\
          cancel window {}  buffered [{}]  held [{}]\n\
@@ -784,6 +792,7 @@ fn readout(jak: &Jak, interact: Option<&str>) -> String {
         chan.aframe_num(a),
         chan.func,
         align,
+        mix,
         a.timed,
         jak_mode::anim::NAMES.len(),
         hit,

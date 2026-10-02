@@ -14,8 +14,8 @@ pub mod opts {
     pub const XZ_VEL: u32 = 1 << 2;
     pub const KEEP_OTHER: u32 = 1 << 3;
     pub const QUAT: u32 = 1 << 4;
-    pub const IGNORE_Y_IF_ZERO: u32 = 1 << 10;
     pub const NO_GRAVITY: u32 = 1 << 11;
+    pub const IGNORE_Y_IF_ZERO: u32 = 1 << 12;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

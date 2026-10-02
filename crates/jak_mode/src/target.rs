@@ -42,6 +42,22 @@ pub const STUCK_TIMEOUT: i64 = seconds(2.0);
 pub const STUCK_DISTANCE: f32 = meters(0.05);
 pub const DUCK_WALK_CYCLE_DIST: f32 = meters(3.25);
 pub const RUN_CYCLE_LENGTH: f32 = 60.0;
+pub const FALL_FAR: f32 = meters(30.0);
+pub const FALL_FAR_INC: f32 = meters(20.0);
+
+/// How far one cycle of each walk and run animation carries Jak.
+pub mod cycle {
+    use crate::math::meters;
+
+    pub const WALK: f32 = meters(2.8);
+    pub const WALK_UP: f32 = meters(2.8);
+    pub const WALK_DOWN: f32 = meters(2.8);
+    pub const WALK_SIDE: f32 = meters(2.8);
+    pub const RUN: f32 = meters(6.25);
+    pub const RUN_UP: f32 = meters(5.0);
+    pub const RUN_DOWN: f32 = meters(5.0);
+    pub const RUN_SIDE: f32 = meters(6.25);
+}
 /// The dive's own jump: what it leaves the ground at, and how fast it
 /// drives down.
 const FLOP_UP: f32 = 29491.2;
@@ -81,6 +97,8 @@ pub struct FootInfo {
     pub flop_frames: u32,
     pub ducking: bool,
     pub prev_state_time: i64,
+    /// When Jak last stood on ground that rules out a turn-around.
+    pub no_turn_around_time: i64,
     rng: u32,
 }
 
@@ -105,6 +123,7 @@ impl Default for FootInfo {
             flop_frames: 0,
             ducking: false,
             prev_state_time: 0,
+            no_turn_around_time: 0,
             rng: 0x1234_5678,
         }
     }
@@ -277,7 +296,61 @@ impl Jak {
             self.control.status |= status::ON_SURFACE;
             return Some(State::HitGround { stuck: true });
         }
+        if self.state_time != self.time {
+            return self.slide_down_test();
+        }
         None
+    }
+
+    /// Off the ground a while and against a surface Jak cannot stand on.
+    fn slide_down_test(&self) -> Option<State> {
+        let c = &self.control;
+        (c.status & (status::ON_SURFACE | status::TOUCH_EDGE) == 0
+            && self.time_elapsed(c.last_time_on_surface, GROUND_TIMEOUT)
+            && c.status & status::TOUCH_SURFACE != 0
+            && cos(c.current.slope_slip_angle) < c.surface_angle)
+            .then_some(State::SlideDown)
+    }
+
+    /// The stick turned back against a run: true once Jak has been moving
+    /// near full speed and the stick points away from his velocity. Keeps
+    /// the velocity history the skid starts from.
+    fn turn_around(&mut self) -> bool {
+        let pad = self.pad_in_surface().normalize_or_zero();
+        let along = pad.dot(self.control.transv.normalize_or_zero());
+        let c = &mut self.control;
+        c.transv_history.rotate_right(1);
+        c.transv_history[0] = (c.transv, c.ctrl_xz_vel);
+        let mut fastest = -1000.0;
+        let mut sum = 0.0;
+        for (i, &(_, speed)) in c.transv_history.iter().enumerate() {
+            sum += speed;
+            if fastest < speed {
+                c.idx_of_fastest_xz_vel = i;
+                fastest = speed;
+            }
+        }
+        c.average_xz_vel = sum / 16.0;
+        if c.current.flags & flag::NO_TURN_AROUND != 0 {
+            self.foot.no_turn_around_time = self.time;
+        }
+        let c = &self.control;
+        self.time - self.foot.no_turn_around_time >= seconds(1.0)
+            && along < 0.0
+            && 0.8 * c.current.target_speed < c.average_xz_vel
+            && 0.7 < c.pad_magnitude
+            && self.time_elapsed(c.last_time_touching_actor, seconds(0.3))
+            && self.time_elapsed(c.time_of_last_lc, seconds(0.3))
+            && c.on_surface()
+            && 0.7 < c.surface_angle
+    }
+
+    /// Faces Jak along `v`, level, at once.
+    fn vector_turn_to(&mut self, v: Vec3) {
+        let c = &mut self.control;
+        c.dir_targ = forward_up_nopitch_quat(v.normalize_or_zero(), y_axis(c.dir_targ));
+        c.quat = c.dir_targ;
+        self.build_conversions();
     }
 
     /// The window a finished move leaves open, checked first thing by the
@@ -325,11 +398,25 @@ impl Jak {
         self.foot.hook_time = self.time;
     }
 
-    pub(crate) fn foot_enter(&mut self, state: &State) {
+    /// The new state's entry; a state can turn straight into another here.
+    pub(crate) fn foot_enter(&mut self, state: &State) -> Option<State> {
         let now = self.time;
         match *state {
             State::Stance | State::Walk => {
                 self.control.mod_surface = self.walk_mods();
+            }
+            State::TurnAround => {
+                let v = self.control.transv;
+                self.vector_turn_to(v);
+                self.control.mod_surface = surface::TURN_AROUND;
+                self.control.bend_target = 1.0;
+            }
+            State::SlideDown => self.control.mod_surface = surface::JUMP,
+            State::HitGroundHard { .. } => {
+                self.foot.last_running_attack_end_time = 0;
+                self.foot.last_attack_end_time = 0;
+                self.set_forward_vel(0.0);
+                self.control.mod_surface = surface::foot::HIT_GROUND_HARD;
             }
             State::DuckStance { keep_time } | State::DuckWalk { keep_time } => {
                 if keep_time {
@@ -381,9 +468,16 @@ impl Jak {
                     surface::JUMP
                 };
             }
-            State::HitGround { .. } => {
+            State::HitGround { stuck } => {
                 self.control.turn_go_the_long_way = 0.0;
-                self.events.push(Event::Land);
+                if !stuck {
+                    let c = &self.control;
+                    let fall = c.gravity_normal.dot(c.last_trans_any_surf - c.trans);
+                    if FALL_FAR < fall && c.status & status::ON_WATER == 0 {
+                        return Some(State::HitGroundHard { height: fall });
+                    }
+                    self.events.push(Event::Land);
+                }
                 self.foot.last_running_attack_end_time = 0;
                 self.foot.last_attack_end_time = 0;
                 if self.control.ground_impact_vel >= FALL_STUMBLE_THRESHOLD {
@@ -475,6 +569,11 @@ impl Jak {
                 self.set_up(FLOP_UP);
             }
             State::FlopHitGround { .. } => {
+                let c = &self.control;
+                let fall = c.gravity_normal.dot(c.highest_jump_mark - c.trans);
+                if FALL_FAR < fall {
+                    return Some(State::HitGroundHard { height: fall });
+                }
                 self.events.push(Event::Land);
                 self.set_forward_vel(0.0);
                 let mut land = surface::foot::FLOP_LAND;
@@ -499,6 +598,7 @@ impl Jak {
             }
             _ => {}
         }
+        None
     }
 
     pub(crate) fn foot_exit(&mut self, state: &State, next: &State) {
@@ -509,6 +609,14 @@ impl Jak {
                 self.foot.hook = StateHook::None;
             }
             State::Walk => self.foot.hook = StateHook::None,
+            State::TurnAround => {
+                self.foot.hook = StateHook::None;
+                self.set_forward_vel(0.0);
+                let c = &mut self.control;
+                c.ctrl_xz_vel = 0.0;
+                c.quat = c.dir_targ;
+                c.bend_target = 0.0;
+            }
             State::DuckStance { .. } | State::DuckWalk { .. } => {
                 if !matches!(
                     next,
@@ -562,7 +670,8 @@ impl Jak {
             | State::Falling { .. }
             | State::AttackUppercut { .. }
             | State::AttackUppercutJump { .. }
-            | State::FlopHitGround { .. } => self.target_exit(),
+            | State::FlopHitGround { .. }
+            | State::HitGroundHard { .. } => self.target_exit(),
             _ => {}
         }
     }
@@ -589,13 +698,15 @@ impl Jak {
                 }
                 if self.move_legs() {
                     self.control.bend_target = 0.0;
+                    self.code.no_exit = true;
                     return Some(State::Walk);
                 }
                 if self.pad.hold(button::L1) && self.can_duck() {
                     self.control.bend_target = 0.0;
+                    self.code.no_exit = true;
                     return Some(State::DuckStance { keep_time: false });
                 }
-                self.ground_actions(x)
+                self.ground_actions(x, false)
             }
             State::Walk => {
                 if let Some(next) = self.run_state_hook() {
@@ -605,12 +716,46 @@ impl Jak {
                     return Some(State::Roll);
                 }
                 if self.pad.hold(button::L1) && self.can_duck() {
+                    self.code.no_exit = true;
                     return Some(State::DuckWalk { keep_time: false });
                 }
                 if !self.move_legs() {
+                    self.code.no_exit = true;
                     return Some(State::Stance);
                 }
-                self.ground_actions(x)
+                self.ground_actions(x, true)
+            }
+            State::TurnAround => {
+                if let Some(next) = self.run_state_hook() {
+                    return Some(next);
+                }
+                if x && self.can_jump(false) {
+                    return Some(self.jump());
+                }
+                if self.pad.pressed(button::CIRCLE) && self.can_feet() {
+                    return Some(State::Attack);
+                }
+                if self.pad.pressed(button::SQUARE) && self.can_hands(true) {
+                    return Some(State::RunningAttack);
+                }
+                if !self.control.on_surface()
+                    && self.time_elapsed(self.control.last_time_on_surface, seconds(0.08))
+                {
+                    return Some(State::Falling { uppercut: false });
+                }
+                self.slide_down_test()
+            }
+            State::SlideDown => {
+                let c = &self.control;
+                if c.on_surface() || c.move_dist(self.time, STUCK_TIME) < STUCK_DISTANCE {
+                    self.control.status |= status::ON_SURFACE;
+                    return Some(if self.gun.out {
+                        State::Stance
+                    } else {
+                        State::DuckStance { keep_time: false }
+                    });
+                }
+                None
             }
             State::DuckStance { .. } | State::DuckWalk { .. } => {
                 if let Some(next) = self.run_state_hook() {
@@ -646,8 +791,10 @@ impl Jak {
                 {
                     return Some(self.uppercut());
                 }
-                self.fall_test()
-                    .then_some(State::Falling { uppercut: false })
+                if self.fall_test() {
+                    return Some(State::Falling { uppercut: false });
+                }
+                self.slide_down_test()
             }
             State::HitGround { .. } => {
                 if x && self.can_jump(false) {
@@ -665,8 +812,10 @@ impl Jak {
                 if self.pad.recently_pressed(button::SQUARE) && self.can_hands(true) {
                     return Some(State::RunningAttack);
                 }
-                self.fall_test()
-                    .then_some(State::Falling { uppercut: false })
+                if self.fall_test() {
+                    return Some(State::Falling { uppercut: false });
+                }
+                self.slide_down_test()
             }
             State::Jump { .. } | State::DoubleJump { .. } => {
                 let double = matches!(self.state, State::DoubleJump { .. });
@@ -696,7 +845,7 @@ impl Jak {
                 if !double || self.state_time != self.time {
                     self.board_var_jump_foot();
                 }
-                None
+                if double { None } else { self.slide_down_test() }
             }
             State::HighJump { .. } | State::DuckHighJumpJump { .. } => {
                 let stuck_after = if self.chan.is(anim::JUMP_LOOP) {
@@ -848,6 +997,11 @@ impl Jak {
                 ("[] dive", up < 73728.0 && -61440.0 < up && dive),
                 ("O air spin", feet),
             ],
+            State::TurnAround => vec![
+                ("X jump", jump),
+                ("O spin", feet),
+                ("[] punch", self.can_hands(true)),
+            ],
             State::Falling { .. } => vec![("O air spin", feet)],
             State::Attack => vec![("X jump", jump)],
             State::RunningAttack => vec![(
@@ -900,8 +1054,9 @@ impl Jak {
         (left > 0).then_some((name, left))
     }
 
-    /// The moves standing and walking share: jump, spin, punch, falling off.
-    fn ground_actions(&mut self, x: bool) -> Option<State> {
+    /// The moves standing and walking share: jump, spin, punch, a skid
+    /// round while walking, sliding or falling off.
+    fn ground_actions(&mut self, x: bool, walking: bool) -> Option<State> {
         if x && self.can_jump(false) {
             return Some(self.jump());
         }
@@ -910,6 +1065,14 @@ impl Jak {
         }
         if self.pad.recently_pressed(button::SQUARE) && self.can_hands(true) {
             return Some(State::RunningAttack);
+        }
+        if walking && self.turn_around() && self.time_elapsed(self.state_time, seconds(0.3)) {
+            let (fastest, _) = self.control.transv_history[self.control.idx_of_fastest_xz_vel];
+            self.control.transv = fastest;
+            return Some(State::TurnAround);
+        }
+        if let Some(next) = self.slide_down_test() {
+            return Some(next);
         }
         self.fall_test()
             .then_some(State::Falling { uppercut: false })
@@ -1012,7 +1175,7 @@ impl Jak {
         })
     }
 
-    /// One frame on foot.
+    /// One frame on foot. The skid and the hard landing ignore the stick.
     pub(crate) fn target_post(&mut self, world: &mut dyn CollideWorld) {
         if self.state == State::BoardGetOff {
             self.control.bend_speed = 0.0;
@@ -1021,13 +1184,14 @@ impl Jak {
                 seek(self.control.draw_offset_y, 0.0, 16384.0 * SECONDS_PER_FRAME);
         }
         self.flag_setup();
-        if self.control.force_turn_to_strength < 0.0 {
+        let no_stick = matches!(self.state, State::TurnAround | State::HitGroundHard { .. });
+        if self.control.force_turn_to_strength < 0.0 && !no_stick {
             self.control.force_turn_to_strength = 1.0 - self.pad.stick0_speed;
         }
         self.build_conversions();
         self.do_rotations1();
         let pad_dir = self.read_pad();
-        let speed = self.debounce_speed();
+        let speed = if no_stick { 0.0 } else { self.debounce_speed() };
         self.turn_to_vector(pad_dir, speed);
         self.add_thrust();
         self.add_gravity();

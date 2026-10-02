@@ -66,6 +66,10 @@ pub enum AirFrom {
 pub enum State {
     Stance,
     Walk,
+    /// Reversing the stick at a run: the skid round.
+    TurnAround,
+    /// Off the ground against a slope too steep to stand on.
+    SlideDown,
     /// Ducking; `keep_time` carries the time from the duck state before.
     DuckStance {
         keep_time: bool,
@@ -102,6 +106,11 @@ pub enum State {
     },
     HitGround {
         stuck: bool,
+    },
+    /// Landing from a fall higher than Jak takes unhurt; `height` is the
+    /// fall.
+    HitGroundHard {
+        height: f32,
     },
     /// The spin kick.
     Attack,
@@ -191,6 +200,8 @@ impl State {
         match self {
             State::Stance => "stance",
             State::Walk => "walk",
+            State::TurnAround => "turn-around",
+            State::SlideDown => "slide-down",
             State::DuckStance { .. } => "duck-stance",
             State::DuckWalk { .. } => "duck-walk",
             State::Jump { .. } => "jump",
@@ -200,6 +211,7 @@ impl State {
             State::DuckHighJumpJump { .. } => "duck-high-jump-jump",
             State::Falling { .. } => "falling",
             State::HitGround { .. } => "hit-ground",
+            State::HitGroundHard { .. } => "hit-ground-hard",
             State::Attack => "attack",
             State::RunningAttack => "running-attack",
             State::AttackAir { .. } => "attack-air",
@@ -270,6 +282,10 @@ pub enum Event {
     },
     Jump,
     Land,
+    /// A hard landing: the health it takes, in Jak's units.
+    HardLanding {
+        health: f32,
+    },
     /// The Blaster fired: muzzle and direction.
     Fire {
         from: Vec3,
@@ -305,6 +321,8 @@ pub struct Code {
     pub t2: i64,
     /// Reached this frame, without a suspend since.
     pub(crate) arrived: bool,
+    /// The state leaves without its exit running.
+    pub(crate) no_exit: bool,
 }
 
 /// What changed Jak's state last, and the jump it last set off, for the
@@ -476,7 +494,7 @@ impl Jak {
         let old = self.state;
         if old.is_board() {
             self.board_exit_state(&old, &next);
-        } else {
+        } else if !self.code.no_exit {
             self.foot_exit(&old, &next);
         }
         self.trace.prev = old.name();
@@ -490,8 +508,9 @@ impl Jak {
         };
         if next.is_board() {
             self.board_enter(&next);
-        } else {
-            self.foot_enter(&next);
+        } else if let Some(instead) = self.foot_enter(&next) {
+            self.trace.why = "enter";
+            self.go(instead);
         }
     }
 

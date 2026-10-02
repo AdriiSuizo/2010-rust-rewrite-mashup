@@ -2,7 +2,7 @@
 //! plays, the motion they carry, and the decisions it makes as they play
 //! out. Each sequence resumes every frame where it last waited.
 use crate::align::opts;
-use crate::anim::{self, NumFunc};
+use crate::anim::{self, NumFunc, WalkMix};
 use crate::attack::Danger;
 use crate::collide::CollideWorld;
 use crate::control::STANDARD_GRAVITY;
@@ -10,7 +10,12 @@ use crate::math::*;
 use crate::pad::button;
 use crate::surface;
 use crate::target::*;
-use crate::{HighJump, Jak, State};
+use crate::{Event, HighJump, Jak, State};
+
+/// How far toward the run the walk cycle mixes at a speed.
+fn walk_run(speed: f32) -> f32 {
+    ((speed - 16384.0) / 20480.0).clamp(0.0, 1.0)
+}
 
 /// The falling loop's steps, shared by every jump.
 const FALL: u16 = 200;
@@ -21,6 +26,9 @@ impl Jak {
         match self.state {
             State::Stance => self.foot_stance_code(),
             State::Walk => self.walk_code(),
+            State::TurnAround => self.turn_around_code(),
+            State::SlideDown => self.slide_down_code(),
+            State::HitGroundHard { height } => self.hit_ground_hard_code(height),
             State::DuckStance { .. } => self.duck_stance_code(),
             State::DuckWalk { .. } => self.duck_walk_code(),
             State::Jump { .. } | State::HighJump { .. } => self.jump_code_foot(),
@@ -185,24 +193,254 @@ impl Jak {
         }
     }
 
-    /// Walking and running: the cycle at the pace the speed sets.
+    /// Walking and running: the end of the move before it, then the walk
+    /// cycle's channels at the pace the ground covered sets.
     fn walk_code(&mut self) -> Option<State> {
+        loop {
+            match self.code.pc {
+                0 => {
+                    let speed = self.control.ctrl_xz_vel;
+                    let mut mix = WalkMix {
+                        run: walk_run(speed),
+                        ..WalkMix::default()
+                    };
+                    let mut from = 0.0;
+                    let ch = self.chan;
+                    let landing = ch.is_any(&[
+                        anim::JUMP_LOOP,
+                        anim::ROLL_FLIP,
+                        anim::ATTACK_FROM_JUMP_END,
+                        anim::ATTACK_UPPERCUT,
+                        anim::FLOP_DOWN_LAND,
+                    ]) || (ch.is(anim::JUMP) && 30.0 < self.aframe_num());
+                    if ch.is(anim::TURN_AROUND) {
+                        mix.run = 1.0;
+                        self.ja_push(seconds(0.05));
+                    } else if ch.is(anim::DUCK_ROLL) {
+                        self.ja_push(seconds(0.075));
+                        mix.run = 1.0;
+                    } else if ch.is(anim::ATTACK_FROM_STANCE) {
+                        self.code.rate = (speed / meters(5.0)).clamp(0.8, 1.0);
+                        self.code.flag = self.foot.chance(0.3) && 20480.0 < speed;
+                        let end = if self.code.flag {
+                            anim::ATTACK_FROM_STANCE_ALT_END
+                        } else {
+                            anim::ATTACK_FROM_STANCE_END
+                        };
+                        let to = self.aframe(end, 29.0);
+                        self.ja_set(end, NumFunc::seek_to(to, self.code.rate), 0.0);
+                        self.goto(1);
+                        continue;
+                    } else if ch.is_any(&[anim::ATTACK_PUNCH, anim::ATTACK_PUNCH_END]) {
+                        mix.run = 1.0;
+                        from = 30.0;
+                        self.ja_push(seconds(0.15));
+                    } else if let (true, Some(m)) = (ch.is(anim::WALK), ch.mix) {
+                        from = self.aframe_num();
+                        mix = m;
+                    } else if landing && 12288.0 < speed {
+                        let jump = ch.is(anim::JUMP);
+                        if ch.is_any(&[anim::ROLL_FLIP, anim::ATTACK_FROM_JUMP_END]) {
+                            self.ja_push(seconds(0.05));
+                        }
+                        let impact = self.control.ground_impact_vel;
+                        let (hard, firm) = if jump {
+                            (77824.0, 61440.0)
+                        } else {
+                            (102400.0, 102400.0)
+                        };
+                        let (squash, to, start) = if hard < impact {
+                            (anim::RUN_SQUASH, 3.0, None)
+                        } else if firm < impact {
+                            (anim::RUN_SQUASH, 3.0, Some(-1.0))
+                        } else {
+                            (anim::RUN_SQUASH_WEAK, 4.0, None)
+                        };
+                        let to = self.aframe(squash, to);
+                        let start = start.map_or(0.0, |a| self.aframe(squash, a));
+                        self.ja_set(squash, NumFunc::seek_to(to, 1.00001), start);
+                        self.goto(3);
+                        continue;
+                    } else if ch.is(anim::SMACK_SURFACE) {
+                        self.ja_push(seconds(0.15));
+                    } else {
+                        self.ja_push(seconds(0.05));
+                    }
+                    self.walk_start(mix, from);
+                    self.goto(10);
+                }
+                1 => {
+                    if !self.ja_wait() {
+                        return None;
+                    }
+                    let end = if self.code.flag {
+                        anim::ATTACK_FROM_STANCE_RUN_ALT_END
+                    } else {
+                        anim::ATTACK_FROM_STANCE_RUN_END
+                    };
+                    self.ja_set(end, NumFunc::seek(self.code.rate), 0.0);
+                    self.goto(2);
+                }
+                2 => {
+                    if !self.ja_wait() {
+                        return None;
+                    }
+                    self.ja_push(seconds(0.05));
+                    self.walk_start(
+                        WalkMix {
+                            run: 1.0,
+                            ..WalkMix::default()
+                        },
+                        30.0,
+                    );
+                    self.goto(10);
+                }
+                3 => {
+                    if !self.ja_wait() {
+                        return None;
+                    }
+                    self.goto(4);
+                }
+                4 => {
+                    if self.code.arrived {
+                        return None;
+                    }
+                    let pace = self.control.ctrl_xz_vel.max(20480.0) * SECONDS_PER_FRAME;
+                    let rate = pace / (cycle::RUN_UP / RUN_CYCLE_LENGTH);
+                    self.chan.eval_with(&self.anims, NumFunc::seek(rate));
+                    self.code.arrived = true;
+                    if !self.chan.done(&self.anims) {
+                        return None;
+                    }
+                    self.ja_push(seconds(0.1));
+                    self.walk_start(
+                        WalkMix {
+                            run: 1.0,
+                            ..WalkMix::default()
+                        },
+                        30.0,
+                    );
+                    self.goto(10);
+                }
+                _ => {
+                    self.walk_cycle();
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// The walk cycle's channels, from an artist frame of the walk.
+    fn walk_start(&mut self, mix: WalkMix, from: f32) {
+        let frame = self.aframe(anim::WALK, from);
+        self.ja_set(anim::WALK, NumFunc::Identity, frame);
+        self.chan.mix = Some(mix);
+    }
+
+    /// One frame of the walk cycle: the run eases in with the speed, the
+    /// slope and side leans with the ground, and the cycle advances by the
+    /// ground covered against the distance the mixed cycles cover.
+    fn walk_cycle(&mut self) {
+        let c = &self.control;
+        let up = (2.0 * c.local_slope_z).clamp(-1.0, 1.0);
+        let side = (1.6 * c.local_slope_x).clamp(-1.0, 1.0);
+        let speed = c.ctrl_xz_vel;
+        let mut mix = self.chan.mix.unwrap_or(WalkMix::default());
+        mix.run = seek(mix.run, walk_run(speed), 2.0 * SECONDS_PER_FRAME);
+        mix.up = seek(mix.up, up, ((up - mix.up).abs() / 4.0).clamp(0.05, 0.2));
+        mix.side = seek(
+            mix.side,
+            side,
+            ((side - mix.side).abs() / 4.0).clamp(0.05, 0.2),
+        );
+        let rate = speed / (60.0 * (mix.cycle_dist() / RUN_CYCLE_LENGTH));
+        self.chan.eval_with(&self.anims, NumFunc::Loop { rate });
+        self.chan.mix = Some(mix);
+    }
+
+    /// The skid round: the turn-around animation turns Jak half a turn by
+    /// its own motion, and he sets off the other way at a walk.
+    fn turn_around_code(&mut self) -> Option<State> {
         if self.code.pc == 0 {
-            self.ja_push(seconds(0.05));
+            self.ja_push(seconds(0.04));
+            self.ja_set(anim::TURN_AROUND, NumFunc::seek(2.0), 0.0);
+            let c = &mut self.control;
+            c.dir_targ =
+                (glam::Quat::from_rotation_y(to_radians(32768.0)) * c.dir_targ).normalize();
+            self.compute_delta_align();
             self.goto(1);
         }
-        let speed = self.control.ctrl_xz_vel;
-        let (cycle, dist) = if 16384.0 + 10240.0 < speed {
-            (anim::RUN, meters(6.25))
-        } else {
-            (anim::WALK, meters(2.8))
-        };
-        if !self.chan.is(cycle) {
-            self.chan.anim = cycle;
+        if self.code.arrived {
+            return None;
         }
-        let rate = (speed / (60.0 * (dist / RUN_CYCLE_LENGTH))).min(3.0);
-        self.chan.eval_with(&self.anims, NumFunc::Loop { rate });
-        None
+        self.chan.eval(&self.anims);
+        self.code.arrived = true;
+        self.compute_delta_align();
+        self.align(opts::QUAT, 1.0, 1.0, 1.0);
+        if !self.chan.done(&self.anims) {
+            return None;
+        }
+        self.code.no_exit = true;
+        self.control.bend_target = 0.0;
+        self.control.ctrl_xz_vel = 40960.0;
+        self.set_forward_vel(40960.0);
+        self.foot.hook = StateHook::None;
+        Some(State::Walk)
+    }
+
+    /// Sliding down: crouched, the duck stance over and over.
+    fn slide_down_code(&mut self) -> Option<State> {
+        loop {
+            match self.code.pc {
+                0 => {
+                    if !self.chan.is(anim::DUCK_STANCE) {
+                        self.ja_push(seconds(0.1));
+                    }
+                    self.goto(1);
+                }
+                1 => {
+                    self.ja_play(anim::DUCK_STANCE, 1.0);
+                    self.goto(2);
+                }
+                _ => {
+                    if !self.ja_wait() {
+                        return None;
+                    }
+                    self.goto(1);
+                }
+            }
+        }
+    }
+
+    /// A fall too high: the health it costs, then the painful landing and
+    /// getting up, with no way out until both have played.
+    fn hit_ground_hard_code(&mut self, height: f32) -> Option<State> {
+        loop {
+            match self.code.pc {
+                0 => {
+                    if height != 0.0 {
+                        let lost = (1.0 + (height - FALL_FAR) / FALL_FAR_INC).trunc().max(0.0);
+                        self.events.push(Event::HardLanding { health: lost });
+                    }
+                    self.ja_push(1);
+                    self.ja_set(anim::PAINFUL_LAND, NumFunc::seek(1.0), 0.0);
+                    self.goto(1);
+                }
+                1 => {
+                    if !self.ja_wait() {
+                        return None;
+                    }
+                    self.ja_set(anim::PAINFUL_LAND_END, NumFunc::seek(1.0), 0.0);
+                    self.goto(2);
+                }
+                _ => {
+                    if !self.ja_wait() {
+                        return None;
+                    }
+                    return Some(State::Stance);
+                }
+            }
+        }
     }
 
     fn duck_stance_code(&mut self) -> Option<State> {

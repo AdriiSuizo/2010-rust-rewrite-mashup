@@ -49,6 +49,7 @@ const HOLDS: [(Anim, Anim, Anim, Trick); 4] = [
 
 impl Jak {
     pub(crate) fn ja_push(&mut self, ticks: i64) {
+        self.chan.mix = None;
         self.push = crate::Push {
             tick: self.time,
             ticks,
