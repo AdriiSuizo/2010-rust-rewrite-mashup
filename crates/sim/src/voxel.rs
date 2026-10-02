@@ -65,6 +65,8 @@ pub enum VoxelEvent {
     /// A bullet's path through the air, in blocks, up to what stopped it:
     /// blocks without collision on it (grass, flowers) take its damage.
     Ray { from: [f64; 3], to: [f64; 3], damage: f32 },
+    /// A knife struck this block, swung by this client.
+    Melee { block: [i32; 3], client: u32 },
 }
 
 static EVENTS: std::sync::Mutex<Vec<VoxelEvent>> = std::sync::Mutex::new(Vec::new());
@@ -84,6 +86,22 @@ pub fn push_shot(end: [f32; 3], normal: [f32; 3], damage: f32) {
     let block = std::array::from_fn(|k| (p[k] - n[k] * 0.05).floor() as i32);
     if let Ok(mut events) = EVENTS.lock() {
         events.push(VoxelEvent::Shot { block, damage });
+    }
+}
+
+/// A knife's strike at map point `end` on a surface facing `normal`.
+pub fn push_melee(end: [f32; 3], normal: [f32; 3], client: u32) {
+    let Ok(world) = WORLD.read() else {
+        return;
+    };
+    let Some(world) = world.as_ref() else {
+        return;
+    };
+    let p = to_block(world.origin, end);
+    let n = [f64::from(normal[0]), f64::from(normal[2]), -f64::from(normal[1])];
+    let block = std::array::from_fn(|k| (p[k] - n[k] * 0.05).floor() as i32);
+    if let Ok(mut events) = EVENTS.lock() {
+        events.push(VoxelEvent::Melee { block, client });
     }
 }
 

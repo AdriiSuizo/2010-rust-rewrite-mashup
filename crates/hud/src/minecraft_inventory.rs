@@ -52,20 +52,33 @@ const GRID_X: f32 = -98.0;
 /// The character window.
 const BOX: [f32; 4] = [-73.0, -100.0, 62.0, 86.0];
 
-/// Where each slot of the screen sits (x, y, size).
-fn layout() -> Vec<(McSlot, f32, f32, f32)> {
+/// The crafting table's 3x3 grid, and its result.
+const TABLE_X: f32 = -64.0;
+const TABLE_Y: f32 = -92.0;
+const TABLE_RESULT: [f32; 2] = [52.0, -70.0];
+
+/// Where each slot of the screen sits (x, y, size): the inventory's, or a
+/// crafting table's.
+fn layout(workbench: bool) -> Vec<(McSlot, f32, f32, f32)> {
     let mut out = Vec::new();
-    // Armor, head to feet down the left (slots 39..36).
-    for (row, slot) in [39usize, 38, 37, 36].into_iter().enumerate() {
-        out.push((McSlot::Inventory(slot), GRID_X, -100.0 + row as f32 * P, S));
+    if workbench {
+        for i in 0..9 {
+            out.push((McSlot::Workbench(i), TABLE_X + (i % 3) as f32 * P, TABLE_Y + (i / 3) as f32 * P, S));
+        }
+        out.push((McSlot::Result, TABLE_RESULT[0], TABLE_RESULT[1], 24.0));
+    } else {
+        // Armor, head to feet down the left (slots 39..36).
+        for (row, slot) in [39usize, 38, 37, 36].into_iter().enumerate() {
+            out.push((McSlot::Inventory(slot), GRID_X, -100.0 + row as f32 * P, S));
+        }
+        // The offhand beside the character window.
+        out.push((McSlot::Inventory(40), BOX[0] + BOX[2] + 3.0, -34.0, S));
+        // The 2x2 crafting grid and its result.
+        for i in 0..4 {
+            out.push((McSlot::Crafting(i), 22.0 + (i % 2) as f32 * P, -86.0 + (i / 2) as f32 * P, S));
+        }
+        out.push((McSlot::Result, 88.0, -77.0, 24.0));
     }
-    // The offhand beside the character window.
-    out.push((McSlot::Inventory(40), BOX[0] + BOX[2] + 3.0, -34.0, S));
-    // The 2x2 crafting grid and its result.
-    for i in 0..4 {
-        out.push((McSlot::Crafting(i), 22.0 + (i % 2) as f32 * P, -86.0 + (i / 2) as f32 * P, S));
-    }
-    out.push((McSlot::Result, 88.0, -77.0, 24.0));
     // The backpack, three rows of nine, then the hotbar.
     for row in 0..3 {
         for col in 0..9 {
@@ -249,6 +262,7 @@ fn stack_at<'a>(ui: &'a MinecraftUi, slot: McSlot) -> Option<&'a McStack> {
     match slot {
         McSlot::Inventory(i) => ui.slots.get(i)?.as_ref(),
         McSlot::Crafting(i) => ui.crafting.get(i)?.as_ref(),
+        McSlot::Workbench(i) => ui.workbench.get(i)?.as_ref(),
         McSlot::Result => ui.result.as_ref(),
     }
 }
@@ -357,17 +371,21 @@ pub(crate) fn update_minecraft_hud(
         ui.character_box = None;
     } else {
         for _ in wheel.read() {}
-        let hovered = mouse.and_then(|m| hovered_slot(&surface, m));
+        let hovered = mouse.and_then(|m| hovered_slot(&surface, m, ui.workbench_open));
         let inside = mouse.is_some_and(|m| over_panel(&surface, m));
         handle_clicks(&mut ui, &mut input, &buttons, hovered, inside, shift, digit, now);
         canvas.k = K;
         draw_inventory(&mut canvas, &mut ui, weapons, strings, &mut gaps, hovered, mouse);
-        // Where the character stands, and the mouse it follows.
-        let b = surface.apply_rect(BOX[0] * K, BOX[1] * K, BOX[2] * K, BOX[3] * K, CENTER, CENTER);
-        let centre = [b.x + b.w * 0.5, b.y + b.h * 0.36];
-        ui.character_box = Some([b.x + b.w * 0.5, b.y + b.h * 0.5, b.w, b.h]);
-        if let Some(m) = mouse {
-            ui.gaze = [(m.x - centre[0]) / (b.h * 0.5), (m.y - centre[1]) / (b.h * 0.5)];
+        if ui.workbench_open {
+            ui.character_box = None;
+        } else {
+            // Where the character stands, and the mouse it follows.
+            let b = surface.apply_rect(BOX[0] * K, BOX[1] * K, BOX[2] * K, BOX[3] * K, CENTER, CENTER);
+            let centre = [b.x + b.w * 0.5, b.y + b.h * 0.36];
+            ui.character_box = Some([b.x + b.w * 0.5, b.y + b.h * 0.5, b.w, b.h]);
+            if let Some(m) = mouse {
+                ui.gaze = [(m.x - centre[0]) / (b.h * 0.5), (m.y - centre[1]) / (b.h * 0.5)];
+            }
         }
     }
 
@@ -380,8 +398,8 @@ pub(crate) fn update_minecraft_hud(
     pass.minecraft = if quads.is_empty() { TessJob::Hide } else { TessJob::Quads(quads) };
 }
 
-fn hovered_slot(surface: &crate::surface::Hud2dSurface, mouse: Vec2) -> Option<McSlot> {
-    layout().into_iter().find_map(|(slot, x, y, size)| {
+fn hovered_slot(surface: &crate::surface::Hud2dSurface, mouse: Vec2, workbench: bool) -> Option<McSlot> {
+    layout(workbench).into_iter().find_map(|(slot, x, y, size)| {
         let r = surface.apply_rect(x * K, y * K, size * K, size * K, CENTER, CENTER);
         (mouse.x >= r.x && mouse.x < r.x + r.w && mouse.y >= r.y && mouse.y < r.y + r.h).then_some(slot)
     })
@@ -524,9 +542,10 @@ fn draw_inventory(
     mouse: Option<Vec2>,
 ) {
     let c = (CENTER, CENTER);
+    let workbench = ui.workbench_open;
     // Dim the world around the panel; the character window stays clear.
     let dim = [0.0, 0.0, 0.0, 0.55];
-    let [bx, by, bw, bh] = BOX;
+    let [bx, by, bw, bh] = if workbench { [0.0, PANEL_Y, 0.0, 0.0] } else { BOX };
     let around = [
         (-2000.0, -2000.0, 4000.0, 2000.0 + by),
         (-2000.0, by + bh, 4000.0, 2000.0),
@@ -539,39 +558,50 @@ fn draw_inventory(
     }
 
     // The panel: glass, header, edges and brackets.
-    for (x, y, w, h) in [
-        (PANEL_X, PANEL_Y + HEADER_H, PANEL_W, by - PANEL_Y - HEADER_H),
-        (PANEL_X, by + bh, PANEL_W, PANEL_Y + PANEL_H - by - bh),
-        (PANEL_X, by, bx - PANEL_X, bh),
-        (bx + bw, by, PANEL_X + PANEL_W - bx - bw, bh),
-    ] {
-        canvas.fill(x, y, w, h, PANEL, c);
+    if workbench {
+        canvas.fill(PANEL_X, PANEL_Y + HEADER_H, PANEL_W, PANEL_H - HEADER_H, PANEL, c);
+    } else {
+        for (x, y, w, h) in [
+            (PANEL_X, PANEL_Y + HEADER_H, PANEL_W, by - PANEL_Y - HEADER_H),
+            (PANEL_X, by + bh, PANEL_W, PANEL_Y + PANEL_H - by - bh),
+            (PANEL_X, by, bx - PANEL_X, bh),
+            (bx + bw, by, PANEL_X + PANEL_W - bx - bw, bh),
+        ] {
+            canvas.fill(x, y, w, h, PANEL, c);
+        }
     }
     canvas.fill(PANEL_X, PANEL_Y, PANEL_W, HEADER_H, HEADER, c);
     canvas.quad(PANEL_X, PANEL_Y, PANEL_W, HEADER_H, [ACCENT[0], ACCENT[1], ACCENT[2], 0.22], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
     canvas.fill(PANEL_X, PANEL_Y + HEADER_H - 1.0, PANEL_W, 1.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.85], c);
     canvas.fill(PANEL_X, PANEL_Y, 3.0, HEADER_H, ACCENT, c);
-    canvas.text(FONT_TITLE, PANEL_X + 9.0, PANEL_Y + 5.0, 10.0, HIGHLIGHT, "INVENTORY", false, c);
+    let title = if workbench { "CRAFTING TABLE" } else { "INVENTORY" };
+    canvas.text(FONT_TITLE, PANEL_X + 9.0, PANEL_Y + 5.0, 10.0, HIGHLIGHT, title, false, c);
     canvas.text(FONT_SMALL, PANEL_X + PANEL_W - 8.0, PANEL_Y + 7.5, 6.0, TEXT_DIM, "SURVIVAL  //  E TO CLOSE", true, c);
     canvas.frame(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, EDGE, c);
     canvas.brackets(PANEL_X - 2.0, PANEL_Y - 2.0, PANEL_W + 4.0, PANEL_H + 4.0, 8.0, [ACCENT[0], ACCENT[1], ACCENT[2], 0.9], c);
 
-    // The character window: clear, with a frame and MW2 brackets.
-    canvas.quad(bx, by + bh - 26.0, bw, 26.0, [0.0, 0.0, 0.0, 0.35], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
-    canvas.frame(bx, by, bw, bh, EDGE, c);
-    canvas.brackets(bx, by, bw, bh, 5.0, ACCENT, c);
-    canvas.text(FONT_SMALL, bx + 4.0, by + bh - 9.0, 5.5, [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], 0.75], "OPERATOR", false, c);
+    if workbench {
+        canvas.text(FONT_SMALL, TABLE_X, TABLE_Y - 8.0, 6.0, TEXT_DIM, "CRAFTING", false, c);
+        canvas.fill(TABLE_X, TABLE_Y - 2.5, 3.0 * P - 2.0, 0.5, EDGE, c);
+        canvas.text(FONT_TITLE, TABLE_X + 3.0 * P + 12.0, TABLE_RESULT[1] + 6.5, 11.0, TEXT_DIM, ">", false, c);
+    } else {
+        // The character window: clear, with a frame and MW2 brackets.
+        canvas.quad(bx, by + bh - 26.0, bw, 26.0, [0.0, 0.0, 0.0, 0.35], "gradient_fadein_fadebottom", [0.0, 0.0, 1.0, 1.0], c);
+        canvas.frame(bx, by, bw, bh, EDGE, c);
+        canvas.brackets(bx, by, bw, bh, 5.0, ACCENT, c);
+        canvas.text(FONT_SMALL, bx + 4.0, by + bh - 9.0, 5.5, [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], 0.75], "OPERATOR", false, c);
+        canvas.text(FONT_SMALL, 22.0, -100.0, 6.0, TEXT_DIM, "CRAFTING", false, c);
+        canvas.fill(22.0, -92.5, 90.0, 0.5, EDGE, c);
+        canvas.text(FONT_TITLE, 68.0, -73.5, 11.0, TEXT_DIM, ">", false, c);
+    }
 
     // Section labels.
-    canvas.text(FONT_SMALL, 22.0, -100.0, 6.0, TEXT_DIM, "CRAFTING", false, c);
-    canvas.fill(22.0, -92.5, 90.0, 0.5, EDGE, c);
-    canvas.text(FONT_TITLE, 68.0, -73.5, 11.0, TEXT_DIM, ">", false, c);
     canvas.text(FONT_SMALL, GRID_X, -6.5, 6.0, TEXT_DIM, "BACKPACK", false, c);
     canvas.fill(GRID_X + 38.0, -3.5, 158.0, 0.5, EDGE, c);
     canvas.fill(GRID_X, 75.0, 196.0, 0.5, [ACCENT[0], ACCENT[1], ACCENT[2], 0.45], c);
 
     // The slots.
-    for (slot, x, y, size) in layout() {
+    for (slot, x, y, size) in layout(workbench) {
         let hover = hovered == Some(slot);
         let is_result = slot == McSlot::Result;
         canvas.fill(x, y, size, size, if hover { SLOT_HOVER } else { SLOT }, c);

@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod jak_parity;
+#[cfg(test)]
+mod world_interact;
 mod report;
 mod runner;
 mod scenario;

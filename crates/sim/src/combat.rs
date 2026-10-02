@@ -1361,6 +1361,12 @@ fn fire_weapon_melee(
     let Some(segment) = best_hit else {
         return;
     };
+    if matches!(segment.collider, None | Some(ColliderId::World { .. }))
+        && world.publishes_snapshot()
+        && crate::voxel::active()
+    {
+        crate::voxel::push_melee(segment.end, segment.normal, attacker.0);
+    }
     let amount = facts.melee_damage + (world.combat_rng_mut().next_u32() % 5) as i32;
     let (kind, other) = match segment.collider {
         Some(ColliderId::Player { client, .. }) => {

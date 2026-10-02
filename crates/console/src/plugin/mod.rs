@@ -282,6 +282,7 @@ fn publish_client_action_input(
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
     (script_menus, minecraft): (Option<Res<hud::ScriptMenus>>, Option<Res<frame::MinecraftUi>>),
+    mut interact: Option<ResMut<frame::WorldInteract>>,
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
@@ -407,9 +408,14 @@ fn publish_client_action_input(
         }
         out.client.keys[key_num].binding = id;
         if inputs.just_pressed(button) {
+            // Use on something the world offers acts on it, not on MW2.
+            let use_key = matches!(binds.binding_name(button), Some("+activate" | "+usereload"));
+            if use_key && interact.as_mut().is_some_and(|world| world.press_use()) {
+                continue;
+            }
             key_event(&mut out.client, key_num, true, now, frame);
         }
-        if inputs.just_released(button) {
+        if inputs.just_released(button) && out.client.keys[key_num].down != 0 {
             key_event(&mut out.client, key_num, false, now, frame);
         }
     }

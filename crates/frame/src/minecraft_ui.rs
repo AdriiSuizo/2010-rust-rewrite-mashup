@@ -27,6 +27,9 @@ pub struct McStack {
 pub enum McSlot {
     Inventory(usize),
     Crafting(usize),
+    /// The crafting table's 3x3 grid, row by row.
+    Workbench(usize),
+    /// The result of whichever grid is showing.
     Result,
 }
 
@@ -61,6 +64,10 @@ pub struct MinecraftUi {
     pub selected: usize,
     pub slots: Vec<Option<McStack>>,
     pub crafting: [Option<McStack>; 4],
+    /// The screen open is a crafting table's: its 3x3 grid instead of the
+    /// inventory's 2x2 one.
+    pub workbench_open: bool,
+    pub workbench: [Option<McStack>; 9],
     pub result: Option<McStack>,
     /// The stack on the cursor.
     pub cursor: Option<McStack>,

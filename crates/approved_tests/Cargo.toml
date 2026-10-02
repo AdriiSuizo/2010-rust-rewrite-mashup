@@ -11,6 +11,7 @@ asset_transport.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+frame.workspace = true
 jak_mode.workspace = true
 
 [lints]

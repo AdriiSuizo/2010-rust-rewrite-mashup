@@ -126,6 +126,8 @@ struct Runtime {
     /// Boxes of each shape id, to reuse an id for a repeated shape.
     shape_ids: HashMap<Vec<[u32; 6]>, u16>,
     was_alive: bool,
+    /// The crafting table whose screen is open.
+    workbench_at: Option<(i32, i32, i32)>,
 }
 
 /// The player's MW2 body stands in the inventory's character window, on a
@@ -205,6 +207,7 @@ pub(crate) fn register(app: &mut App) {
     app.init_resource::<MinecraftWorldView>()
         .init_resource::<frame::MinecraftUi>()
         .init_resource::<frame::InventoryPuppet>()
+        .init_resource::<frame::WorldInteract>()
         .insert_non_send(Runtime::default())
         .add_systems(
             Update,
@@ -314,6 +317,7 @@ fn update(
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
+    mut interact: ResMut<frame::WorldInteract>,
     (skate, jak, cameras, gamepads, active_pad): (
         Res<frame::SkateMode>,
         Res<frame::JakMode>,
@@ -418,11 +422,16 @@ fn update(
         hand,
         minimap,
         steps,
+        workbench_at,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
         ui.active = false;
         ui.inventory_open = false;
+        ui.workbench_open = false;
+        *workbench_at = None;
+        interact.target = None;
+        interact.pressed = false;
         puppet.active = false;
         return;
     };
@@ -673,6 +682,58 @@ fn update(
         }
     }
 
+    // Use on a crafting table the soldier looks at, or a knife into one,
+    // opens its 3x3 grid; walking off or losing the table closes it.
+    let soldier = alive && !jak.active && !skate.active;
+    let is_table = |pos: (i32, i32, i32)| {
+        minecraft_terrain::scene::Scene::block(&world.scene, pos).is_some_and(|b| b.id.path == "crafting_table")
+    };
+    let table = |pos: (i32, i32, i32)| frame::InteractTarget {
+        kind: frame::InteractKind::CraftingTable,
+        label: "Crafting Table".into(),
+        block: [pos.0, pos.1, pos.2],
+    };
+    let mut looker = minecraftoss_player::Player::new(glam::DVec3::from_array(feet));
+    looker.yaw = f64::from(mc_yaw);
+    looker.pitch = f64::from(ps.viewangles[0]);
+    interact.target = (soldier && !ui.inventory_open)
+        .then(|| looker.target(&world.scene, 4.5))
+        .flatten()
+        .map(|hit| hit.pos)
+        .filter(|&pos| is_table(pos))
+        .map(table);
+    let knifed: Vec<frame::InteractTarget> = all_events
+        .iter()
+        .filter_map(|event| match *event {
+            sim::voxel::VoxelEvent::Melee { block, client } if client == local.0.0 => {
+                Some((block[0], block[1], block[2]))
+            }
+            _ => None,
+        })
+        .filter(|&pos| is_table(pos))
+        .map(table)
+        .collect();
+    let used = interact.take(&knifed);
+    if let Some(used) = used.filter(|_| soldier && !ui.inventory_open) {
+        ui.inventory_open = true;
+        ui.workbench_open = true;
+        *workbench_at = Some((used.block[0], used.block[1], used.block[2]));
+    }
+    if ui.workbench_open {
+        let near = workbench_at.is_some_and(|pos| {
+            let d = [pos.0 as f64 + 0.5 - feet[0], pos.1 as f64 + 0.5 - feet[1], pos.2 as f64 + 0.5 - feet[2]];
+            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= 64.0 && is_table(pos)
+        });
+        if !ui.inventory_open || !near || !soldier {
+            if ui.inventory_open {
+                ui.inventory_open = false;
+                ui.clicks.push(frame::McClick::Close);
+            }
+            ui.workbench_open = false;
+            *workbench_at = None;
+        }
+    }
+
     // Shots and explosions from the authoritative game: bullets that met a
     // mob hurt it, the rest mine.
     let (mob_shots, events): (Vec<_>, Vec<_>) = all_events
@@ -705,7 +766,9 @@ fn update(
                     let pitch = (1.0 + (sounds.random() - sounds.random()) * 0.2) * 0.7;
                     sounds.play(&world.packs, "minecraft:entity.generic.explode", Some(at(center)), 4.0, pitch);
                 }
-                sim::voxel::VoxelEvent::MobShot { .. } | sim::voxel::VoxelEvent::Ray { .. } => {}
+                sim::voxel::VoxelEvent::MobShot { .. }
+                | sim::voxel::VoxelEvent::Ray { .. }
+                | sim::voxel::VoxelEvent::Melee { .. } => {}
             }
         }
     }

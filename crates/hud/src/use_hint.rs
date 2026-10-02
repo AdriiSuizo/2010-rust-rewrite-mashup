@@ -35,7 +35,10 @@ pub(crate) fn update(
     mut images: ResMut<Assets<Image>>,
     time: Res<Time>,
     mut memory: Local<HintMemory>,
-    view: Option<Res<frame::ViewSubject>>,
+    (view, interact): (
+        Option<Res<frame::ViewSubject>>,
+        Option<Res<frame::WorldInteract>>,
+    ),
 ) {
     pass.use_hint = TessJob::Hide;
     if !surface.is_ready()
@@ -58,6 +61,12 @@ pub(crate) fn update(
         return;
     };
     let result = (|| {
+        // Something of the world's own that Use acts on.
+        if let Some(target) = interact.as_ref().and_then(|i| i.target.as_ref()) {
+            let bind = input.use_key.as_deref().unwrap_or("USE");
+            let text = format!("Press [{bind}] to use the {}", target.label);
+            return Ok(Some((text, "world_interact".to_owned(), None)));
+        }
         if ps.cursor_hint <= 0 {
             return Ok(None);
         }
