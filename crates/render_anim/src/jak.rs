@@ -154,6 +154,7 @@ struct Host {
     held_last: u32,
     camera: Camera,
     starting: bool,
+    animator: crate::jak_pose::Animator,
 }
 
 impl Default for Host {
@@ -171,6 +172,7 @@ impl Default for Host {
                 idle: 0.0,
             },
             starting: false,
+            animator: crate::jak_pose::Animator::new(),
         }
     }
 }
@@ -226,6 +228,7 @@ fn stop(host: &mut Host, mode: &mut JakMode, authority: &mut net::AuthorityWorld
     mode.active = false;
     mode.camera = None;
     mode.board = None;
+    mode.skins = None;
     mode.shots.clear();
     mode.state.clear();
 }
@@ -523,7 +526,10 @@ fn update(
     }
     let lift = jak.control.draw_offset_y / TO_JAK;
     mode.root = body_matrix(jak, lift);
-    mode.board = jak.on_board().then(|| body_matrix(jak, lift * 0.5));
+    mode.board = jak
+        .on_board()
+        .then(|| mode.root.inverse() * body_matrix(jak, lift * 0.5));
+    mode.skins = assets::jak_model::local_jak().map(|model| host.animator.pose(model, jak));
     mode.shots = jak
         .projectiles
         .iter()

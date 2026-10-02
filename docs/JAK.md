@@ -1,8 +1,8 @@
 # Jak Mode
 
 Jak 3's JET-Board and Blaster, rewritten in Rust and played on any MW2 map or
-the Minecraft world. Press **K**, or type `jak on` in the console. Nothing
-extra is needed: no Jak 3 files, no OpenGOAL, no emulator.
+the Minecraft world. Press **K**, or type `jak on` in the console. It plays
+without Jak 3 files: the MW2 soldier and a slab stand in for Jak and his board.
 
 | keyboard | controller | Jak 3 button | action |
 |---|---|---|---|
@@ -23,6 +23,7 @@ extra is needed: no Jak 3 files, no OpenGOAL, no emulator.
 | collision | `jak_mode::collide` | swept spheres against triangles from the host: map clip collision, or the Minecraft blocks around Jak |
 | mode | [`crates/render_anim/src/jak.rs`](../crates/render_anim/src/jak.rs) | toggling, unit and axis conversion (1 m = 25 map units), input, follow camera, shots into blocks and mobs |
 | shots | [`render_frontend` fx](../crates/render_frontend/src/adapters/fx/system.rs) | each shot drawn as a tracer beam from its tail to its head |
+| model | [`assets::jak_model`](../crates/assets/src/jak_model.rs), [`jak_pose.rs`](../crates/render_anim/src/jak_pose.rs) | Jak, board and gun from the player's GLBs; each state plays Jak 3's animation, the board stance mixes turn, lean and duck as the board drives them |
 | parity | [`crates/approved_tests/src/jak_parity.rs`](../crates/approved_tests/src/jak_parity.rs) | `cargo test -p approved_tests jak_parity`: thrust curve, jump heights, hop timing, fire delay, shot flight and impact, sweeps |
 
 The movement is Jak 3's own, read from the OpenGOAL decompilation and rebuilt:
@@ -32,12 +33,18 @@ jump, zap, glancing off walls, get on and off, and the Blaster's draw, queue
 and fire delay. The board never stops by itself: released, it still pushes at
 0.4 of its thrust, so it cruises at about 10 m/s.
 
-A Blaster shot does 2 of Jak's damage; the world scales it by 12.5 to MW2's
-100 health, so a block takes it like a 25-damage bullet.
+A Blaster shot does 2 of Jak's damage, scaled by 12.5 to MW2's 100 health.
+
+## Jak's own model
+
+Export it from your own Jak 3 with OpenGOAL: in `jak3_config.jsonc` set
+`"rip_levels": true`, run Decompile, then copy from
+`decompiler_out/jak3/levels/` into a `jak-assets` folder beside `iw4l.exe`
+(or name the folder in `.env` as `IW4L_JAK_ASSETS=`): `jakb-normal-lod0.glb`
+(Jak), `jakb-lod0.glb` (his animations), `board-lod0.glb`, `gun-lod0.glb`.
 
 ## Not yet
 
-- The MW2 soldier stands in for Jak and a slab for the board; no Jak model,
-  animations or sounds. The camera is a plain follow camera.
-- Grinding, halfpipes, the turn-around, wall kicks and jump kicks, being hit.
-- Zap and spin damage, shots against MW2 players, the other guns.
+Sounds, the gun's own fire animation, Jak 3's camera (a follow camera for
+now), grinding, halfpipes, the turn-around, wall and jump kicks, being hit,
+zap and spin damage, shots against MW2 players, the other guns.

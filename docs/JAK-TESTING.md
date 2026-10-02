@@ -2,7 +2,8 @@
 
 Needs: system packages ([`BUILD.md`](BUILD.md)), your **MW2 PC multiplayer**
 files, and for the Minecraft map an internet connection and `curl` the first
-time. No Jak 3, OpenGOAL or Skate 3 files.
+time. Jak's own model is optional: see [`JAK.md`](JAK.md) for the four GLBs;
+without them the soldier and a slab stand in.
 
 ```bash
 git fetch origin claude/tender-einstein-92k9z2 && git checkout claude/tender-einstein-92k9z2
@@ -16,13 +17,14 @@ make map ZONE=minecraft:overworld CMDS='spawn assault; force_match_start; jak on
 Without `CMDS`, spawn and press **K** (or `` ` `` then `jak on`). On an MW2
 map the first start says "building Jak's collision for this map" for a few
 seconds. `iw4l-artifacts/logs/latest.log` then shows `Jak collision: N
-triangles`, `Jak Mode started`, `Jak: on the board`.
+triangles`, `Jak Mode started`, `Jak: on the board`, and with the GLBs at map
+load `Jak model: 289 clips, board true, gun true`.
 
 | check | do | expect |
 |---|---|---|
 | mode | K | third-person follow camera, no MW2 gun or reticle, yellow HUD bottom left with state and m/s |
 | walk, jump | WASD; Space tapped / held | walks; hops ~0.4 m / ~2.8 m |
-| board on | F (or right click, RT) | 0.66 s hop, a flat slab under the soldier, state `board-stance` |
+| board on | F (or right click, RT) | 0.66 s hop, the board (or slab) under him, state `board-stance`; with the GLBs he crouches on landing and leans into turns |
 | cruise | let go of everything | board keeps going at ~9.9 m/s |
 | top speed | hold W | climbs smoothly to ~24.5 m/s in about 5 s |
 | board jump | Space tapped / held | ~1 m / ~3.5 m |

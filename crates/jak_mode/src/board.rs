@@ -37,6 +37,8 @@ pub enum Danger {
 #[derive(Clone, Debug)]
 pub struct BoardInfo {
     pub latch: bool,
+    /// What the stance animation is driven by.
+    pub anim: crate::board_anim::BoardAnim,
     pub stick_off: bool,
     pub thrust_scale: f32,
     pub transv_max: f32,
@@ -107,6 +109,7 @@ impl Default for BoardInfo {
     fn default() -> Self {
         Self {
             latch: false,
+            anim: Default::default(),
             stick_off: false,
             thrust_scale: 1.0,
             transv_max: 0.0,
@@ -1152,7 +1155,9 @@ impl Jak {
             State::BoardStance | State::BoardDuckStance => {
                 self.control.no_normal_reset = false;
                 self.board.turn_anim_tilt = false;
+                self.board_anim_exit(next);
             }
+            State::BoardGetOn => self.board_anim_land(),
             State::BoardTrick(trick) => {
                 self.board.trick_z = 0.0;
                 match trick {
@@ -1231,11 +1236,13 @@ impl Jak {
                 if self.time_elapsed(self.state_time, duration) {
                     return Some(State::BoardStance);
                 }
+                self.board_anim_trans();
                 if self.board_on_ground() {
                     let tilt = self.board.turn_anim_tilt;
                     self.board_ground_check();
                     self.board.turn_anim_tilt = tilt;
                 }
+                self.board.anim.turn_targ *= 10.0;
                 None
             }
             State::BoardFlip => {
@@ -1345,6 +1352,7 @@ impl Jak {
             self.board.spin_ground_start_time = now;
         }
         self.board_smack_surface();
+        self.board_anim_trans();
         if self.board_on_ground() {
             self.board_ground_check();
             let mods = if duck {

@@ -35,7 +35,7 @@ pub use ui::{
 pub mod skate;
 pub use skate::SkateMode;
 pub mod jak;
-pub use jak::JakMode;
+pub use jak::{JakMode, JakSkins};
 pub mod minecraft_ui;
 pub mod pad;
 pub use pad::ActivePad;

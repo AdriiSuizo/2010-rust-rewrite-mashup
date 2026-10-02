@@ -427,6 +427,7 @@ fn sync_remote_bodies(
 struct PendingBodySkin<'a> {
     skate: Option<&'a frame::SkateMode>,
     jak_board: Option<Mat4>,
+    jak_skins: Option<std::sync::Arc<frame::JakSkins>>,
     is_bot: bool,
     persist_key: u32,
     transform: Transform,
@@ -911,6 +912,7 @@ impl<'a> RemotePoseFrame<'a> {
                     }
                     if self.jak.active && persist_key == self.jak.client {
                         job.jak_board = self.jak.board;
+                        job.jak_skins = self.jak.skins.clone();
                         job.gun = None;
                         job.attachments.clear();
                     }
@@ -945,6 +947,7 @@ fn remote_skin_action<'a>(
         SkinAfterPose::Blend => RemoteSkinAction::Blend(PendingBodySkin {
             skate: None,
             jak_board: None,
+            jak_skins: None,
             is_bot: false,
             persist_key,
             transform: *transform,
@@ -1180,6 +1183,8 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
     let mut geom = job.dest;
     if let Some(model) = assets::bot_model::local_bot_model().filter(|_| job.is_bot) {
         super::bot_model::skin(model, &job.body.skel, &job.matrices, &mut geom)?;
+    } else if let Some(skins) = &job.jak_skins {
+        crate::jak_pose::skin(skins, &mut geom);
     } else {
         skin_slot_into(
             &job.body.skel,
@@ -1248,7 +1253,7 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
     if let Some(skate) = job.skate {
         crate::skate::rig::board(skate, &mut geom)?;
     }
-    if let Some(board) = job.jak_board {
+    if let Some(board) = job.jak_board.filter(|_| job.jak_skins.is_none()) {
         crate::jak::board_mesh(board, &mut geom);
     }
     let (radii, radius_parents) = radii(

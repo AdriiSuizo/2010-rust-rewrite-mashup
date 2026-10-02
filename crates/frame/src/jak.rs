@@ -1,4 +1,15 @@
+use std::sync::Arc;
+
 use bevy::prelude::*;
+
+/// Skinning matrices for Jak's own model, his board and his gun, one per
+/// joint in the body's frame; empty when that part is not shown.
+#[derive(Clone, Debug, Default)]
+pub struct JakSkins {
+    pub body: Vec<Mat4>,
+    pub board: Vec<Mat4>,
+    pub gun: Vec<Mat4>,
+}
 
 /// Jak Mode as the presentation sees it. The gameplay is `jak_mode`'s; this
 /// is what the body, the camera and the HUD draw from.
@@ -10,8 +21,11 @@ pub struct JakMode {
     pub client: u32,
     /// Jak's body, feet at the origin, in map space.
     pub root: Mat4,
-    /// The board under his feet while he rides it, in map space.
+    /// The placeholder board under his feet while he rides it, in the
+    /// body's frame.
     pub board: Option<Mat4>,
+    /// Jak's own model, posed, when the player's exported model is present.
+    pub skins: Option<Arc<JakSkins>>,
     pub camera: Option<(Transform, f32)>,
     /// Shots in flight: head and the end of the beam behind it, map space.
     pub shots: Vec<(Vec3, Vec3)>,

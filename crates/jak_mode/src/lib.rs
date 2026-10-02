@@ -6,6 +6,7 @@
 //! second) and runs at the 60 Hz the game's movement was tuned at; the host
 //! converts at the boundary and feeds one [`Jak::step`] per frame.
 pub mod board;
+pub mod board_anim;
 pub mod collide;
 pub mod control;
 pub mod gun;
@@ -19,6 +20,7 @@ pub use glam;
 use glam::{Quat, Vec3};
 
 pub use board::{BoardInfo, BoardTrick};
+pub use board_anim::BoardAnim;
 pub use collide::{
     CollideCache, CollideWorld, EmptyWorld, Pat, PatMaterial, PatMode, Tri, TriangleGrid,
 };
@@ -230,6 +232,12 @@ impl Jak {
             if guard > 8 {
                 break;
             }
+        }
+        if matches!(
+            self.state,
+            State::BoardStance | State::BoardDuckStance | State::BoardTurnTo { .. }
+        ) {
+            self.board_turn_anim();
         }
         self.post(world);
         if let Some(next) = self.pending.take() {
