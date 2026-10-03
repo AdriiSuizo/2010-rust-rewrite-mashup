@@ -162,6 +162,7 @@ struct Host {
     collision: Collision,
     clip: Option<Arc<asset_world::ClipCollision>>,
     accumulated: f32,
+    look_pending: Vec2,
     latched: u32,
     held_last: u32,
     camera: Camera,
@@ -176,6 +177,7 @@ impl Default for Host {
             collision: Collision::None,
             clip: None,
             accumulated: 0.0,
+            look_pending: Vec2::ZERO,
             latched: 0,
             held_last: 0,
             camera: Camera {
@@ -237,6 +239,7 @@ fn stop(host: &mut Host, mode: &mut JakMode, authority: &mut net::AuthorityWorld
         .set_external_motion(sim::ClientId(mode.client), false);
     host.jak = None;
     host.starting = false;
+    host.look_pending = Vec2::ZERO;
     mode.active = false;
     mode.camera = None;
     mode.board = None;
@@ -451,6 +454,7 @@ fn update(
         host.camera.yaw = ps.viewangles[1];
         host.camera.pitch = -12.0;
         host.accumulated = 0.0;
+        host.look_pending = Vec2::ZERO;
         host.latched = 0;
         host.held_last = 0;
         host.jak = Some(jak);
@@ -480,6 +484,7 @@ fn update(
             look += m.delta * 0.15;
         }
     }
+    host.look_pending += look;
     let dt = time.delta_secs().min(0.1);
     host.accumulated = (host.accumulated + dt).min(0.25);
     let voxel = sim::voxel::active();
@@ -493,6 +498,7 @@ fn update(
         let Some(jak) = host.jak.as_mut() else {
             break;
         };
+        let look = std::mem::take(&mut host.look_pending);
         jak.camera = follow_camera(&mut host.camera, jak, look, STEP).1;
         let input = PadInput {
             held,
@@ -520,7 +526,6 @@ fn update(
         };
         jak.step(&input, world, Some(&mut mobs));
         events.extend(jak.take_events());
-        look = Vec2::ZERO;
     }
     let Some(jak) = host.jak.as_ref() else {
         return;
